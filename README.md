@@ -2,7 +2,7 @@
 
 [![Build Status](https://github.com/Gilfeather/furnace/actions/workflows/ci.yml/badge.svg)](https://github.com/Gilfeather/furnace/actions/workflows/ci.yml)
 [![Binary Size](https://img.shields.io/badge/binary%20size-2.3MB-blue)](https://github.com/Gilfeather/furnace)
-[![Inference Time](https://img.shields.io/badge/inference-~0.5ms-brightgreen)](https://github.com/Gilfeather/furnace)
+[![Inference Time](https://img.shields.io/badge/inference-~0.5ms*-brightgreen)](https://github.com/Gilfeather/furnace)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/Gilfeather/furnace/blob/main/LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/Gilfeather/furnace?style=social)](https://github.com/Gilfeather/furnace/stargazers)
 
@@ -63,14 +63,26 @@ curl -X POST http://localhost:3000/predict \
 
 ## 📊 Performance
 
+⚠️ **Important Note**: Current benchmarks are based on a simple MLP model (784→128→10, ~0.5MB). 
+Real-world model performance will vary significantly based on model size and complexity.
+
+### Current Benchmarks (Simple MLP Model)
 | Metric | Value |
 |--------|-------|
 | Binary Size | **2.3MB** |
+| Model Size | **~0.5MB** |
 | Inference Time | **~0.5ms** |
 | Memory Usage | **<50MB** |
 | Startup Time | **<100ms** |
 
-*Tested with MNIST-like model (784→128→10) on standard hardware*
+### 🚧 Planned Benchmarks (Coming Soon)
+| Model Type | Size | Inference Time | Status |
+|------------|------|----------------|---------|
+| ResNet-18 | ~45MB | TBD | 🔄 In Progress |
+| BERT-base | ~110MB | TBD | 📋 Planned |
+| YOLO v8n | ~6MB | TBD | 📋 Planned |
+
+*Current tests: MNIST-like MLP on standard hardware. Production model benchmarks coming soon.*
 
 ## � API Enpdpoints
 
