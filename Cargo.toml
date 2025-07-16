@@ -70,12 +70,18 @@ name = "inference_benchmark"
 harness = false
 
 [profile.release]
-# Enable optimizations for smaller binary size and better performance
+# Maximum performance optimizations
 opt-level = 3
-lto = true
+lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+debug = false
+overflow-checks = false
+
+[profile.release.build-override]
+opt-level = 3
+codegen-units = 1
 
 [profile.dev]
 # Faster compilation for development

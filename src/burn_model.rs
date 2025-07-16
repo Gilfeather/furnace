@@ -1,11 +1,11 @@
+use burn::backend::ndarray::NdArray;
 use burn::{
     config::Config,
     module::Module,
     nn::{Linear, LinearConfig, Relu},
+    record::CompactRecorder,
     tensor::{backend::Backend, Tensor},
-    record::{CompactRecorder},
 };
-use burn::backend::ndarray::NdArray;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -32,10 +32,8 @@ pub struct Mlp<B: Backend> {
 impl<B: Backend> Mlp<B> {
     /// Create a new MLP model
     pub fn new(config: &MlpConfig, device: &B::Device) -> Self {
-        let linear1 = LinearConfig::new(config.input_size, config.hidden_size)
-            .init(device);
-        let linear2 = LinearConfig::new(config.hidden_size, config.output_size)
-            .init(device);
+        let linear1 = LinearConfig::new(config.input_size, config.hidden_size).init(device);
+        let linear2 = LinearConfig::new(config.hidden_size, config.output_size).init(device);
         let activation = Relu::new();
 
         Self {
@@ -79,7 +77,7 @@ impl BurnModelContainer {
     pub fn new(config: MlpConfig, name: String) -> Self {
         let device = <B as Backend>::Device::default();
         let model = Mlp::new(&config, &device);
-        
+
         let metadata = BurnModelMetadata {
             name,
             version: "1.0.0".to_string(),
@@ -101,7 +99,7 @@ impl BurnModelContainer {
     #[allow(dead_code)]
     pub fn save<P: AsRef<Path>>(&self, path: P) -> FurnaceResult<()> {
         let recorder = CompactRecorder::new();
-        
+
         // Save model weights
         let model_path = path.as_ref().with_extension("burn");
         let model = self.model.lock().unwrap();
@@ -116,13 +114,12 @@ impl BurnModelContainer {
         // Save metadata
         let metadata_path = path.as_ref().with_extension("json");
         let metadata_json = serde_json::to_string_pretty(&self.metadata)
-            .map_err(|e| ModelError::InvalidFormat(format!("Failed to serialize metadata: {}", e)))?;
-        
-        std::fs::write(&metadata_path, metadata_json)
-            .map_err(|e| ModelError::LoadFailed {
-                path: metadata_path,
-                source: Box::new(e),
-            })?;
+            .map_err(|e| ModelError::InvalidFormat(format!("Failed to serialize metadata: {e}")))?;
+
+        std::fs::write(&metadata_path, metadata_json).map_err(|e| ModelError::LoadFailed {
+            path: metadata_path,
+            source: Box::new(e),
+        })?;
 
         Ok(())
     }
@@ -133,14 +130,14 @@ impl BurnModelContainer {
         let metadata_path = model_path.with_extension("json");
 
         // Load metadata first
-        let metadata_content = std::fs::read_to_string(&metadata_path)
-            .map_err(|e| ModelError::LoadFailed {
+        let metadata_content =
+            std::fs::read_to_string(&metadata_path).map_err(|e| ModelError::LoadFailed {
                 path: metadata_path.clone(),
                 source: Box::new(e),
             })?;
 
         let metadata: BurnModelMetadata = serde_json::from_str(&metadata_content)
-            .map_err(|e| ModelError::InvalidFormat(format!("Failed to parse metadata: {}", e)))?;
+            .map_err(|e| ModelError::InvalidFormat(format!("Failed to parse metadata: {e}")))?;
 
         // Create config from metadata
         let config = MlpConfig::new(
@@ -153,7 +150,7 @@ impl BurnModelContainer {
         let device = <B as Backend>::Device::default();
         let model = Mlp::new(&config, &device);
         let recorder = CompactRecorder::new();
-        
+
         // Try to load from .mpk file
         let mpk_path = path.as_ref().with_extension("mpk");
         let model = model
@@ -212,14 +209,14 @@ mod tests {
     fn test_model_forward() {
         let container = create_sample_model().unwrap();
         let device = <B as Backend>::Device::default();
-        
+
         // Create dummy input
         let input_data = vec![0.1; 784];
         let input = Tensor::from_data(TensorData::new(input_data, [1, 784]), &device);
-        
+
         let output = container.predict(input);
         let output_shape = output.shape();
-        
+
         assert_eq!(output_shape.dims, [1, 10]);
     }
 
@@ -227,24 +224,33 @@ mod tests {
     fn test_model_save_load() {
         let temp_dir = tempdir().unwrap();
         let model_path = temp_dir.path().join("test_model");
-        
+
         // Create and save model
         let original_container = create_sample_model().unwrap();
         original_container.save(&model_path).unwrap();
-        
+
         // Load model
         let loaded_container = BurnModelContainer::load(&model_path).unwrap();
-        
+
         // Verify metadata
-        assert_eq!(loaded_container.metadata.name, original_container.metadata.name);
-        assert_eq!(loaded_container.metadata.input_size, original_container.metadata.input_size);
-        assert_eq!(loaded_container.metadata.output_size, original_container.metadata.output_size);
-        
+        assert_eq!(
+            loaded_container.metadata.name,
+            original_container.metadata.name
+        );
+        assert_eq!(
+            loaded_container.metadata.input_size,
+            original_container.metadata.input_size
+        );
+        assert_eq!(
+            loaded_container.metadata.output_size,
+            original_container.metadata.output_size
+        );
+
         // Test inference
         let device = <B as Backend>::Device::default();
         let input_data = vec![0.1; 784];
         let input = Tensor::from_data(TensorData::new(input_data, [1, 784]), &device);
-        
+
         let output = loaded_container.predict(input);
         assert_eq!(output.shape().dims, [1, 10]);
     }

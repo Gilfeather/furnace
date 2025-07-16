@@ -116,10 +116,10 @@ pub async fn start_server(host: &str, port: u16, model: Model) -> Result<()> {
         .layer(cors)
         .with_state(app_state);
 
-    let bind_addr = format!("{}:{}", host, port);
+    let bind_addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
-        .map_err(|e| ApiError::ServerStartup(format!("Failed to bind to {}: {}", bind_addr, e)))?;
+        .map_err(|e| ApiError::ServerStartup(format!("Failed to bind to {bind_addr}: {e}")))?;
 
     info!("Server running on http://{}", bind_addr);
 
@@ -129,7 +129,7 @@ pub async fn start_server(host: &str, port: u16, model: Model) -> Result<()> {
     // Handle shutdown signals
     tokio::select! {
         result = server => {
-            result.map_err(|e| ApiError::ServerStartup(format!("Server error: {}", e)))?;
+            result.map_err(|e| ApiError::ServerStartup(format!("Server error: {e}")))?;
         }
         _ = shutdown_signal() => {
             info!("Shutdown signal received, stopping server gracefully");
@@ -234,7 +234,7 @@ async fn predict(State(state): State<AppState>, Json(payload): Json<PredictReque
                     return create_error_response(
                         StatusCode::BAD_REQUEST,
                         "INPUT_VALIDATION_FAILED",
-                        &format!("Batch item {} validation failed: {}", i, e),
+                        &format!("Batch item {i} validation failed: {e}"),
                         Some(serde_json::json!({
                             "expected_shape": state.model.get_info().input_spec.shape,
                             "received_size": input.len(),
