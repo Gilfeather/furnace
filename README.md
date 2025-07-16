@@ -1,8 +1,17 @@
 # 🔥 Furnace
 
+[![Build Status](https://github.com/Gilfeather/furnace/actions/workflows/ci.yml/badge.svg)](https://github.com/Gilfeather/furnace/actions/workflows/ci.yml)
+[![Binary Size](https://img.shields.io/badge/binary%20size-2.3MB-blue)](https://github.com/Gilfeather/furnace)
+[![Inference Time](https://img.shields.io/badge/inference-~0.5ms-brightgreen)](https://github.com/Gilfeather/furnace)
+[![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/Gilfeather/furnace/blob/main/LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/Gilfeather/furnace?style=social)](https://github.com/Gilfeather/furnace/stargazers)
+
 **Blazingly fast ML inference server powered by Rust and Burn framework**
 
 A high-performance, lightweight HTTP inference server that serves machine learning models with zero Python dependencies. Built with Rust for maximum performance and the Burn framework for native ML operations.
+
+
+
 
 ## ✨ Features
 
@@ -57,7 +66,7 @@ curl -X POST http://localhost:3000/predict \
 | Metric | Value |
 |--------|-------|
 | Binary Size | **2.3MB** |
-| Inference Time | **~3ms** |
+| Inference Time | **~0.5ms** |
 | Memory Usage | **<50MB** |
 | Startup Time | **<100ms** |
 
