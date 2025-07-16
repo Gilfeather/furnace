@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.75-slim as builder
+FROM rust:1.88-slim as builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -10,16 +10,20 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy manifests
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 
-# Create a dummy main to build dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs
+# Create dummy files to build dependencies
+RUN mkdir -p src benches tests && \
+    echo "fn main() {}" > src/main.rs && \
+    echo "fn main() {}" > benches/inference_benchmark.rs && \
+    echo "fn main() {}" > tests/integration_tests.rs
 
-# Build dependencies (this will be cached if Cargo.toml doesn't change)
-RUN cargo build --release && rm -rf src
+# Generate lock file and build dependencies (this will be cached if Cargo.toml doesn't change)
+RUN cargo build --release && rm -rf src benches tests
 
 # Copy source code
 COPY src/ src/
+COPY benches/ benches/
 COPY tests/ tests/
 
 # Build the actual application
@@ -31,6 +35,7 @@ FROM debian:bookworm-slim
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -51,9 +56,9 @@ WORKDIR /app
 # Expose port
 EXPOSE 3000
 
-# Health check
+# Health check (using wget since curl might not be available)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:3000/healthz || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/healthz || exit 1
 
 # Default command
 ENTRYPOINT ["furnace"]
