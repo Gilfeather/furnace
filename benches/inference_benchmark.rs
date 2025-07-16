@@ -4,8 +4,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 fn create_test_model() -> Model {
-    let path = PathBuf::from("test_model.burn");
-    load_model(&path).expect("Failed to load test model")
+    // Try to load sample model first, fallback to test model
+    let sample_path = PathBuf::from("sample_model");
+    if sample_path.with_extension("mpk").exists() {
+        load_model(&sample_path).expect("Failed to load sample model")
+    } else {
+        let test_path = PathBuf::from("test_model.burn");
+        load_model(&test_path).expect("Failed to load test model")
+    }
 }
 
 fn bench_single_inference(c: &mut Criterion) {

@@ -137,6 +137,9 @@ jobs:
           target
         key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
 
+    - name: Create sample model for benchmarks
+      run: cargo run --bin create_sample_model
+
     - name: Run benchmarks
       run: cargo bench --all-features
 

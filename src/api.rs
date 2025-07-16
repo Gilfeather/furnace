@@ -73,6 +73,7 @@ pub struct ErrorResponse {
     pub timestamp: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct ApiResponse<T> {
     pub data: Option<T>,
