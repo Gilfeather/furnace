@@ -4,7 +4,7 @@
 
 The furnace inference server is designed as a lightweight, high-performance HTTP API server that loads and serves Burn-based machine learning models. The architecture follows a modular approach with clear separation between CLI handling, model management, and HTTP API layers.
 
-The system uses Rust's async/await capabilities with Tokio runtime for concurrent request handling, Axum for HTTP routing, and Burn framework for model operations. The design prioritizes performance, type safety, and error handling.
+The system uses Rust's async/await capabilities with Tokio runtime for concurrent request handling, Axum for HTTP routing, and Burn framework for model operations. The design prioritizes performance through advanced Burn optimizations (kernel fusion, autotuning cache), backend flexibility (CPU/GPU), concurrency control with backpressure, and optimized I/O processing.
 
 ## Architecture
 
@@ -55,6 +55,7 @@ sequenceDiagram
 - Initialize logging with tracing
 - Coordinate model loading and server startup
 - Handle startup errors gracefully
+- Configure backend selection and optimization settings
 
 **Key Interfaces:**
 ```rust
@@ -62,6 +63,10 @@ struct CliArgs {
     model_path: PathBuf,
     host: String,
     port: u16,
+    backend: Option<String>,
+    max_concurrent_requests: Option<usize>,
+    enable_kernel_fusion: bool,
+    enable_autotuning: bool,
 }
 
 async fn main() -> Result<(), Box<dyn std::error::Error>>
@@ -317,12 +322,21 @@ mod integration_tests {
 3. **Tensor Operations**: Leverage Burn's tensor abstractions for input/output handling
 4. **Memory Management**: Efficient tensor memory allocation and cleanup
 
+### Burn Framework Advanced Features
+
+1. **Kernel Fusion**: Enable fusion of operations like GELU and MatMul to reduce memory copy overhead and GPU kernel launch overhead
+2. **Autotuning Cache**: Utilize Burn's autotuning capabilities to cache optimal kernel configurations for different matrix sizes
+3. **Backend Selection**: Support multiple backends (CPU, WGPU, Metal, CUDA) with automatic fallback mechanisms
+4. **Async Execution**: Leverage Burn's async backend capabilities for non-blocking inference operations
+
 ### Performance Optimizations
 
-1. **Async Processing**: Non-blocking I/O for HTTP requests
-2. **Connection Pooling**: Reuse HTTP connections where possible
-3. **Memory Mapping**: Consider memory-mapped model loading for large models
-4. **Batch Processing**: Support for batched inference requests
+1. **SIMD JSON Processing**: Use simd-json for high-performance JSON parsing and serialization
+2. **Zero-Copy Operations**: Implement zero-copy serialization using bytes::Bytes for efficient memory usage
+3. **Concurrency Control**: Implement semaphore-based request limiting with backpressure handling
+4. **Memory Mapping**: Consider memory-mapped model loading for large models
+5. **Connection Pooling**: Reuse HTTP connections where possible
+6. **Streaming Processing**: Support streaming JSON for large payloads
 
 ### Security Considerations
 

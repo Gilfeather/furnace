@@ -2,7 +2,7 @@
 
 ## Introduction
 
-furnaceは、Rust製のBurnベース推論サーバです。Pythonに依存せず、単一バイナリとして動作し、HTTP APIを通じて機械学習モデルの推論サービスを提供します。このプロジェクトのSprint 1では、CLIによるモデルロード機能と基本的なHTTP APIエンドポイントの実装を行います。
+furnaceは、Rust製のBurnベース推論サーバです。Pythonに依存せず、単一バイナリとして動作し、HTTP APIを通じて機械学習モデルの推論サービスを提供します。このプロジェクトでは、CLIによるモデルロード機能、基本的なHTTP APIエンドポイント、そしてBurnの高度なバックエンド・最適化機能（kernel fusion、autotuning cache、async backend）を活用した高性能推論システムの実装を行います。
 
 ## Requirements
 
@@ -96,3 +96,58 @@ furnaceは、Rust製のBurnベース推論サーバです。Pythonに依存せ�
 2. WHEN required fields are missing from the request THEN the system SHALL return a 400 Bad Request with validation error
 3. WHEN input array dimensions don't match model expectations THEN the system SHALL return a 400 Bad Request with shape mismatch error
 4. WHEN input data types are incorrect THEN the system SHALL return a 400 Bad Request with type validation error
+
+### Requirement 9
+
+**User Story:** As a developer, I want to leverage Burn's advanced optimization features (kernel fusion, autotuning cache), so that inference performance is maximized.
+
+#### Acceptance Criteria
+
+1. WHEN the model is loaded THEN the system SHALL enable kernel fusion for operations like GELU and MatMul to reduce memory copy overhead
+2. WHEN inference is performed THEN the system SHALL utilize autotuning cache to optimize matrix operations based on size
+3. WHEN similar models are loaded THEN the system SHALL reuse cached optimization settings for improved performance
+4. WHEN optimization features are enabled THEN the system SHALL log the optimization status during startup
+
+### Requirement 10
+
+**User Story:** As a developer, I want to configure different Burn backends (CPU, WGPU, Metal, CUDA), so that I can optimize performance for different hardware environments.
+
+#### Acceptance Criteria
+
+1. WHEN the --backend argument is provided THEN the system SHALL initialize the specified Burn backend
+2. WHEN GPU backends are available THEN the system SHALL prefer GPU over CPU for inference
+3. WHEN a backend fails to initialize THEN the system SHALL fallback to CPU backend with appropriate logging
+4. WHEN backend information is requested THEN the system SHALL include active backend in /model/info response
+
+### Requirement 11
+
+**User Story:** As a system administrator, I want request concurrency control with backpressure handling, so that the server remains stable under high load.
+
+#### Acceptance Criteria
+
+1. WHEN concurrent requests exceed the configured limit THEN the system SHALL return 503 Service Unavailable
+2. WHEN the --max-concurrent-requests argument is provided THEN the system SHALL limit simultaneous inference requests
+3. WHEN requests are queued THEN the system SHALL implement proper backpressure to prevent memory exhaustion
+4. WHEN load is high THEN the system SHALL log concurrency metrics and queue status
+
+### Requirement 12
+
+**User Story:** As a developer, I want optimized JSON parsing and response generation, so that I/O overhead is minimized.
+
+#### Acceptance Criteria
+
+1. WHEN JSON requests are processed THEN the system SHALL use SIMD-optimized JSON parsing (simd-json)
+2. WHEN responses are generated THEN the system SHALL use zero-copy serialization where possible
+3. WHEN large payloads are handled THEN the system SHALL use streaming JSON processing
+4. WHEN binary data is transferred THEN the system SHALL support efficient byte transfer using bytes::Bytes
+
+### Requirement 13
+
+**User Story:** As a developer, I want performance monitoring and metrics collection, so that I can analyze and optimize inference performance.
+
+#### Acceptance Criteria
+
+1. WHEN inference is performed THEN the system SHALL measure and log inference latency (p50, p95, p99)
+2. WHEN requests are processed THEN the system SHALL track memory usage during inference
+3. WHEN the server is running THEN the system SHALL expose performance metrics via /metrics endpoint
+4. WHEN optimization features are used THEN the system SHALL report kernel fusion and cache hit rates

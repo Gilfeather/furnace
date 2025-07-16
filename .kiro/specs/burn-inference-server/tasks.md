@@ -1,26 +1,27 @@
 # Implementation Plan
 
-- [ ] 1. Set up error handling and core types
+- [x] 1. Set up error handling and core types
   - Create comprehensive error types using thiserror for model, API, and CLI errors
   - Implement structured error responses with consistent JSON format
   - Add error conversion traits and proper error propagation
   - _Requirements: 1.3, 2.4, 5.4, 6.5, 8.1, 8.2, 8.3, 8.4_
 
-- [ ] 2. Implement Burn model loading and management
-  - [ ] 2.1 Create BurnModel trait and model abstractions
+- [x] 2. Implement Burn model loading and management
+  - [x] 2.1 Create BurnModel trait and model abstractions
     - Define the BurnModel trait with predict method and metadata accessors
     - Implement ModelInfo, TensorSpec, and ModelMetadata structures
     - Create model validation functions for .burn file format
     - _Requirements: 1.1, 1.2, 4.2_
 
-  - [ ] 2.2 Implement actual .burn model loading
+  - [x] 2.2 Implement actual .burn model loading with advanced backend support
     - Research and implement Burn model deserialization from .burn files
-    - Add proper backend selection (CPU/GPU) based on availability
+    - Add backend selection (CPU, WGPU, Metal, CUDA) with fallback mechanisms
     - Implement model file validation and error handling
     - Add model metadata extraction from loaded models
-    - _Requirements: 1.1, 1.2, 1.3, 6.5_
+    - Enable kernel fusion and autotuning cache during model initialization
+    - _Requirements: 1.1, 1.2, 1.3, 6.5, 9.1, 9.2, 10.1, 10.2, 10.3_
 
-  - [ ] 2.3 Implement model inference functionality
+  - [x] 2.3 Implement model inference functionality
     - Create tensor input validation and shape checking
     - Implement the predict method with proper tensor conversions
     - Add input preprocessing and output postprocessing
@@ -30,10 +31,13 @@
 - [ ] 3. Enhance CLI argument handling and validation
   - [ ] 3.1 Improve CLI argument parsing and validation
     - Add comprehensive input validation for model path, host, and port
+    - Implement backend selection argument with validation (CPU, WGPU, Metal, CUDA)
+    - Add max-concurrent-requests argument for concurrency control
+    - Add optimization flags for kernel fusion and autotuning
     - Implement proper error messages for invalid arguments
     - Add help text and usage examples
     - Validate model file existence and permissions
-    - _Requirements: 1.1, 1.3, 1.4, 5.1, 5.2, 5.4, 5.5_
+    - _Requirements: 1.1, 1.3, 1.4, 5.1, 5.2, 5.4, 5.5, 10.1, 11.2_
 
   - [ ] 3.2 Implement structured logging setup
     - Configure tracing subscriber with appropriate log levels
@@ -102,17 +106,47 @@
     - Test error scenarios and graceful degradation
     - _Requirements: 1.1, 1.2, 1.3, 2.1, 2.2, 5.1, 5.2, 6.1, 6.2_
 
-- [ ] 7. Add performance optimizations and monitoring
-  - [ ] 7.1 Implement request timing and performance metrics
-    - Add inference timing measurement and reporting
-    - Implement request/response logging with performance data
-    - Add memory usage monitoring during inference
-    - Create performance benchmarking utilities
-    - _Requirements: 2.1, 6.2, 6.3_
+- [ ] 7. Implement concurrency control and backpressure handling
+  - [ ] 7.1 Add request concurrency limiting with semaphores
+    - Implement tower::limit::ConcurrencyLimitLayer for request limiting
+    - Add semaphore-based concurrency control with configurable limits
+    - Implement proper 503 Service Unavailable responses when limits exceeded
+    - Add concurrency metrics logging and monitoring
+    - _Requirements: 11.1, 11.2, 11.3, 11.4_
 
-  - [ ] 7.2 Optimize model loading and memory usage
-    - Implement efficient model loading strategies
-    - Add memory-mapped file loading for large models
-    - Optimize tensor memory allocation and cleanup
-    - Add model caching and reuse mechanisms
-    - _Requirements: 1.1, 1.2, 2.1_
+  - [ ] 7.2 Implement backpressure handling and queue management
+    - Add request queue management to prevent memory exhaustion
+    - Implement proper backpressure strategies for high load scenarios
+    - Add queue status monitoring and logging
+    - Test system stability under high concurrent load
+    - _Requirements: 11.3, 11.4_
+
+- [ ] 8. Add SIMD JSON processing and I/O optimizations
+  - [ ] 8.1 Implement SIMD-optimized JSON parsing
+    - Replace standard serde_json with simd-json for request parsing
+    - Implement zero-copy JSON deserialization where possible
+    - Add streaming JSON processing for large payloads
+    - Benchmark JSON parsing performance improvements
+    - _Requirements: 12.1, 12.3_
+
+  - [ ] 8.2 Optimize response generation and memory usage
+    - Implement zero-copy serialization using bytes::Bytes
+    - Add efficient byte transfer for binary data
+    - Optimize memory allocation patterns for request/response handling
+    - Test memory usage under various payload sizes
+    - _Requirements: 12.2, 12.4_
+
+- [ ] 9. Add performance monitoring and metrics collection
+  - [ ] 9.1 Implement comprehensive performance metrics
+    - Add inference latency measurement (p50, p95, p99)
+    - Implement memory usage tracking during inference
+    - Add kernel fusion and cache hit rate reporting
+    - Create /metrics endpoint for performance data exposure
+    - _Requirements: 13.1, 13.2, 13.3, 13.4_
+
+  - [ ] 9.2 Add performance benchmarking and optimization reporting
+    - Implement request timing and performance logging
+    - Add optimization status reporting during startup
+    - Create performance benchmarking utilities for load testing
+    - Add performance regression testing capabilities
+    - _Requirements: 9.4, 13.1, 13.4_
