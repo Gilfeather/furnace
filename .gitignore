@@ -107,3 +107,7 @@ docker-compose.override.yml
 
 # Backup files
 *.orig
+
+# Nix
+/result
+/.direnv
