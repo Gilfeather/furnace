@@ -1,0 +1,100 @@
+[package]
+name = "furnace"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Furnace Contributors"]
+description = "🔥 High-performance Rust ML inference server powered by Burn framework"
+documentation = "https://docs.rs/furnace"
+homepage = "https://github.com/yourusername/furnace"
+repository = "https://github.com/yourusername/furnace"
+license = "MIT"
+keywords = ["machine-learning", "inference", "server", "rust", "burn"]
+categories = ["web-programming::http-server", "science"]
+readme = "README.md"
+exclude = [
+    ".github/",
+    "docs/",
+    "*.md",
+    ".gitignore",
+    ".dockerignore",
+    "Dockerfile",
+    "deny.toml",
+]
+
+[[bin]]
+name = "furnace"
+path = "src/main.rs"
+
+[dependencies]
+# ML Framework
+burn = { version = "0.17", features = ["train", "std", "ndarray"] }
+ndarray = "0.16"
+
+# Web Framework
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+tokio = { version = "1.46", features = ["full"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error Handling
+thiserror = "2.0"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+# Testing utilities
+tempfile = "3.12"
+reqwest = { version = "0.12", features = ["json"] }
+tower = { version = "0.5", features = ["util"] }
+
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+
+
+
+[[bench]]
+name = "inference_benchmark"
+harness = false
+
+[profile.release]
+# Enable optimizations for smaller binary size and better performance
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+# Faster compilation for development
+opt-level = 0
+debug = true
+split-debuginfo = "unpacked"
+
+[profile.test]
+# Better debugging for tests
+opt-level = 0
+debug = true
+
+[profile.bench]
+# Optimize for benchmarks
+opt-level = 3
+debug = false
+lto = true
+
+# The profile that 'cargo dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
