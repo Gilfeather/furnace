@@ -153,6 +153,36 @@ Implement the `BurnModel` trait in `src/burn_model.rs` to add support for your o
 └─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
+## 📋 Roadmap
+
+### 🚀 Upcoming Features
+
+#### High Priority
+- 📦 **Batch Inference Endpoint** (`/batch`) - Process multiple inputs in a single request
+- 🎯 **GPU Support** - Burn-wgpu backend for accelerated inference
+- 🔒 **HTTPS Support** - TLS encryption for production deployments
+
+#### Medium Priority  
+- 🔄 **Hot Model Reload** - Update models without server restart
+- 📊 **Enhanced Metrics** - Prometheus/OpenTelemetry integration
+- 🐳 **Docker Optimization** - Multi-stage builds and smaller images
+- 🔧 **Configuration Management** - YAML/TOML config file support
+
+#### Future Enhancements
+- 🌐 **Model Registry Integration** - HuggingFace Hub, MLflow support
+- 🔀 **Load Balancing** - Multiple model instances
+- 📈 **Auto-scaling** - Dynamic resource allocation
+- 🧪 **A/B Testing** - Model version comparison
+
+### 🤝 Get Involved
+
+We welcome contributions! Check out our [good first issues](https://github.com/Gilfeather/furnace/labels/good%20first%20issue) to get started.
+
+- 💡 **Feature Requests**: Open an issue with the `enhancement` label
+- 🐛 **Bug Reports**: Use the `bug` label and provide reproduction steps  
+- 📚 **Documentation**: Help improve our docs and examples
+- 🧪 **Testing**: Add test cases and benchmarks
+
 ## 🤝 Contributing
 
 1. Fork the repository

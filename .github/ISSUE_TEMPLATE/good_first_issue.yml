@@ -1,0 +1,66 @@
+name: 🌟 Good First Issue
+description: A beginner-friendly issue for new contributors
+title: "[Good First Issue]: "
+labels: ["good first issue", "help wanted"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This template is for maintainers to create beginner-friendly issues.
+        
+        **For new contributors**: Look for existing issues with the "good first issue" label instead of creating new ones.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Issue Description
+      description: Clear description of what needs to be done
+      placeholder: This issue involves...
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: What needs to be completed for this issue to be considered done?
+      placeholder: |
+        - [ ] Implement feature X
+        - [ ] Add tests for feature X
+        - [ ] Update documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: guidance
+    attributes:
+      label: Implementation Guidance
+      description: Helpful hints for new contributors
+      placeholder: |
+        - Look at file `src/example.rs` for similar patterns
+        - The function should be added to the `api` module
+        - Don't forget to add error handling
+    validations:
+      required: true
+
+  - type: dropdown
+    id: difficulty
+    attributes:
+      label: Estimated Difficulty
+      description: How difficult is this issue for a beginner?
+      options:
+        - Beginner - 1-2 hours
+        - Easy - Half day
+        - Medium - 1-2 days
+    validations:
+      required: true
+
+  - type: textarea
+    id: resources
+    attributes:
+      label: Helpful Resources
+      description: Links to documentation, examples, or related issues
+      placeholder: |
+        - [Rust documentation](https://doc.rust-lang.org/)
+        - [Burn framework docs](https://burn.dev/)
+        - Related issue: #123
