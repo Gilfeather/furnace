@@ -26,8 +26,6 @@ pub struct OptimizationInfo {
 
 type B = NdArray<f32>;
 
-
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub name: String,
@@ -232,7 +230,11 @@ impl Model {
         self.predict_batch_with_timeout(inputs, None)
     }
 
-    pub fn predict_batch_with_timeout(&self, inputs: Vec<Vec<f32>>, timeout_ms: Option<u64>) -> Result<Vec<Vec<f32>>> {
+    pub fn predict_batch_with_timeout(
+        &self,
+        inputs: Vec<Vec<f32>>,
+        timeout_ms: Option<u64>,
+    ) -> Result<Vec<Vec<f32>>> {
         let start_time = std::time::Instant::now();
 
         // Input validation
@@ -274,9 +276,11 @@ impl Model {
             // Validate input data (check for NaN, infinity)
             for (j, &value) in input.iter().enumerate() {
                 if !value.is_finite() {
-                    return Err(ModelError::InvalidDataType(
-                        format!("Invalid value at batch[{}][{}]: {} (not finite)", i, j, value)
-                    ).into());
+                    return Err(ModelError::InvalidDataType(format!(
+                        "Invalid value at batch[{}][{}]: {} (not finite)",
+                        i, j, value
+                    ))
+                    .into());
                 }
             }
 
@@ -315,7 +319,7 @@ impl Model {
             let start_idx = i * output_size;
             let end_idx = start_idx + output_size;
             let raw_output = output_flat[start_idx..end_idx].to_vec();
-            
+
             // Apply output postprocessing
             let processed_output = self.postprocess_output(raw_output)?;
             outputs.push(processed_output);
@@ -388,13 +392,17 @@ impl Model {
     }
 
     /// Run inference with timeout (simplified implementation)
-    fn predict_with_timeout(&self, input_tensor: Tensor<B, 2>, timeout_ms: u64) -> Result<Tensor<B, 2>> {
+    fn predict_with_timeout(
+        &self,
+        input_tensor: Tensor<B, 2>,
+        timeout_ms: u64,
+    ) -> Result<Tensor<B, 2>> {
         // For now, we'll implement a simple timeout by just running the inference
         // and checking if it takes too long. In a production system, you'd want
         // to use async/await or a more sophisticated timeout mechanism.
-        
+
         let start_time = std::time::Instant::now();
-        
+
         // Run the inference
         let result = self.inner.predict(input_tensor).map_err(|e| {
             // Update error stats
@@ -408,7 +416,10 @@ impl Model {
         // Check if we exceeded the timeout
         let elapsed = start_time.elapsed().as_millis() as u64;
         if elapsed > timeout_ms {
-            warn!("Inference took {}ms, which exceeds timeout of {}ms", elapsed, timeout_ms);
+            warn!(
+                "Inference took {}ms, which exceeds timeout of {}ms",
+                elapsed, timeout_ms
+            );
             // Note: In a real implementation, we would have cancelled the operation
         }
 
@@ -458,7 +469,10 @@ pub fn load_model_with_config(
     if let Some(backend) = backend_name {
         info!("Requested backend: {}", backend);
     }
-    info!("Kernel fusion: {}, Autotuning: {}", enable_kernel_fusion, enable_autotuning);
+    info!(
+        "Kernel fusion: {}, Autotuning: {}",
+        enable_kernel_fusion, enable_autotuning
+    );
 
     // Check if model files exist (either .mpk or .json should exist)
     let mpk_path = path.with_extension("mpk");
@@ -500,16 +514,18 @@ pub fn load_model_with_config(
 
     // Try to load actual Burn model first with advanced configuration
     match try_load_burn_model_with_backend(
-        path, 
-        model_size_bytes, 
-        backend_name, 
-        enable_kernel_fusion, 
-        enable_autotuning
+        path,
+        model_size_bytes,
+        backend_name,
+        enable_kernel_fusion,
+        enable_autotuning,
     ) {
         Ok(model) => {
-            info!("Successfully loaded Burn model: {} with backend: {}", 
-                  model.get_info().name, 
-                  model.get_backend_info());
+            info!(
+                "Successfully loaded Burn model: {} with backend: {}",
+                model.get_info().name,
+                model.get_backend_info()
+            );
             Ok(model)
         }
         Err(e) => {
@@ -527,11 +543,11 @@ fn try_load_burn_model(path: &PathBuf, model_size_bytes: u64) -> Result<Model> {
 }
 
 fn try_load_burn_model_with_backend(
-    path: &PathBuf, 
+    path: &PathBuf,
     model_size_bytes: u64,
     backend_name: Option<&str>,
     enable_kernel_fusion: bool,
-    enable_autotuning: bool
+    enable_autotuning: bool,
 ) -> Result<Model> {
     info!("Attempting to load actual Burn model from: {:?}", path);
 
@@ -547,15 +563,17 @@ fn try_load_burn_model_with_backend(
     if model_path.exists() && json_path.exists() {
         // Load the actual Burn model with advanced backend support
         match BurnModelContainer::load_with_backend(
-            path.with_extension(""), 
+            path.with_extension(""),
             backend_name,
             enable_kernel_fusion,
-            enable_autotuning
+            enable_autotuning,
         ) {
             Ok(container) => {
-                info!("Loaded Burn model container: {} with backend: {}", 
-                      container.metadata.name, 
-                      container.get_backend_info());
+                info!(
+                    "Loaded Burn model container: {} with backend: {}",
+                    container.metadata.name,
+                    container.get_backend_info()
+                );
                 let real_model = RealBurnModel::new(container);
                 let model = Model::new(Box::new(real_model), path.clone(), model_size_bytes);
                 return Ok(model);

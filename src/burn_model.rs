@@ -55,16 +55,16 @@ impl BackendType {
 
     pub fn available_backends() -> Vec<BackendType> {
         let mut backends = vec![BackendType::NdArray];
-        
+
         #[cfg(feature = "wgpu")]
         backends.push(BackendType::Wgpu);
-        
+
         #[cfg(feature = "metal")]
         backends.push(BackendType::Metal);
-        
+
         #[cfg(feature = "cuda")]
         backends.push(BackendType::Cuda);
-        
+
         backends
     }
 }
@@ -154,11 +154,17 @@ impl BurnModelContainer {
     }
 
     /// Create a new model container with custom optimization settings
-    pub fn new_with_optimization(config: MlpConfig, name: String, optimization_config: OptimizationConfig) -> Self {
-        info!("Creating model with backend: {}, kernel_fusion: {}, autotuning_cache: {}", 
-              optimization_config.backend_type.as_str(),
-              optimization_config.kernel_fusion,
-              optimization_config.autotuning_cache);
+    pub fn new_with_optimization(
+        config: MlpConfig,
+        name: String,
+        optimization_config: OptimizationConfig,
+    ) -> Self {
+        info!(
+            "Creating model with backend: {}, kernel_fusion: {}, autotuning_cache: {}",
+            optimization_config.backend_type.as_str(),
+            optimization_config.kernel_fusion,
+            optimization_config.autotuning_cache
+        );
 
         let device = <B as Backend>::Device::default();
         let model = Mlp::new(&config, &device);
@@ -286,10 +292,10 @@ impl BurnModelContainer {
 
     /// Load model with specific backend and optimization settings
     pub fn load_with_backend<P: AsRef<Path>>(
-        path: P, 
+        path: P,
         backend_name: Option<&str>,
         enable_kernel_fusion: bool,
-        enable_autotuning: bool
+        enable_autotuning: bool,
     ) -> FurnaceResult<Self> {
         let backend_type = if let Some(name) = backend_name {
             BackendType::from_str(name).unwrap_or_else(|| {
@@ -300,21 +306,41 @@ impl BurnModelContainer {
             BackendType::NdArray
         };
 
-        info!("Attempting to load model with backend: {}", backend_type.as_str());
+        info!(
+            "Attempting to load model with backend: {}",
+            backend_type.as_str()
+        );
 
         // Try to initialize the requested backend
-        match try_load_with_backend(path.as_ref(), &backend_type, enable_kernel_fusion, enable_autotuning) {
+        match try_load_with_backend(
+            path.as_ref(),
+            &backend_type,
+            enable_kernel_fusion,
+            enable_autotuning,
+        ) {
             Ok(container) => {
-                info!("Successfully loaded model with {} backend", backend_type.as_str());
+                info!(
+                    "Successfully loaded model with {} backend",
+                    backend_type.as_str()
+                );
                 Ok(container)
             }
             Err(e) => {
-                warn!("Failed to load with {} backend: {}", backend_type.as_str(), e);
-                
+                warn!(
+                    "Failed to load with {} backend: {}",
+                    backend_type.as_str(),
+                    e
+                );
+
                 // Fallback to CPU backend if the requested backend fails
                 if !matches!(backend_type, BackendType::NdArray) {
                     warn!("Falling back to CPU (NdArray) backend");
-                    try_load_with_backend(path.as_ref(), &BackendType::NdArray, enable_kernel_fusion, enable_autotuning)
+                    try_load_with_backend(
+                        path.as_ref(),
+                        &BackendType::NdArray,
+                        enable_kernel_fusion,
+                        enable_autotuning,
+                    )
                 } else {
                     Err(e)
                 }
@@ -328,7 +354,7 @@ fn try_load_with_backend(
     path: &Path,
     backend_type: &BackendType,
     enable_kernel_fusion: bool,
-    enable_autotuning: bool
+    enable_autotuning: bool,
 ) -> FurnaceResult<BurnModelContainer> {
     let optimization_config = OptimizationConfig {
         kernel_fusion: enable_kernel_fusion,
@@ -337,8 +363,10 @@ fn try_load_with_backend(
     };
 
     // Log optimization settings
-    info!("Loading model with optimizations - Kernel Fusion: {}, Autotuning Cache: {}", 
-          enable_kernel_fusion, enable_autotuning);
+    info!(
+        "Loading model with optimizations - Kernel Fusion: {}, Autotuning Cache: {}",
+        enable_kernel_fusion, enable_autotuning
+    );
 
     let model_path = path;
     let metadata_path = model_path.with_extension("json");

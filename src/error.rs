@@ -1,11 +1,11 @@
-use std::path::PathBuf;
-use thiserror::Error;
-use serde::{Deserialize, Serialize};
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum FurnaceError {
@@ -136,7 +136,10 @@ impl IntoResponse for FurnaceError {
                 ModelError::InputValidation { expected, actual } => (
                     StatusCode::BAD_REQUEST,
                     "INPUT_VALIDATION_FAILED",
-                    format!("Input shape mismatch: expected {:?}, got {:?}", expected, actual),
+                    format!(
+                        "Input shape mismatch: expected {:?}, got {:?}",
+                        expected, actual
+                    ),
                     Some(serde_json::json!({
                         "expected_shape": expected,
                         "actual_shape": actual
@@ -188,26 +191,16 @@ impl IntoResponse for FurnaceError {
                     msg.clone(),
                     None,
                 ),
-                CliError::InvalidPort(msg) => (
-                    StatusCode::BAD_REQUEST,
-                    "INVALID_PORT",
-                    msg.clone(),
-                    None,
-                ),
-                CliError::InvalidHost(msg) => (
-                    StatusCode::BAD_REQUEST,
-                    "INVALID_HOST",
-                    msg.clone(),
-                    None,
-                ),
+                CliError::InvalidPort(msg) => {
+                    (StatusCode::BAD_REQUEST, "INVALID_PORT", msg.clone(), None)
+                }
+                CliError::InvalidHost(msg) => {
+                    (StatusCode::BAD_REQUEST, "INVALID_HOST", msg.clone(), None)
+                }
             },
         };
 
-        let error_response = ErrorResponse::new(
-            message,
-            error_code.to_string(),
-            details,
-        );
+        let error_response = ErrorResponse::new(message, error_code.to_string(), details);
 
         (status, Json(error_response)).into_response()
     }
