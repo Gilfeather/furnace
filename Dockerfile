@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.75-slim as builder
+FROM rust:1.88-slim as builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy manifests
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 
 # Create dummy files to build dependencies
 RUN mkdir -p src benches tests && \
@@ -18,7 +18,7 @@ RUN mkdir -p src benches tests && \
     echo "fn main() {}" > benches/inference_benchmark.rs && \
     echo "fn main() {}" > tests/integration_tests.rs
 
-# Build dependencies (this will be cached if Cargo.toml doesn't change)
+# Generate lock file and build dependencies (this will be cached if Cargo.toml doesn't change)
 RUN cargo build --release && rm -rf src benches tests
 
 # Copy source code
