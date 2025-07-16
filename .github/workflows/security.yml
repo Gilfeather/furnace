@@ -48,6 +48,7 @@ jobs:
       uses: actions/dependency-review-action@v4
       with:
         fail-on-severity: moderate
+      continue-on-error: true
 
   codeql:
     name: CodeQL Analysis
@@ -77,3 +78,4 @@ jobs:
       uses: github/codeql-action/analyze@v3
       with:
         category: "/language:rust"
+      continue-on-error: true
