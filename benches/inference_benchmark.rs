@@ -24,12 +24,10 @@ fn create_optimized_model(backend: Option<&str>, kernel_fusion: bool, autotuning
 
     let sample_path = PathBuf::from("sample_model");
     if sample_path.with_extension("mpk").exists() {
-        load_model_with_config(&sample_path, config)
-            .expect("Failed to load optimized sample model")
+        load_model_with_config(&sample_path, config).expect("Failed to load optimized sample model")
     } else {
         let test_path = PathBuf::from("test_model.burn");
-        load_model_with_config(&test_path, config)
-            .expect("Failed to load optimized test model")
+        load_model_with_config(&test_path, config).expect("Failed to load optimized test model")
     }
 }
 
@@ -167,8 +165,10 @@ fn bench_memory_efficiency(c: &mut Criterion) {
     let input_size = 784; // Fixed input size for the model
     for batch_size in [1, 4, 8, 16, 32].iter() {
         let inputs: Vec<Vec<f32>> = (0..*batch_size).map(|_| vec![0.5f32; input_size]).collect();
-        
-        group.throughput(Throughput::Bytes(*batch_size as u64 * input_size as u64 * 4)); // 4 bytes per f32
+
+        group.throughput(Throughput::Bytes(
+            *batch_size as u64 * input_size as u64 * 4,
+        )); // 4 bytes per f32
         group.bench_with_input(
             BenchmarkId::new("batch_size", batch_size),
             batch_size,
@@ -190,7 +190,7 @@ fn bench_latency_percentiles(c: &mut Criterion) {
     c.bench_function("latency_measurement", |b| {
         b.iter_custom(|iters| {
             let mut times = Vec::with_capacity(iters as usize);
-            
+
             for _ in 0..iters {
                 let start = Instant::now();
                 let result = model.predict_batch(vec![black_box(input.clone())]);
@@ -198,20 +198,23 @@ fn bench_latency_percentiles(c: &mut Criterion) {
                 black_box(result).unwrap();
                 times.push(duration);
             }
-            
+
             // Calculate statistics
             times.sort();
             let total: std::time::Duration = times.iter().sum();
-            
+
             // Log percentiles for analysis
             if !times.is_empty() {
                 let p50 = times[times.len() / 2];
                 let p95 = times[(times.len() * 95) / 100];
                 let p99 = times[(times.len() * 99) / 100];
-                
-                eprintln!("Latency stats - P50: {:?}, P95: {:?}, P99: {:?}", p50, p95, p99);
+
+                eprintln!(
+                    "Latency stats - P50: {:?}, P95: {:?}, P99: {:?}",
+                    p50, p95, p99
+                );
             }
-            
+
             total
         });
     });
@@ -234,9 +237,7 @@ fn bench_throughput_scaling(c: &mut Criterion) {
                         .map(|_| {
                             let model = model.clone();
                             let input = single_input.clone();
-                            std::thread::spawn(move || {
-                                model.predict_batch(vec![input]).unwrap()
-                            })
+                            std::thread::spawn(move || model.predict_batch(vec![input]).unwrap())
                         })
                         .collect();
 

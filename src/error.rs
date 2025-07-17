@@ -85,10 +85,7 @@ pub enum CliError {
     InvalidHost(String),
 
     #[error("Invalid model path '{path}': {reason}")]
-    InvalidModelPath {
-        path: PathBuf,
-        reason: String,
-    },
+    InvalidModelPath { path: PathBuf, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, FurnaceError>;

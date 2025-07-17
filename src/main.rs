@@ -2,8 +2,8 @@ use clap::{Arg, Command};
 use std::path::PathBuf;
 use tracing::{error, info, Level};
 
-use furnace::{api, error, model};
 use error::{CliError, Result};
+use furnace::{api, error, model};
 
 #[derive(Debug)]
 struct CliArgs {
@@ -102,14 +102,19 @@ fn parse_args() -> Result<CliArgs> {
 
     let backend = matches.get_one::<String>("backend").map(|s| s.clone());
 
-    let max_concurrent_str = matches.get_one::<String>("max-concurrent-requests").unwrap();
-    let max_concurrent_requests = Some(max_concurrent_str
-        .parse::<usize>()
-        .map_err(|_| CliError::InvalidArgument {
-            arg: "max-concurrent-requests".to_string(),
-            value: max_concurrent_str.clone(),
-            reason: "must be a positive integer".to_string(),
-        })?);
+    let max_concurrent_str = matches
+        .get_one::<String>("max-concurrent-requests")
+        .unwrap();
+    let max_concurrent_requests =
+        Some(
+            max_concurrent_str
+                .parse::<usize>()
+                .map_err(|_| CliError::InvalidArgument {
+                    arg: "max-concurrent-requests".to_string(),
+                    value: max_concurrent_str.clone(),
+                    reason: "must be a positive integer".to_string(),
+                })?,
+        );
 
     if let Some(max_requests) = max_concurrent_requests {
         if max_requests == 0 {
@@ -117,7 +122,8 @@ fn parse_args() -> Result<CliArgs> {
                 arg: "max-concurrent-requests".to_string(),
                 value: max_concurrent_str.clone(),
                 reason: "must be greater than 0".to_string(),
-            }.into());
+            }
+            .into());
         }
     }
 
@@ -132,14 +138,16 @@ fn parse_args() -> Result<CliArgs> {
         return Err(CliError::InvalidModelPath {
             path: model_path.clone(),
             reason: "file does not exist".to_string(),
-        }.into());
+        }
+        .into());
     }
 
     if !model_path.is_file() {
         return Err(CliError::InvalidModelPath {
             path: model_path.clone(),
             reason: "path is not a file".to_string(),
-        }.into());
+        }
+        .into());
     }
 
     // Validate .burn extension
@@ -148,13 +156,15 @@ fn parse_args() -> Result<CliArgs> {
             return Err(CliError::InvalidModelPath {
                 path: model_path.clone(),
                 reason: "file must have .burn extension".to_string(),
-            }.into());
+            }
+            .into());
         }
     } else {
         return Err(CliError::InvalidModelPath {
             path: model_path.clone(),
             reason: "file must have .burn extension".to_string(),
-        }.into());
+        }
+        .into());
     }
 
     Ok(CliArgs {
@@ -185,9 +195,11 @@ fn setup_logging(log_level: &str) {
         .with_thread_ids(true)
         .with_file(true)
         .with_line_number(true)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::new(format!("{}={}", env!("CARGO_PKG_NAME"), level)),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::new(format!(
+            "{}={}",
+            env!("CARGO_PKG_NAME"),
+            level
+        )))
         .init();
 }
 
@@ -196,19 +208,25 @@ async fn main() -> Result<()> {
     let args = parse_args()?;
     setup_logging(&args.log_level);
 
-    info!("🔥 Starting furnace inference server v{}", env!("CARGO_PKG_VERSION"));
+    info!(
+        "🔥 Starting furnace inference server v{}",
+        env!("CARGO_PKG_VERSION")
+    );
     info!("Configuration:");
     info!("  Model path: {:?}", args.model_path);
     info!("  Server address: {}:{}", args.host, args.port);
     info!("  Backend: {:?}", args.backend.as_deref().unwrap_or("cpu"));
-    info!("  Max concurrent requests: {:?}", args.max_concurrent_requests);
+    info!(
+        "  Max concurrent requests: {:?}",
+        args.max_concurrent_requests
+    );
     info!("  Kernel fusion: {}", args.enable_kernel_fusion);
     info!("  Autotuning: {}", args.enable_autotuning);
     info!("  Log level: {}", args.log_level);
 
     // Load model with optimization settings
     info!("📦 Loading model from: {:?}", args.model_path);
-    
+
     let model_config = model::ModelConfig {
         backend: args.backend.clone(),
         enable_kernel_fusion: args.enable_kernel_fusion,
