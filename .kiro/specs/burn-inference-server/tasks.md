@@ -29,7 +29,7 @@
     - _Requirements: 2.1, 2.2, 2.5, 8.4_
 
 - [ ] 3. Enhance CLI argument handling and validation
-  - [ ] 3.1 Improve CLI argument parsing and validation
+  - [-] 3.1 Improve CLI argument parsing and validation
     - Add comprehensive input validation for model path, host, and port
     - Implement backend selection argument with validation (CPU, WGPU, Metal, CUDA)
     - Add max-concurrent-requests argument for concurrency control
