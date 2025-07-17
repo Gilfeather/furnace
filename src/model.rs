@@ -1,6 +1,5 @@
 use burn::backend::ndarray::NdArray;
 use burn::tensor::{Tensor, TensorData};
-use burn_import::onnx::ModelGen;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
