@@ -26,6 +26,12 @@ exclude = [
 name = "furnace"
 path = "src/main.rs"
 
+[features]
+default = []
+wgpu = []
+metal = []
+cuda = []
+
 [dependencies]
 # ML Framework
 burn = { version = "0.17", features = ["train", "std", "ndarray"] }

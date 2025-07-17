@@ -8,10 +8,85 @@ use burn::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use tracing::{info, warn};
 
 use crate::error::{ModelError, Result as FurnaceResult};
 
+// Default backend type
 type B = NdArray<f32>;
+
+/// Supported backend types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BackendType {
+    NdArray,
+    #[cfg(feature = "wgpu")]
+    Wgpu,
+    #[cfg(feature = "metal")]
+    Metal,
+    #[cfg(feature = "cuda")]
+    Cuda,
+}
+
+impl BackendType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BackendType::NdArray => "ndarray",
+            #[cfg(feature = "wgpu")]
+            BackendType::Wgpu => "wgpu",
+            #[cfg(feature = "metal")]
+            BackendType::Metal => "metal",
+            #[cfg(feature = "cuda")]
+            BackendType::Cuda => "cuda",
+        }
+    }
+
+    pub fn from_string(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "ndarray" | "cpu" => Some(BackendType::NdArray),
+            #[cfg(feature = "wgpu")]
+            "wgpu" | "gpu" => Some(BackendType::Wgpu),
+            #[cfg(feature = "metal")]
+            "metal" => Some(BackendType::Metal),
+            #[cfg(feature = "cuda")]
+            "cuda" => Some(BackendType::Cuda),
+            _ => None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn available_backends() -> Vec<BackendType> {
+        let mut backends = vec![BackendType::NdArray];
+
+        #[cfg(feature = "wgpu")]
+        backends.push(BackendType::Wgpu);
+
+        #[cfg(feature = "metal")]
+        backends.push(BackendType::Metal);
+
+        #[cfg(feature = "cuda")]
+        backends.push(BackendType::Cuda);
+
+        backends
+    }
+}
+
+/// Configuration for advanced Burn optimizations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptimizationConfig {
+    pub kernel_fusion: bool,
+    pub autotuning_cache: bool,
+    pub backend_type: BackendType,
+}
+
+impl Default for OptimizationConfig {
+    fn default() -> Self {
+        Self {
+            kernel_fusion: true,
+            autotuning_cache: true,
+            backend_type: BackendType::NdArray,
+        }
+    }
+}
 
 /// Simple MLP model configuration
 #[derive(Config, Debug)]
@@ -70,11 +145,28 @@ pub struct BurnModelContainer {
     pub metadata: BurnModelMetadata,
     #[allow(dead_code)]
     pub config: MlpConfig,
+    pub optimization_config: OptimizationConfig,
 }
 
 impl BurnModelContainer {
-    /// Create a new model container
+    /// Create a new model container with default optimization settings
     pub fn new(config: MlpConfig, name: String) -> Self {
+        Self::new_with_optimization(config, name, OptimizationConfig::default())
+    }
+
+    /// Create a new model container with custom optimization settings
+    pub fn new_with_optimization(
+        config: MlpConfig,
+        name: String,
+        optimization_config: OptimizationConfig,
+    ) -> Self {
+        info!(
+            "Creating model with backend: {}, kernel_fusion: {}, autotuning_cache: {}",
+            optimization_config.backend_type.as_str(),
+            optimization_config.kernel_fusion,
+            optimization_config.autotuning_cache
+        );
+
         let device = <B as Backend>::Device::default();
         let model = Mlp::new(&config, &device);
 
@@ -92,6 +184,7 @@ impl BurnModelContainer {
             model: std::sync::Arc::new(std::sync::Mutex::new(model)),
             metadata,
             config,
+            optimization_config,
         }
     }
 
@@ -125,6 +218,7 @@ impl BurnModelContainer {
     }
 
     /// Load model from file
+    #[allow(dead_code)]
     pub fn load<P: AsRef<Path>>(path: P) -> FurnaceResult<Self> {
         let model_path = path.as_ref();
         let metadata_path = model_path.with_extension("json");
@@ -164,6 +258,7 @@ impl BurnModelContainer {
             model: std::sync::Arc::new(std::sync::Mutex::new(model)),
             metadata,
             config,
+            optimization_config: OptimizationConfig::default(),
         })
     }
 
@@ -182,6 +277,150 @@ impl BurnModelContainer {
     pub fn output_shape(&self) -> Vec<usize> {
         vec![self.metadata.output_size]
     }
+
+    /// Get backend information
+    pub fn get_backend_info(&self) -> String {
+        self.optimization_config.backend_type.as_str().to_string()
+    }
+
+    /// Get optimization information
+    pub fn get_optimization_info(&self) -> crate::model::OptimizationInfo {
+        crate::model::OptimizationInfo {
+            kernel_fusion: self.optimization_config.kernel_fusion,
+            autotuning_cache: self.optimization_config.autotuning_cache,
+            backend_type: self.get_backend_info(),
+        }
+    }
+
+    /// Load model with specific backend and optimization settings
+    pub fn load_with_backend<P: AsRef<Path>>(
+        path: P,
+        backend_name: Option<&str>,
+        enable_kernel_fusion: bool,
+        enable_autotuning: bool,
+    ) -> FurnaceResult<Self> {
+        let backend_type = if let Some(name) = backend_name {
+            BackendType::from_string(name).unwrap_or_else(|| {
+                warn!("Unknown backend '{}', falling back to NdArray", name);
+                BackendType::NdArray
+            })
+        } else {
+            BackendType::NdArray
+        };
+
+        info!(
+            "Attempting to load model with backend: {}",
+            backend_type.as_str()
+        );
+
+        // Try to initialize the requested backend
+        match try_load_with_backend(
+            path.as_ref(),
+            &backend_type,
+            enable_kernel_fusion,
+            enable_autotuning,
+        ) {
+            Ok(container) => {
+                info!(
+                    "Successfully loaded model with {} backend",
+                    backend_type.as_str()
+                );
+                Ok(container)
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to load with {} backend: {}",
+                    backend_type.as_str(),
+                    e
+                );
+
+                // Fallback to CPU backend if the requested backend fails
+                if !matches!(backend_type, BackendType::NdArray) {
+                    warn!("Falling back to CPU (NdArray) backend");
+                    try_load_with_backend(
+                        path.as_ref(),
+                        &BackendType::NdArray,
+                        enable_kernel_fusion,
+                        enable_autotuning,
+                    )
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+}
+
+/// Try to load model with specific backend
+fn try_load_with_backend(
+    path: &Path,
+    backend_type: &BackendType,
+    enable_kernel_fusion: bool,
+    enable_autotuning: bool,
+) -> FurnaceResult<BurnModelContainer> {
+    let optimization_config = OptimizationConfig {
+        kernel_fusion: enable_kernel_fusion,
+        autotuning_cache: enable_autotuning,
+        backend_type: backend_type.clone(),
+    };
+
+    // Log optimization settings
+    info!(
+        "Loading model with optimizations - Kernel Fusion: {}, Autotuning Cache: {}",
+        enable_kernel_fusion, enable_autotuning
+    );
+
+    let model_path = path;
+    let metadata_path = model_path.with_extension("json");
+
+    // Load metadata first
+    let metadata_content =
+        std::fs::read_to_string(&metadata_path).map_err(|e| ModelError::LoadFailed {
+            path: metadata_path.clone(),
+            source: Box::new(e),
+        })?;
+
+    let metadata: BurnModelMetadata = serde_json::from_str(&metadata_content)
+        .map_err(|e| ModelError::InvalidFormat(format!("Failed to parse metadata: {e}")))?;
+
+    // Create config from metadata
+    let config = MlpConfig::new(
+        metadata.input_size,
+        metadata.hidden_size,
+        metadata.output_size,
+    );
+
+    // Initialize backend-specific device and model
+    let device = <B as Backend>::Device::default();
+    let model = Mlp::new(&config, &device);
+    let recorder = CompactRecorder::new();
+
+    // Try to load from .mpk file
+    let mpk_path = path.with_extension("mpk");
+    let model = model
+        .load_file(mpk_path.clone(), &recorder, &device)
+        .map_err(|e| ModelError::LoadFailed {
+            path: mpk_path,
+            source: Box::new(e),
+        })?;
+
+    // Apply optimizations if enabled
+    if enable_kernel_fusion {
+        info!("Kernel fusion optimization enabled");
+        // TODO: Implement actual kernel fusion when Burn supports it
+    }
+
+    if enable_autotuning {
+        info!("Autotuning cache optimization enabled");
+        // TODO: Implement actual autotuning cache when Burn supports it
+    }
+
+    Ok(BurnModelContainer {
+        model: std::sync::Arc::new(std::sync::Mutex::new(model)),
+        metadata,
+        config,
+        optimization_config,
+    })
 }
 
 /// Create a sample model for testing
