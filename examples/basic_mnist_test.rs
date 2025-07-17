@@ -1,4 +1,4 @@
-use reqwest;
+
 use serde_json::{json, Value};
 use std::time::Instant;
 
@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test 1: Health check
     println!("\n1️⃣ Testing health check...");
     let start = Instant::now();
-    let response = client.get(&format!("{}/healthz", base_url)).send().await?;
+    let response = client.get(format!("{base_url}/healthz")).send().await?;
     let duration = start.elapsed();
 
     if response.status().is_success() {
@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n2️⃣ Testing model info...");
     let start = Instant::now();
     let response = client
-        .get(&format!("{}/model/info", base_url))
+        .get(format!("{base_url}/model/info"))
         .send()
         .await?;
     let duration = start.elapsed();
@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start = Instant::now();
     let response = client
-        .post(&format!("{}/predict", base_url))
+        .post(format!("{base_url}/predict"))
         .header("Content-Type", "application/json")
         .json(&request_body)
         .send()
@@ -107,18 +107,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             println!(
-                "   Predicted class: {} (confidence: {:.4})",
-                max_idx, max_val
+                "   Predicted class: {max_idx} (confidence: {max_val:.4})"
             );
         }
 
         if let Some(inference_time) = result["inference_time_ms"].as_f64() {
-            println!("   Server inference time: {:.2}ms", inference_time);
+            println!("   Server inference time: {inference_time:.2}ms");
         }
     } else {
         println!("❌ Inference failed: {}", response.status());
         let error_text = response.text().await?;
-        println!("   Error: {}", error_text);
+        println!("   Error: {error_text}");
     }
 
     // Test 4: Multiple rapid requests
@@ -132,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let start = Instant::now();
         let response = client
-            .post(&format!("{}/predict", base_url))
+            .post(format!("{base_url}/predict"))
             .header("Content-Type", "application/json")
             .json(&request_body)
             .send()
@@ -141,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         total_time += duration;
 
         if response.status().is_success() {
-            println!("   Request {}: ✅ {:.2}ms", i, duration);
+            println!("   Request {i}: ✅ {duration:.2}ms");
         } else {
             println!("   Request {}: ❌ {}", i, response.status());
         }
@@ -156,7 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let response = client
-        .post(&format!("{}/predict", base_url))
+        .post(format!("{base_url}/predict"))
         .header("Content-Type", "application/json")
         .json(&invalid_request)
         .send()

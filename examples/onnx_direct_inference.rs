@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         download_model(model_path)?;
     }
 
-    println!("Loading ONNX model: {}", model_path);
+    println!("Loading ONNX model: {model_path}");
 
     // Read the ONNX model file
     let model_bytes = fs::read(model_path)?;
@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         file_size,
         file_size as f64 / 1024.0 / 1024.0
     );
-    println!("  - File path: {}", model_path);
+    println!("  - File path: {model_path}");
 
     // Basic file validation
     if file_size < 100 {
@@ -47,16 +47,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n🔥 Attempting to convert ONNX to Burn format...");
         match convert_onnx_to_burn(model_path) {
             Ok(_) => println!("✅ Conversion successful!"),
-            Err(e) => println!("❌ Conversion failed: {}", e),
+            Err(e) => println!("❌ Conversion failed: {e}"),
         }
     }
 
     println!("\n🔥 ONNX Model Ready for Furnace!");
     println!("Next steps:");
-    println!(
-        "1. Use onnx2burn to convert: onnx2burn {} gptneox_burn",
-        model_path
-    );
+    println!("1. Use onnx2burn to convert: onnx2burn {model_path} gptneox_burn");
     println!("2. Start Furnace server: ./target/release/furnace --model-path gptneox_burn.mpk");
     println!("3. Test inference: curl http://localhost:3000/model/info");
 
@@ -64,8 +61,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📝 Integration example:");
     println!("```bash");
     println!("# Convert ONNX to Burn format");
-    println!("onnx2burn {} gptneox_burn", model_path);
-    println!("");
+    println!("onnx2burn {model_path} gptneox_burn");
+    println!();
     println!("# Build and start Furnace");
     println!("cargo build --release");
     println!("./target/release/furnace --model-path gptneox_burn/gptneox_Opset18.mpk --port 3000");
@@ -85,7 +82,7 @@ fn convert_onnx_to_burn(onnx_path: &str) -> Result<(), Box<dyn std::error::Error
         fs::create_dir_all(output_dir)?;
     }
 
-    println!("Converting {} to Burn format in {}/", onnx_path, output_dir);
+    println!("Converting {onnx_path} to Burn format in {output_dir}/");
 
     // Note: This is a simplified example. The actual burn-import API may differ.
     // In practice, you would use the burn-import crate's conversion functions here.
@@ -102,7 +99,7 @@ fn download_model(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let url = "https://github.com/onnx/models/raw/main/Generative_AI/gptneox_Opset18_transformers/gptneox_Opset18.onnx";
 
-    println!("Downloading from: {}", url);
+    println!("Downloading from: {url}");
 
     let response = ureq::get(url).call()?;
     let mut file = fs::File::create(path)?;
@@ -111,6 +108,6 @@ fn download_model(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     response.into_reader().read_to_end(&mut buffer)?;
     file.write_all(&buffer)?;
 
-    println!("Downloaded {} bytes to {}", buffer.len(), path);
+    println!("Downloaded {} bytes to {path}", buffer.len());
     Ok(())
 }

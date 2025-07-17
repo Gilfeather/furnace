@@ -1,4 +1,4 @@
-use reqwest;
+
 use serde_json::{json, Value};
 use std::time::Instant;
 
@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test 1: Verify server is running
     println!("\n1️⃣ Verifying server connection...");
-    match client.get(&format!("{}/healthz", base_url)).send().await {
+    match client.get(format!("{base_url}/healthz")).send().await {
         Ok(response) if response.status().is_success() => {
             let health: Value = response.json().await?;
             println!("✅ Server is running");
@@ -92,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let start = Instant::now();
         let response = client
-            .post(&format!("{}/predict", base_url))
+            .post(format!("{base_url}/predict"))
             .header("Content-Type", "application/json")
             .json(&request_body)
             .send()
@@ -130,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let start = Instant::now();
         let response = client
-            .post(&format!("{}/predict", base_url))
+            .post(format!("{base_url}/predict"))
             .header("Content-Type", "application/json")
             .json(&request_body)
             .send()
@@ -172,7 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let start = Instant::now();
         let response = client
-            .post(&format!("{}/predict", base_url))
+            .post(format!("{base_url}/predict"))
             .header("Content-Type", "application/json")
             .json(&request_body)
             .send()
@@ -183,21 +183,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if response.status().is_success() {
             successful_requests += 1;
             if i % 3 == 0 {
-                println!("   Processed {}/{} requests...", i, batch_size);
+                println!("   Processed {i}/{batch_size} requests...");
             }
         }
     }
     let batch_duration = start_batch.elapsed().as_secs_f64() * 1000.0;
 
     println!(
-        "   ✅ Batch completed: {}/{} successful",
-        successful_requests, batch_size
+        "   ✅ Batch completed: {successful_requests}/{batch_size} successful"
     );
     println!(
         "   Average request time: {:.2}ms",
         total_time / batch_size as f64
     );
-    println!("   Total batch time: {:.2}ms", batch_duration);
+    println!("   Total batch time: {batch_duration:.2}ms");
     println!(
         "   Throughput: {:.1} requests/second",
         batch_size as f64 / (batch_duration / 1000.0)
@@ -216,7 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (name, request_body) in error_cases {
         let response = client
-            .post(&format!("{}/predict", base_url))
+            .post(format!("{base_url}/predict"))
             .header("Content-Type", "application/json")
             .json(&request_body)
             .send()

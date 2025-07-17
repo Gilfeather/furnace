@@ -31,11 +31,12 @@ default = []
 wgpu = []
 metal = []
 cuda = []
+burn-import = ["dep:burn-import"]
 
 [dependencies]
 # ML Framework
 burn = { version = "0.17", features = ["train", "std", "ndarray"] }
-burn-import = { version = "0.17", features = ["onnx"] }
+burn-import = { version = "0.17", features = ["onnx"], optional = true }
 ndarray = "0.16"
 
 # Web Framework
