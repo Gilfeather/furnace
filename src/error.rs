@@ -136,10 +136,7 @@ impl IntoResponse for FurnaceError {
                 ModelError::InputValidation { expected, actual } => (
                     StatusCode::BAD_REQUEST,
                     "INPUT_VALIDATION_FAILED",
-                    format!(
-                        "Input shape mismatch: expected {:?}, got {:?}",
-                        expected, actual
-                    ),
+                    format!("Input shape mismatch: expected {expected:?}, got {actual:?}"),
                     Some(serde_json::json!({
                         "expected_shape": expected,
                         "actual_shape": actual

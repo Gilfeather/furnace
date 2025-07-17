@@ -57,6 +57,7 @@ pub trait BurnModel: Send + Sync + std::fmt::Debug {
     fn get_output_shape(&self) -> &[usize];
     fn get_name(&self) -> &str;
     fn get_backend_info(&self) -> String;
+    #[allow(dead_code)]
     fn get_optimization_info(&self) -> OptimizationInfo;
 }
 
@@ -277,8 +278,7 @@ impl Model {
             for (j, &value) in input.iter().enumerate() {
                 if !value.is_finite() {
                     return Err(ModelError::InvalidDataType(format!(
-                        "Invalid value at batch[{}][{}]: {} (not finite)",
-                        i, j, value
+                        "Invalid value at batch[{i}][{j}]: {value} (not finite)"
                     ))
                     .into());
                 }
@@ -450,6 +450,7 @@ impl Model {
         self.inner.get_backend_info()
     }
 
+    #[allow(dead_code)]
     pub fn get_optimization_info(&self) -> OptimizationInfo {
         self.inner.get_optimization_info()
     }
@@ -538,6 +539,7 @@ pub fn load_model_with_config(
     }
 }
 
+#[allow(dead_code)]
 fn try_load_burn_model(path: &PathBuf, model_size_bytes: u64) -> Result<Model> {
     try_load_burn_model_with_backend(path, model_size_bytes, None, true, true)
 }

@@ -40,7 +40,7 @@ impl BackendType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_string(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "ndarray" | "cpu" => Some(BackendType::NdArray),
             #[cfg(feature = "wgpu")]
@@ -53,6 +53,7 @@ impl BackendType {
         }
     }
 
+    #[allow(dead_code)]
     pub fn available_backends() -> Vec<BackendType> {
         let mut backends = vec![BackendType::NdArray];
 
@@ -217,6 +218,7 @@ impl BurnModelContainer {
     }
 
     /// Load model from file
+    #[allow(dead_code)]
     pub fn load<P: AsRef<Path>>(path: P) -> FurnaceResult<Self> {
         let model_path = path.as_ref();
         let metadata_path = model_path.with_extension("json");
@@ -298,7 +300,7 @@ impl BurnModelContainer {
         enable_autotuning: bool,
     ) -> FurnaceResult<Self> {
         let backend_type = if let Some(name) = backend_name {
-            BackendType::from_str(name).unwrap_or_else(|| {
+            BackendType::from_string(name).unwrap_or_else(|| {
                 warn!("Unknown backend '{}', falling back to NdArray", name);
                 BackendType::NdArray
             })
