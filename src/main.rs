@@ -100,7 +100,7 @@ fn parse_args() -> Result<CliArgs> {
         return Err(CliError::InvalidHost("Host cannot be empty".to_string()).into());
     }
 
-    let backend = matches.get_one::<String>("backend").map(|s| s.clone());
+    let backend = matches.get_one::<String>("backend").cloned();
 
     let max_concurrent_str = matches
         .get_one::<String>("max-concurrent-requests")

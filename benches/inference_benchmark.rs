@@ -209,10 +209,7 @@ fn bench_latency_percentiles(c: &mut Criterion) {
                 let p95 = times[(times.len() * 95) / 100];
                 let p99 = times[(times.len() * 99) / 100];
 
-                eprintln!(
-                    "Latency stats - P50: {:?}, P95: {:?}, P99: {:?}",
-                    p50, p95, p99
-                );
+                eprintln!("Latency stats - P50: {p50:?}, P95: {p95:?}, P99: {p99:?}");
             }
 
             total
