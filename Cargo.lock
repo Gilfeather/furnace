@@ -1966,6 +1966,7 @@ dependencies = [
  "clap",
  "criterion",
  "ndarray",
+ "protobuf",
  "rand 0.8.5",
  "reqwest",
  "serde",
@@ -1977,6 +1978,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "ureq",
  "uuid",
 ]
 

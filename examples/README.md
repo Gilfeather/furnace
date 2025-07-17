@@ -48,7 +48,7 @@ model.save_file("my_model", &recorder)?; // Creates my_model.mpk
 - **PyTorch → ONNX → Burn**: Export PyTorch to ONNX first, then convert
 - **TensorFlow → ONNX → Burn**: Export TensorFlow to ONNX first, then convert
 
-**Direct ONNX conversion (Recommended):**
+**Direct ONNX conversion (No Python required):**
 ```bash
 # 1. Install burn-import
 cargo install burn-import
@@ -112,8 +112,8 @@ burn-import --input mnist-8.onnx --output mnist_burn
 # 3. Use with Furnace
 ./furnace --model-path mnist_burn.mpk
 
-# 4. Test the complete pipeline
-python examples/onnx_conversion/test_onnx_conversion.py
+# 4. Test with Furnace
+./furnace --model-path mnist_burn.mpk
 ```
 
 ## Example Structure

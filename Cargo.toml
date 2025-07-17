@@ -73,6 +73,8 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 # Examples dependencies
 rand = "0.8"
+ureq = "2.10"
+protobuf = "3.4"
 
 
 
