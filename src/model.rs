@@ -129,7 +129,7 @@ pub struct OnnxModel {
 impl OnnxModel {
     pub fn from_file(path: &Path) -> Result<Self> {
         info!("Loading ONNX model from: {:?}", path);
-        
+
         // Read ONNX file
         let _onnx_bytes = std::fs::read(path).map_err(|e| ModelError::LoadFailed {
             path: path.to_path_buf(),
@@ -171,7 +171,10 @@ impl BurnModel for OnnxModel {
             &Default::default(),
         );
 
-        info!("ONNX model inference completed for batch size: {}", batch_size);
+        info!(
+            "ONNX model inference completed for batch size: {}",
+            batch_size
+        );
         Ok(output_tensor)
     }
 
@@ -601,7 +604,7 @@ fn load_model_with_config_detailed(
         } else {
             &onnx_path
         };
-        
+
         info!("Detected ONNX model file: {:?}", onnx_file_path);
         return try_load_onnx_model(onnx_file_path);
     }
@@ -868,7 +871,7 @@ mod tests {
     fn test_onnx_model_loading() {
         // Test ONNX file detection with non-existent file
         let onnx_path = PathBuf::from("nonexistent_model.onnx");
-        
+
         // Since the ONNX file doesn't exist, this should return an error
         let result = load_model(&onnx_path);
         assert!(result.is_err());
