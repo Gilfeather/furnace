@@ -68,9 +68,12 @@ pub enum ApiError {
 
 #[derive(Debug, Error)]
 pub enum CliError {
-    #[allow(dead_code)]
-    #[error("Invalid argument: {0}")]
-    InvalidArgument(String),
+    #[error("Invalid argument '{arg}': {value} - {reason}")]
+    InvalidArgument {
+        arg: String,
+        value: String,
+        reason: String,
+    },
 
     #[error("Missing required argument: {0}")]
     MissingArgument(String),
@@ -80,6 +83,9 @@ pub enum CliError {
 
     #[error("Invalid host address: {0}")]
     InvalidHost(String),
+
+    #[error("Invalid model path '{path}': {reason}")]
+    InvalidModelPath { path: PathBuf, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, FurnaceError>;
@@ -176,11 +182,15 @@ impl IntoResponse for FurnaceError {
                 ),
             },
             FurnaceError::Cli(cli_err) => match cli_err {
-                CliError::InvalidArgument(msg) => (
+                CliError::InvalidArgument { arg, value, reason } => (
                     StatusCode::BAD_REQUEST,
                     "INVALID_ARGUMENT",
-                    msg.clone(),
-                    None,
+                    format!("Invalid argument '{arg}': {value} - {reason}"),
+                    Some(serde_json::json!({
+                        "argument": arg,
+                        "provided_value": value,
+                        "reason": reason
+                    })),
                 ),
                 CliError::MissingArgument(msg) => (
                     StatusCode::BAD_REQUEST,
@@ -194,6 +204,15 @@ impl IntoResponse for FurnaceError {
                 CliError::InvalidHost(msg) => {
                     (StatusCode::BAD_REQUEST, "INVALID_HOST", msg.clone(), None)
                 }
+                CliError::InvalidModelPath { path, reason } => (
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_MODEL_PATH",
+                    format!("Invalid model path '{}': {}", path.display(), reason),
+                    Some(serde_json::json!({
+                        "path": path,
+                        "reason": reason
+                    })),
+                ),
             },
         };
 

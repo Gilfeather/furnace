@@ -82,6 +82,13 @@ pub struct ApiResponse<T> {
     pub timestamp: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    pub host: String,
+    pub port: u16,
+    pub max_concurrent_requests: Option<usize>,
+}
+
 type AppState = Arc<ServerState>;
 
 struct ServerState {
@@ -103,6 +110,15 @@ impl ServerState {
 }
 
 pub async fn start_server(host: &str, port: u16, model: Model) -> Result<()> {
+    let config = ServerConfig {
+        host: host.to_string(),
+        port,
+        max_concurrent_requests: None,
+    };
+    start_server_with_config(config, model).await
+}
+
+pub async fn start_server_with_config(config: ServerConfig, model: Model) -> Result<()> {
     let app_state = Arc::new(ServerState::new(model));
 
     let cors = CorsLayer::new()
@@ -110,19 +126,26 @@ pub async fn start_server(host: &str, port: u16, model: Model) -> Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/healthz", get(health_check))
         .route("/predict", post(predict))
         .route("/model/info", get(model_info))
         .layer(cors)
         .with_state(app_state);
 
-    let bind_addr = format!("{host}:{port}");
+    // Add concurrency limiting if specified
+    if let Some(max_concurrent) = config.max_concurrent_requests {
+        use tower::limit::ConcurrencyLimitLayer;
+        app = app.layer(ConcurrencyLimitLayer::new(max_concurrent));
+        info!("🚦 Concurrency limit set to {} requests", max_concurrent);
+    }
+
+    let bind_addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
         .map_err(|e| ApiError::ServerStartup(format!("Failed to bind to {bind_addr}: {e}")))?;
 
-    info!("Server running on http://{}", bind_addr);
+    info!("✅ Server running on http://{}", bind_addr);
 
     // Set up graceful shutdown
     let server = axum::serve(listener, app);
@@ -133,7 +156,7 @@ pub async fn start_server(host: &str, port: u16, model: Model) -> Result<()> {
             result.map_err(|e| ApiError::ServerStartup(format!("Server error: {e}")))?;
         }
         _ = shutdown_signal() => {
-            info!("Shutdown signal received, stopping server gracefully");
+            info!("🛑 Shutdown signal received, stopping server gracefully");
         }
     }
 
