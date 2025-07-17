@@ -1,4 +1,3 @@
-
 use serde_json::{json, Value};
 use std::time::Instant;
 
@@ -189,9 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let batch_duration = start_batch.elapsed().as_secs_f64() * 1000.0;
 
-    println!(
-        "   ✅ Batch completed: {successful_requests}/{batch_size} successful"
-    );
+    println!("   ✅ Batch completed: {successful_requests}/{batch_size} successful");
     println!(
         "   Average request time: {:.2}ms",
         total_time / batch_size as f64

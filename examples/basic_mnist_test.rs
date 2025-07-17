@@ -1,4 +1,3 @@
-
 use serde_json::{json, Value};
 use std::time::Instant;
 
@@ -37,10 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test 2: Model info
     println!("\n2️⃣ Testing model info...");
     let start = Instant::now();
-    let response = client
-        .get(format!("{base_url}/model/info"))
-        .send()
-        .await?;
+    let response = client.get(format!("{base_url}/model/info")).send().await?;
     let duration = start.elapsed();
 
     if response.status().is_success() {
@@ -106,9 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            println!(
-                "   Predicted class: {max_idx} (confidence: {max_val:.4})"
-            );
+            println!("   Predicted class: {max_idx} (confidence: {max_val:.4})");
         }
 
         if let Some(inference_time) = result["inference_time_ms"].as_f64() {
