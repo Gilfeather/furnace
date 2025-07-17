@@ -86,15 +86,30 @@ model.save_file("my_model", &recorder)?; // Creates my_model.mpk
 - **Your Training**: Export from your Burn training scripts
 - **Converted Models**: ONNX/PyTorch models converted to Burn
 
-### 🛠️ Model Conversion
-```bash
-# Convert ONNX to Burn (example)
-burn-import --input model.onnx --output model.mpk
+### 🛠️ Model Conversion (Step-by-Step Guide)
 
-# Convert PyTorch to Burn (via ONNX)
-# 1. Export PyTorch to ONNX
-# 2. Convert ONNX to Burn
+**Complete PyTorch → ONNX → Burn conversion:**
+
+```bash
+# 1. Install dependencies
+pip install torch torchvision onnx onnxruntime
+cargo install burn-import
+
+# 2. Export PyTorch model to ONNX
+python examples/onnx_conversion/pytorch_to_onnx.py
+
+# 3. Convert ONNX to Burn format
+burn-import --input simple_mlp.onnx --output simple_mlp_burn
+
+# 4. Use with Furnace
+./furnace --model-path simple_mlp_burn.mpk
 ```
+
+**Supported conversion path:**
+- ✅ PyTorch → ONNX → Burn (.mpk)
+- ✅ TensorFlow → ONNX → Burn (.mpk)
+- ✅ Scikit-learn → ONNX → Burn (.mpk)
+- ⚠️ Complex models may have limitations (see [conversion guide](examples/onnx_conversion/README.md))
 
 ### 🎯 Popular Burn Model Examples
 - **[MNIST CNN](https://github.com/tracel-ai/burn/tree/main/examples/mnist)**: Convolutional neural network for digit recognition

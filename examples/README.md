@@ -44,9 +44,25 @@ model.save_file("my_model", &recorder)?; // Creates my_model.mpk
 - **Your own trained models**
 
 ### 🛠️ **Converting from Other Formats**
-- ONNX → Burn (using burn-import)
-- PyTorch → Burn (using conversion tools)
-- TensorFlow → Burn (via ONNX)
+- **ONNX → Burn**: Using burn-import tool
+- **PyTorch → Burn**: Via ONNX conversion (see [ONNX conversion guide](onnx_conversion/README.md))
+- **TensorFlow → Burn**: Via ONNX conversion
+
+**Step-by-step conversion example:**
+```bash
+# 1. Install dependencies
+pip install torch torchvision onnx onnxruntime
+cargo install burn-import
+
+# 2. Export PyTorch to ONNX
+python examples/onnx_conversion/pytorch_to_onnx.py
+
+# 3. Convert ONNX to Burn
+burn-import --input simple_mlp.onnx --output simple_mlp_burn
+
+# 4. Use with Furnace
+./furnace --model-path simple_mlp_burn.mpk
+```
 
 ### 🧪 **For Testing/Development**
 - Use our example creation scripts (see below)
@@ -68,6 +84,34 @@ model.save_file("my_model", &recorder)?; // Creates my_model.mpk
 - ✅ Learning how Burn models work
 - ✅ Development and debugging
 - ❌ Production use (use your trained models instead)
+
+### 🔄 ONNX Conversion Example (`onnx_conversion/`)
+
+**Purpose**: Convert existing PyTorch/TensorFlow models to Burn format for production use
+
+**What it demonstrates**:
+- PyTorch → ONNX → Burn conversion pipeline
+- Production-ready model conversion (ResNet-18, etc.)
+- Testing and validation of converted models
+- Complete step-by-step conversion guide
+
+**When to use**:
+- ✅ **Production use** with existing trained models
+- ✅ Converting models from other frameworks
+- ✅ Using pre-trained models (ImageNet, etc.)
+- ✅ Real-world deployment scenarios
+
+**Quick start**:
+```bash
+# 1. Export PyTorch models to ONNX
+python examples/onnx_conversion/pytorch_to_onnx.py
+
+# 2. Convert ONNX to Burn
+burn-import --input simple_mlp.onnx --output simple_mlp_burn
+
+# 3. Use with Furnace
+./furnace --model-path simple_mlp_burn.mpk
+```
 
 ## Example Structure
 
