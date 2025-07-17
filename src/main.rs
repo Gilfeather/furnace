@@ -149,8 +149,7 @@ fn parse_args() -> Result<CliArgs> {
     let port = *matches.get_one::<u16>("port").unwrap();
     if port < 1024 {
         return Err(CliError::InvalidPort(format!(
-            "Port {} is below 1024 (requires root privileges)",
-            port
+            "Port {port} is below 1024 (requires root privileges)"
         ))
         .into());
     }
@@ -304,7 +303,7 @@ fn validate_model_path(model_path: &PathBuf) -> Result<()> {
         Err(e) => {
             return Err(CliError::InvalidModelPath {
                 path: model_path.clone(),
-                reason: format!("cannot access file metadata: {}", e),
+                reason: format!("cannot access file metadata: {e}"),
             }
             .into());
         }
@@ -333,7 +332,7 @@ fn validate_model_path(model_path: &PathBuf) -> Result<()> {
         Err(e) => {
             return Err(CliError::InvalidModelPath {
                 path: model_path.clone(),
-                reason: format!("cannot read file size: {}", e),
+                reason: format!("cannot read file size: {e}"),
             }
             .into());
         }
@@ -365,7 +364,7 @@ fn setup_logging(log_level: &str) -> Result<()> {
         .map_err(|e| CliError::InvalidArgument {
             arg: "log-level".to_string(),
             value: log_level.to_string(),
-            reason: format!("failed to create log filter: {}", e),
+            reason: format!("failed to create log filter: {e}"),
         })?;
 
     if is_production {
