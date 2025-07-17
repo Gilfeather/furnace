@@ -1,212 +1,195 @@
-# ONNX Model Conversion Example
+# ONNX to Burn Conversion Guide
 
 ## 🎯 Purpose
 
-This example demonstrates how to convert existing PyTorch/TensorFlow models to Burn's .mpk format via ONNX, enabling you to use production-ready models with Furnace.
+Convert existing ONNX models to Burn's .mpk format for use with Furnace. This enables you to use production-ready models from ONNX Model Zoo, Hugging Face, or your own exported ONNX models.
 
 ## 🔄 Conversion Flow
 
 ```
-PyTorch/TensorFlow → ONNX → Burn (.mpk) → Furnace
+ONNX Model → burn-import → Burn (.mpk) → Furnace
 ```
 
 ## 📋 Prerequisites
 
 ```bash
-# Python dependencies
-pip install torch torchvision onnx onnxruntime
-
-# Rust dependencies (burn-import)
+# Install burn-import tool
 cargo install burn-import
+
+# Optional: Install onnxruntime for testing
+pip install onnxruntime
 ```
 
-## 🚀 Step-by-Step Guide
+## 🚀 Quick Start
 
-### Step 1: Export PyTorch Model to ONNX
+### Step 1: Get an ONNX Model
 
-Create a PyTorch model and export it:
+**From ONNX Model Zoo (Recommended):**
+```bash
+# MNIST CNN (good for testing)
+curl -L https://github.com/onnx/models/raw/main/vision/classification/mnist/model/mnist-8.onnx -o mnist-8.onnx
 
-```python
-# pytorch_to_onnx.py
-import torch
-import torch.nn as nn
-import torchvision.models as models
+# ResNet-18 (ImageNet classification)
+curl -L https://github.com/onnx/models/raw/main/vision/classification/resnet/model/resnet18-v1-7.onnx -o resnet18.onnx
 
-# Example 1: Simple CNN for CIFAR-10
-class SimpleCNN(nn.Module):
-    def __init__(self):
-        super(SimpleCNN, self).__init__()
-        self.conv1 = nn.Conv2d(3, 32, 3, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.fc1 = nn.Linear(64 * 8 * 8, 512)
-        self.fc2 = nn.Linear(512, 10)
-        self.relu = nn.ReLU()
-        
-    def forward(self, x):
-        x = self.pool(self.relu(self.conv1(x)))
-        x = self.pool(self.relu(self.conv2(x)))
-        x = x.view(-1, 64 * 8 * 8)
-        x = self.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+# MobileNet v2 (lightweight)
+curl -L https://github.com/onnx/models/raw/main/vision/classification/mobilenet/model/mobilenetv2-7.onnx -o mobilenetv2.onnx
 
-# Create and export model
-model = SimpleCNN()
-model.eval()
-
-# Dummy input for tracing
-dummy_input = torch.randn(1, 3, 32, 32)
-
-# Export to ONNX
-torch.onnx.export(
-    model,
-    dummy_input,
-    "simple_cnn.onnx",
-    export_params=True,
-    opset_version=11,
-    do_constant_folding=True,
-    input_names=['input'],
-    output_names=['output'],
-    dynamic_axes={
-        'input': {0: 'batch_size'},
-        'output': {0: 'batch_size'}
-    }
-)
-
-print("✅ Model exported to simple_cnn.onnx")
+# SqueezeNet (very lightweight)
+curl -L https://github.com/onnx/models/raw/main/vision/classification/squeezenet/model/squeezenet1.0-7.onnx -o squeezenet.onnx
 ```
 
 ### Step 2: Convert ONNX to Burn
 
 ```bash
 # Convert ONNX to Burn format
-burn-import --input simple_cnn.onnx --output simple_cnn_burn
+burn-import --input mnist-8.onnx --output mnist_burn
 
 # This creates:
-# - simple_cnn_burn.mpk (model weights)
-# - simple_cnn_burn.json (metadata)
+# - mnist_burn.mpk (model weights in MessagePack format)
+# - mnist_burn.json (model metadata)
 ```
 
-### Step 3: Test with Furnace
+### Step 3: Use with Furnace
 
 ```bash
 # Start Furnace with converted model
-./furnace --model-path simple_cnn_burn.mpk --port 3000
+./furnace --model-path mnist_burn.mpk --port 3000
 
-# Test inference
+# Test the model
 curl -X POST http://localhost:3000/predict \
   -H "Content-Type: application/json" \
-  -d '{"input": [/* 3072 values for 32x32x3 image */]}'
+  -d '{"input": [/* 784 values for 28x28 MNIST image */]}'
 ```
 
-## 🏭 Production Examples
+## 🧪 Complete Test Example
 
-### ResNet-18 from torchvision
-
-```python
-# resnet_to_onnx.py
-import torch
-import torchvision.models as models
-
-# Load pre-trained ResNet-18
-model = models.resnet18(pretrained=True)
-model.eval()
-
-# Export to ONNX
-dummy_input = torch.randn(1, 3, 224, 224)
-torch.onnx.export(
-    model,
-    dummy_input,
-    "resnet18.onnx",
-    export_params=True,
-    opset_version=11,
-    input_names=['input'],
-    output_names=['output']
-)
-```
+Use our automated test script:
 
 ```bash
-# Convert to Burn
-burn-import --input resnet18.onnx --output resnet18_burn
-
-# Use with Furnace
-./furnace --model-path resnet18_burn.mpk
+# Run comprehensive conversion test
+python examples/onnx_conversion/test_onnx_conversion.py
 ```
 
-### BERT from Hugging Face
+This script will:
+1. Download ONNX models from Model Zoo
+2. Test them with onnxruntime
+3. Convert to Burn format using burn-import
+4. Test with Furnace server
+5. Provide detailed results and troubleshooting
 
-```python
-# bert_to_onnx.py
-from transformers import BertModel, BertTokenizer
-import torch
+## 📊 Supported Models
 
-model_name = "bert-base-uncased"
-model = BertModel.from_pretrained(model_name)
-tokenizer = BertTokenizer.from_pretrained(model_name)
+### ✅ **Working Models**
+| Model | Size | Input Shape | Use Case |
+|-------|------|-------------|----------|
+| MNIST CNN | ~26KB | [1, 1, 28, 28] | Digit recognition |
+| SqueezeNet | ~5MB | [1, 3, 224, 224] | Lightweight image classification |
+| MobileNet v2 | ~14MB | [1, 3, 224, 224] | Mobile-friendly classification |
 
-# Prepare dummy input
-text = "Hello world"
-inputs = tokenizer(text, return_tensors="pt", max_length=512, padding="max_length")
+### ⚠️ **May Work (Test First)**
+| Model | Size | Notes |
+|-------|------|-------|
+| ResNet-18 | ~45MB | Some operators may not be supported |
+| ResNet-50 | ~98MB | Complex architecture, test carefully |
+| DenseNet | ~32MB | Dense connections may cause issues |
 
-# Export to ONNX
-torch.onnx.export(
-    model,
-    (inputs['input_ids'], inputs['attention_mask']),
-    "bert_base.onnx",
-    export_params=True,
-    opset_version=11,
-    input_names=['input_ids', 'attention_mask'],
-    output_names=['last_hidden_state']
-)
+### ❌ **Known Limitations**
+- **Transformer models** (BERT, GPT) - Complex attention mechanisms
+- **Object detection** (YOLO, SSD) - Post-processing operations
+- **Models with custom operators** - burn-import has limited operator support
+- **Dynamic shapes** - Static shapes work better
+
+## 🔧 Troubleshooting
+
+### Common Issues
+
+**1. "Unsupported operator" error:**
+```bash
+# Check which operators are used
+python -c "
+import onnx
+model = onnx.load('your_model.onnx')
+ops = set(node.op_type for node in model.graph.node)
+print('Operators used:', sorted(ops))
+"
 ```
 
-## ⚠️ Known Limitations
+**2. Shape mismatch errors:**
+- Ensure input shapes match exactly
+- Use static shapes instead of dynamic
+- Check batch dimension (usually 1 for inference)
 
-### ONNX → Burn Conversion
-- **Not all ONNX operators supported** by burn-import
-- **Complex models may fail** during conversion
-- **Custom layers** might not be supported
-- **Dynamic shapes** can be problematic
+**3. Conversion fails silently:**
+- Check burn-import version: `burn-import --version`
+- Try with simpler models first
+- Check file permissions and disk space
 
-### Workarounds
-1. **Simplify model architecture** before export
-2. **Use static shapes** instead of dynamic
-3. **Test conversion** with smaller models first
-4. **Check burn-import documentation** for supported operators
+### Testing Your Model
 
-## 🧪 Testing Your Converted Model
-
-Create a test script to validate the conversion:
+Before converting, test with onnxruntime:
 
 ```python
-# test_conversion.py
 import onnxruntime as ort
 import numpy as np
 
-# Test ONNX model
-onnx_session = ort.InferenceSession("simple_cnn.onnx")
-test_input = np.random.randn(1, 3, 32, 32).astype(np.float32)
-onnx_output = onnx_session.run(None, {"input": test_input})
+# Load and test ONNX model
+session = ort.InferenceSession("your_model.onnx")
+input_info = session.get_inputs()[0]
+print(f"Input: {input_info.name} {input_info.shape}")
 
-print("ONNX output shape:", onnx_output[0].shape)
-print("ONNX output sample:", onnx_output[0][0][:5])
-
-# Compare with Furnace output
-# (Use curl or HTTP client to test Furnace)
+# Create test input
+test_input = np.random.randn(1, 3, 224, 224).astype(np.float32)
+output = session.run(None, {input_info.name: test_input})
+print(f"Output shape: {output[0].shape}")
 ```
 
-## 📚 Resources
+## 📚 Model Sources
+
+### 🏭 **Production Models**
+- **[ONNX Model Zoo](https://github.com/onnx/models)**: Official pre-trained models
+- **[Hugging Face ONNX](https://huggingface.co/models?library=onnx)**: Community models
+- **[ONNX Runtime Models](https://onnxruntime.ai/docs/get-started/with-python.html#model-zoo)**: Optimized models
+
+### 🔄 **Model Conversion Tools**
+- **PyTorch**: `torch.onnx.export()`
+- **TensorFlow**: `tf2onnx` converter
+- **Scikit-learn**: `skl2onnx` converter
+- **Keras**: `keras2onnx` converter
+
+## 🎯 Best Practices
+
+### 1. **Start Simple**
+- Begin with MNIST or SqueezeNet
+- Test the conversion pipeline
+- Gradually move to complex models
+
+### 2. **Validate Outputs**
+- Compare ONNX vs Burn outputs
+- Use same test inputs
+- Check numerical accuracy
+
+### 3. **Optimize for Furnace**
+- Use static input shapes
+- Prefer smaller models for faster inference
+- Test with realistic input data
+
+### 4. **Production Deployment**
+- Validate model accuracy thoroughly
+- Test under load conditions
+- Monitor inference performance
+- Have fallback plans for unsupported models
+
+## 🚀 Next Steps
+
+1. **Try the automated test**: `python examples/onnx_conversion/test_onnx_conversion.py`
+2. **Convert your own models**: Follow the 3-step process above
+3. **Report issues**: Help improve burn-import by reporting conversion failures
+4. **Contribute**: Share working model conversions with the community
+
+## 📖 Additional Resources
 
 - **[burn-import Documentation](https://github.com/tracel-ai/burn/tree/main/crates/burn-import)**
-- **[ONNX Model Zoo](https://github.com/onnx/models)**: Pre-trained ONNX models
-- **[PyTorch ONNX Export](https://pytorch.org/docs/stable/onnx.html)**
-- **[TensorFlow to ONNX](https://github.com/onnx/tensorflow-onnx)**
-
-## 🎯 Next Steps
-
-1. **Start with simple models** (MLP, basic CNN)
-2. **Test conversion pipeline** thoroughly
-3. **Validate outputs** match original model
-4. **Scale to production models** gradually
-5. **Report issues** to burn-import if conversion fails
+- **[Burn Framework Guide](https://burn.dev/book/)**
+- **[ONNX Specification](https://github.com/onnx/onnx/blob/main/docs/Operators.md)**
+- **[Furnace Documentation](../../README.md)**

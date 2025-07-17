@@ -43,25 +43,24 @@ model.save_file("my_model", &recorder)?; // Creates my_model.mpk
 - **[Burn Community](https://github.com/tracel-ai/burn/discussions)**: Community-shared models and discussions
 - **Your own trained models**
 
-### 🛠️ **Converting from Other Formats**
-- **ONNX → Burn**: Using burn-import tool
-- **PyTorch → Burn**: Via ONNX conversion (see [ONNX conversion guide](onnx_conversion/README.md))
-- **TensorFlow → Burn**: Via ONNX conversion
+### 🛠️ **Converting from ONNX Models**
+- **ONNX → Burn**: Direct conversion using burn-import tool
+- **PyTorch → ONNX → Burn**: Export PyTorch to ONNX first, then convert
+- **TensorFlow → ONNX → Burn**: Export TensorFlow to ONNX first, then convert
 
-**Step-by-step conversion example:**
+**Direct ONNX conversion (Recommended):**
 ```bash
-# 1. Install dependencies
-pip install torch torchvision onnx onnxruntime
+# 1. Install burn-import
 cargo install burn-import
 
-# 2. Export PyTorch to ONNX
-python examples/onnx_conversion/pytorch_to_onnx.py
+# 2. Download ONNX model from model zoo
+curl -L https://github.com/onnx/models/raw/main/vision/classification/mnist/model/mnist-8.onnx -o mnist-8.onnx
 
 # 3. Convert ONNX to Burn
-burn-import --input simple_mlp.onnx --output simple_mlp_burn
+burn-import --input mnist-8.onnx --output mnist_burn
 
 # 4. Use with Furnace
-./furnace --model-path simple_mlp_burn.mpk
+./furnace --model-path mnist_burn.mpk
 ```
 
 ### 🧪 **For Testing/Development**
@@ -87,30 +86,34 @@ burn-import --input simple_mlp.onnx --output simple_mlp_burn
 
 ### 🔄 ONNX Conversion Example (`onnx_conversion/`)
 
-**Purpose**: Convert existing PyTorch/TensorFlow models to Burn format for production use
+**Purpose**: Convert existing ONNX models to Burn format for production use
 
 **What it demonstrates**:
-- PyTorch → ONNX → Burn conversion pipeline
-- Production-ready model conversion (ResNet-18, etc.)
+- ONNX → Burn conversion using burn-import
+- Production-ready model conversion (ResNet-18, MobileNet, etc.)
 - Testing and validation of converted models
 - Complete step-by-step conversion guide
+- Automated testing pipeline
 
 **When to use**:
-- ✅ **Production use** with existing trained models
-- ✅ Converting models from other frameworks
+- ✅ **Production use** with existing ONNX models
+- ✅ Converting models from ONNX Model Zoo
 - ✅ Using pre-trained models (ImageNet, etc.)
 - ✅ Real-world deployment scenarios
 
 **Quick start**:
 ```bash
-# 1. Export PyTorch models to ONNX
-python examples/onnx_conversion/pytorch_to_onnx.py
+# 1. Download ONNX model from model zoo
+curl -L https://github.com/onnx/models/raw/main/vision/classification/mnist/model/mnist-8.onnx -o mnist-8.onnx
 
 # 2. Convert ONNX to Burn
-burn-import --input simple_mlp.onnx --output simple_mlp_burn
+burn-import --input mnist-8.onnx --output mnist_burn
 
 # 3. Use with Furnace
-./furnace --model-path simple_mlp_burn.mpk
+./furnace --model-path mnist_burn.mpk
+
+# 4. Test the complete pipeline
+python examples/onnx_conversion/test_onnx_conversion.py
 ```
 
 ## Example Structure

@@ -88,28 +88,42 @@ model.save_file("my_model", &recorder)?; // Creates my_model.mpk
 
 ### 🛠️ Model Conversion (Step-by-Step Guide)
 
-**Complete PyTorch → ONNX → Burn conversion:**
+**Using pre-trained ONNX models (Recommended):**
 
 ```bash
-# 1. Install dependencies
-pip install torch torchvision onnx onnxruntime
+# 1. Install burn-import
 cargo install burn-import
 
-# 2. Export PyTorch model to ONNX
-python examples/onnx_conversion/pytorch_to_onnx.py
+# 2. Download ONNX model from model zoo
+curl -L https://github.com/onnx/models/raw/main/vision/classification/mnist/model/mnist-8.onnx -o mnist-8.onnx
 
 # 3. Convert ONNX to Burn format
-burn-import --input simple_mlp.onnx --output simple_mlp_burn
+burn-import --input mnist-8.onnx --output mnist_burn
 
 # 4. Use with Furnace
-./furnace --model-path simple_mlp_burn.mpk
+./furnace --model-path mnist_burn.mpk
 ```
 
-**Supported conversion path:**
-- ✅ PyTorch → ONNX → Burn (.mpk)
-- ✅ TensorFlow → ONNX → Burn (.mpk)
-- ✅ Scikit-learn → ONNX → Burn (.mpk)
-- ⚠️ Complex models may have limitations (see [conversion guide](examples/onnx_conversion/README.md))
+**More production models:**
+```bash
+# ResNet-18 (ImageNet classification)
+curl -L https://github.com/onnx/models/raw/main/vision/classification/resnet/model/resnet18-v1-7.onnx -o resnet18.onnx
+burn-import --input resnet18.onnx --output resnet18_burn
+
+# MobileNet v2 (lightweight, mobile-friendly)
+curl -L https://github.com/onnx/models/raw/main/vision/classification/mobilenet/model/mobilenetv2-7.onnx -o mobilenetv2.onnx
+burn-import --input mobilenetv2.onnx --output mobilenetv2_burn
+
+# SqueezeNet (very lightweight)
+curl -L https://github.com/onnx/models/raw/main/vision/classification/squeezenet/model/squeezenet1.0-7.onnx -o squeezenet.onnx
+burn-import --input squeezenet.onnx --output squeezenet_burn
+```
+
+**ONNX → Burn conversion requirements:**
+- ✅ **ONNX Model Zoo**: Pre-trained models ready to convert
+- ✅ **Hugging Face ONNX**: Community models in ONNX format
+- ✅ **Custom ONNX**: Your own exported ONNX models
+- ⚠️ **Limitations**: Not all ONNX operators supported by burn-import
 
 ### 🎯 Popular Burn Model Examples
 - **[MNIST CNN](https://github.com/tracel-ai/burn/tree/main/examples/mnist)**: Convolutional neural network for digit recognition
