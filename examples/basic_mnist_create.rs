@@ -79,13 +79,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create some dummy training to initialize weights properly
     println!("📊 Initializing model with dummy forward pass...");
-    let dummy_input = Tensor::random([1, 784], burn::tensor::Distribution::Normal(0.0, 1.0), &device);
+    let dummy_input = Tensor::random(
+        [1, 784],
+        burn::tensor::Distribution::Normal(0.0, 1.0),
+        &device,
+    );
     let _output = model.forward(dummy_input);
 
     // Save model
     let recorder = CompactRecorder::new();
     let model_path = output_dir.join("model");
-    
+
     println!("💾 Saving model to: {}.mpk", model_path.display());
     model.clone().save_file(&model_path, &recorder)?;
 
@@ -122,7 +126,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   🏷️  Model type: {}", metadata.model_type);
 
     println!("\n🚀 Next steps:");
-    println!("   1. Start the server: cargo run --bin furnace -- --model-path {} --log-level debug", model_path.with_extension("mpk").display());
+    println!(
+        "   1. Start the server: cargo run --bin furnace -- --model-path {} --log-level debug",
+        model_path.with_extension("mpk").display()
+    );
     println!("   2. Test inference: cargo run --example basic_mnist_test");
 
     Ok(())

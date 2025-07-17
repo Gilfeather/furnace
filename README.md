@@ -24,29 +24,33 @@ A high-performance, lightweight HTTP inference server that serves machine learni
 
 ## 🚀 Quick Start
 
-### 1. Clone and Build
+### Option A: Using Your Own .mpk Model (Recommended)
 
 ```bash
-git clone https://github.com/Gilfeather/furnace.git
+# 1. Download or build Furnace
+curl -L https://github.com/Gilfeather/furnace/releases/latest/download/furnace-linux-x86_64 -o furnace
+chmod +x furnace
+
+# 2. Run with your Burn model
+./furnace --model-path /path/to/your/model.mpk --port 3000
+```
+
+### Option B: Testing with Sample Model
+
+```bash
+# 1. Clone and build
+git clone https://github.com/yourusername/furnace.git
 cd furnace
 cargo build --release
+
+# 2. Create a sample model for testing
+cargo run --example basic_mnist_create
+
+# 3. Start the server
+./target/release/furnace --model-path examples/basic_mnist/model.mpk --port 3000
 ```
 
-### 2. Create a Sample Model
-
-```bash
-cargo run --bin create_sample_model
-```
-
-This creates `sample_model.mpk` and `sample_model.json` files.
-
-### 3. Start the Server
-
-```bash
-./target/release/furnace --model-path ./sample_model --port 3000
-```
-
-### 4. Make Predictions
+### 3. Make Predictions
 
 ```bash
 # Health check
@@ -59,6 +63,41 @@ curl http://localhost:3000/model/info
 curl -X POST http://localhost:3000/predict \
   -H "Content-Type: application/json" \
   -d '{"input": '$(python3 -c "print([0.1] * 784)")'}'
+```
+
+## 📦 Getting .mpk Model Files
+
+Furnace uses Burn's MessagePack (.mpk) format. Here's how to obtain .mpk files:
+
+### 🔥 From Burn Training Scripts
+```rust
+use burn::record::CompactRecorder;
+
+// After training your model
+let recorder = CompactRecorder::new();
+model.save_file("my_model", &recorder)?; // Creates my_model.mpk
+```
+
+### 📥 From Model Sources
+- **Burn Model Zoo**: Community models in Burn format
+- **Hugging Face**: Models converted to Burn format
+- **Your Training**: Export from your Burn training scripts
+- **Converted Models**: ONNX/PyTorch models converted to Burn
+
+### 🛠️ Model Conversion
+```bash
+# Convert ONNX to Burn (example)
+burn-import --input model.onnx --output model.mpk
+
+# Convert PyTorch to Burn (via ONNX)
+# 1. Export PyTorch to ONNX
+# 2. Convert ONNX to Burn
+```
+
+### 🧪 For Testing/Development
+Use our examples to create sample models:
+```bash
+cargo run --example basic_mnist_create  # Creates MNIST-like MLP
 ```
 
 ## 📊 Performance
