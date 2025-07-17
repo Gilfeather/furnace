@@ -35,6 +35,7 @@ cuda = []
 [dependencies]
 # ML Framework
 burn = { version = "0.17", features = ["train", "std", "ndarray"] }
+burn-import = { version = "0.17", features = ["onnx"] }
 ndarray = "0.16"
 
 # Web Framework
