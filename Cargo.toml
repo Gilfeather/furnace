@@ -71,6 +71,9 @@ tower = { version = "0.5", features = ["util"] }
 # Benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
 
+# Examples dependencies
+rand = "0.8"
+
 
 
 [[bench]]

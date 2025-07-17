@@ -1966,6 +1966,7 @@ dependencies = [
  "clap",
  "criterion",
  "ndarray",
+ "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",

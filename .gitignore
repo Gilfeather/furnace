@@ -28,11 +28,16 @@ Thumbs.db
 *.log
 logs/
 
-# Models (uncomment if you don't want to track model files)
-# *.burn
-# *.onnx
-# *.pt
-# *.pth
+# Models and sample data (generated at runtime)
+*.burn
+*.mpk
+*.onnx
+*.pt
+*.pth
+sample_model.*
+examples/*/model.*
+examples/*/data/
+examples/*/output/
 
 # Temporary files
 *.tmp
