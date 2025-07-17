@@ -148,9 +148,11 @@ fn parse_args() -> Result<CliArgs> {
     // Port validation with range check
     let port = *matches.get_one::<u16>("port").unwrap();
     if port < 1024 {
-        return Err(CliError::InvalidPort(
-            format!("Port {} is below 1024 (requires root privileges)", port)
-        ).into());
+        return Err(CliError::InvalidPort(format!(
+            "Port {} is below 1024 (requires root privileges)",
+            port
+        ))
+        .into());
     }
 
     let host = matches.get_one::<String>("host").unwrap().clone();
@@ -167,14 +169,16 @@ fn parse_args() -> Result<CliArgs> {
             arg: "max-concurrent-requests".to_string(),
             value: max_concurrent_requests.to_string(),
             reason: "must be greater than 0".to_string(),
-        }.into());
+        }
+        .into());
     }
     if max_concurrent_requests > 10000 {
         return Err(CliError::InvalidArgument {
             arg: "max-concurrent-requests".to_string(),
             value: max_concurrent_requests.to_string(),
             reason: "must be 10000 or less".to_string(),
-        }.into());
+        }
+        .into());
     }
     let max_concurrent_requests = Some(max_concurrent_requests);
 
@@ -217,23 +221,28 @@ fn validate_host(host: &str) -> Result<()> {
 
     // Basic hostname validation
     if host.len() > 253 {
-        return Err(CliError::InvalidHost(
-            "Hostname too long (max 253 characters)".to_string(),
-        ).into());
+        return Err(
+            CliError::InvalidHost("Hostname too long (max 253 characters)".to_string()).into(),
+        );
     }
 
     // Check for valid hostname characters
-    if !host.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-') {
-        return Err(CliError::InvalidHost(
-            "Hostname contains invalid characters".to_string(),
-        ).into());
+    if !host
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '.' || c == '-')
+    {
+        return Err(
+            CliError::InvalidHost("Hostname contains invalid characters".to_string()).into(),
+        );
     }
 
     // Check that hostname doesn't start or end with hyphen or dot
-    if host.starts_with('-') || host.ends_with('-') || host.starts_with('.') || host.ends_with('.') {
+    if host.starts_with('-') || host.ends_with('-') || host.starts_with('.') || host.ends_with('.')
+    {
         return Err(CliError::InvalidHost(
             "Hostname cannot start or end with hyphen or dot".to_string(),
-        ).into());
+        )
+        .into());
     }
 
     Ok(())
@@ -246,7 +255,8 @@ fn validate_model_path(model_path: &PathBuf) -> Result<()> {
         return Err(CliError::InvalidModelPath {
             path: model_path.clone(),
             reason: "file does not exist".to_string(),
-        }.into());
+        }
+        .into());
     }
 
     // Check if it's a file (not a directory)
@@ -254,23 +264,29 @@ fn validate_model_path(model_path: &PathBuf) -> Result<()> {
         return Err(CliError::InvalidModelPath {
             path: model_path.clone(),
             reason: "path is not a file".to_string(),
-        }.into());
+        }
+        .into());
     }
 
     // Validate .burn or .mpk extension
     match model_path.extension() {
-        Some(ext) if ext == "burn" || ext == "mpk" => {},
+        Some(ext) if ext == "burn" || ext == "mpk" => {}
         Some(ext) => {
             return Err(CliError::InvalidModelPath {
                 path: model_path.clone(),
-                reason: format!("invalid extension '.{}', expected '.burn' or '.mpk'", ext.to_string_lossy()),
-            }.into());
-        },
+                reason: format!(
+                    "invalid extension '.{}', expected '.burn' or '.mpk'",
+                    ext.to_string_lossy()
+                ),
+            }
+            .into());
+        }
         None => {
             return Err(CliError::InvalidModelPath {
                 path: model_path.clone(),
                 reason: "file must have .burn or .mpk extension".to_string(),
-            }.into());
+            }
+            .into());
         }
     }
 
@@ -281,14 +297,16 @@ fn validate_model_path(model_path: &PathBuf) -> Result<()> {
                 return Err(CliError::InvalidModelPath {
                     path: model_path.clone(),
                     reason: "file is not readable".to_string(),
-                }.into());
+                }
+                .into());
             }
-        },
+        }
         Err(e) => {
             return Err(CliError::InvalidModelPath {
                 path: model_path.clone(),
                 reason: format!("cannot access file metadata: {}", e),
-            }.into());
+            }
+            .into());
         }
     }
 
@@ -300,20 +318,24 @@ fn validate_model_path(model_path: &PathBuf) -> Result<()> {
                 return Err(CliError::InvalidModelPath {
                     path: model_path.clone(),
                     reason: "file is empty".to_string(),
-                }.into());
+                }
+                .into());
             }
-            if size > 10 * 1024 * 1024 * 1024 { // 10GB limit
+            if size > 10 * 1024 * 1024 * 1024 {
+                // 10GB limit
                 return Err(CliError::InvalidModelPath {
                     path: model_path.clone(),
                     reason: "file is too large (>10GB)".to_string(),
-                }.into());
+                }
+                .into());
             }
-        },
+        }
         Err(e) => {
             return Err(CliError::InvalidModelPath {
                 path: model_path.clone(),
                 reason: format!("cannot read file size: {}", e),
-            }.into());
+            }
+            .into());
         }
     }
 
@@ -333,7 +355,8 @@ fn setup_logging(log_level: &str) -> Result<()> {
     // Check if we're in production mode (via environment variable)
     let is_production = std::env::var("FURNACE_ENV")
         .unwrap_or_else(|_| "development".to_string())
-        .to_lowercase() == "production";
+        .to_lowercase()
+        == "production";
 
     // Create environment filter for better log control
     let env_filter = tracing_subscriber::EnvFilter::builder()
@@ -389,13 +412,13 @@ async fn main() -> Result<()> {
 
     // Generate a unique session ID for this server instance
     let session_id = Uuid::new_v4();
-    
+
     info!(
         session_id = %session_id,
         version = env!("CARGO_PKG_VERSION"),
         "🔥 Starting furnace inference server"
     );
-    
+
     info!(
         session_id = %session_id,
         model_path = %args.model_path.display(),
@@ -439,7 +462,7 @@ async fn main() -> Result<()> {
                 autotuning = args.enable_autotuning,
                 "✅ Model loaded successfully"
             );
-            
+
             if args.enable_kernel_fusion {
                 info!(
                     session_id = %session_id,
@@ -479,7 +502,7 @@ async fn main() -> Result<()> {
         max_concurrent_requests = ?args.max_concurrent_requests,
         "🚀 Starting HTTP server"
     );
-    
+
     if let Err(e) = api::start_server_with_config(server_config, model).await {
         error!(
             session_id = %session_id,
