@@ -24,29 +24,33 @@ A high-performance, lightweight HTTP inference server that serves machine learni
 
 ## 🚀 Quick Start
 
-### 1. Clone and Build
+### Option A: Using Your Own .mpk Model (Recommended)
 
 ```bash
-git clone https://github.com/Gilfeather/furnace.git
+# 1. Download or build Furnace
+curl -L https://github.com/Gilfeather/furnace/releases/latest/download/furnace-linux-x86_64 -o furnace
+chmod +x furnace
+
+# 2. Run with your Burn model
+./furnace --model-path /path/to/your/model.mpk --port 3000
+```
+
+### Option B: Testing with Sample Model
+
+```bash
+# 1. Clone and build
+git clone https://github.com/yourusername/furnace.git
 cd furnace
 cargo build --release
+
+# 2. Create a sample model for testing
+cargo run --example basic_mnist_create
+
+# 3. Start the server
+./target/release/furnace --model-path examples/basic_mnist/model.mpk --port 3000
 ```
 
-### 2. Create a Sample Model
-
-```bash
-cargo run --bin create_sample_model
-```
-
-This creates `sample_model.mpk` and `sample_model.json` files.
-
-### 3. Start the Server
-
-```bash
-./target/release/furnace --model-path ./sample_model --port 3000
-```
-
-### 4. Make Predictions
+### 3. Make Predictions
 
 ```bash
 # Health check
@@ -59,6 +63,78 @@ curl http://localhost:3000/model/info
 curl -X POST http://localhost:3000/predict \
   -H "Content-Type: application/json" \
   -d '{"input": '$(python3 -c "print([0.1] * 784)")'}'
+```
+
+## 📦 Getting .mpk Model Files
+
+Furnace uses Burn's MessagePack (.mpk) format. Here's how to obtain .mpk files:
+
+### 🔥 From Burn Training Scripts
+```rust
+use burn::record::CompactRecorder;
+
+// After training your model
+let recorder = CompactRecorder::new();
+model.save_file("my_model", &recorder)?; // Creates my_model.mpk
+```
+
+### 📥 From Model Sources
+- **[Burn Examples](https://github.com/tracel-ai/burn/tree/main/examples)**: Official Burn examples with pre-trained models
+- **[Burn Book](https://burn.dev/book/)**: Official documentation with model examples
+- **[Hugging Face](https://huggingface.co/models?library=burn)**: Models converted to Burn format
+- **[Burn Community](https://github.com/tracel-ai/burn/discussions)**: Community-shared models and discussions
+- **Your Training**: Export from your Burn training scripts
+- **Converted Models**: ONNX/PyTorch models converted to Burn
+
+### 🛠️ Model Conversion (Step-by-Step Guide)
+
+**Using pre-trained ONNX models (Recommended):**
+
+```bash
+# 1. Install burn-import
+cargo install burn-import
+
+# 2. Download ONNX model from model zoo
+curl -L https://github.com/onnx/models/raw/main/vision/classification/mnist/model/mnist-8.onnx -o mnist-8.onnx
+
+# 3. Convert ONNX to Burn format
+burn-import --input mnist-8.onnx --output mnist_burn
+
+# 4. Use with Furnace
+./furnace --model-path mnist_burn.mpk
+```
+
+**More production models:**
+```bash
+# ResNet-18 (ImageNet classification)
+curl -L https://github.com/onnx/models/raw/main/vision/classification/resnet/model/resnet18-v1-7.onnx -o resnet18.onnx
+burn-import --input resnet18.onnx --output resnet18_burn
+
+# MobileNet v2 (lightweight, mobile-friendly)
+curl -L https://github.com/onnx/models/raw/main/vision/classification/mobilenet/model/mobilenetv2-7.onnx -o mobilenetv2.onnx
+burn-import --input mobilenetv2.onnx --output mobilenetv2_burn
+
+# SqueezeNet (very lightweight)
+curl -L https://github.com/onnx/models/raw/main/vision/classification/squeezenet/model/squeezenet1.0-7.onnx -o squeezenet.onnx
+burn-import --input squeezenet.onnx --output squeezenet_burn
+```
+
+**ONNX → Burn conversion requirements:**
+- ✅ **ONNX Model Zoo**: Pre-trained models ready to convert
+- ✅ **Hugging Face ONNX**: Community models in ONNX format
+- ✅ **Custom ONNX**: Your own exported ONNX models
+- ⚠️ **Limitations**: Not all ONNX operators supported by burn-import
+
+### 🎯 Popular Burn Model Examples
+- **[MNIST CNN](https://github.com/tracel-ai/burn/tree/main/examples/mnist)**: Convolutional neural network for digit recognition
+- **[Text Classification](https://github.com/tracel-ai/burn/tree/main/examples/text-classification)**: BERT-like models for NLP tasks
+- **[Image Classification](https://github.com/tracel-ai/burn/tree/main/examples/image-classification)**: ResNet and other vision models
+- **[Custom Training](https://github.com/tracel-ai/burn/tree/main/examples/custom-training-loop)**: How to train and save your own models
+
+### 🧪 For Testing/Development
+Use our examples to create sample models:
+```bash
+cargo run --example basic_mnist_create  # Creates MNIST-like MLP
 ```
 
 ## 📊 Performance
@@ -75,14 +151,22 @@ Real-world model performance will vary significantly based on model size and com
 | Memory Usage | **<50MB** |
 | Startup Time | **<100ms** |
 
-### 🚧 Planned Benchmarks (Coming Soon)
-| Model Type | Size | Inference Time | Status |
-|------------|------|----------------|---------|
-| ResNet-18 | ~45MB | TBD | 🔄 In Progress |
-| BERT-base | ~110MB | TBD | 📋 Planned |
-| YOLO v8n | ~6MB | TBD | 📋 Planned |
+### 🚧 Production Model Support (Roadmap)
+| Model Type | Size | Status | Notes |
+|------------|------|---------|-------|
+| ResNet-18 | ~45MB | 📋 Planned | Awaiting Burn ecosystem maturity |
+| BERT-base | ~110MB | 📋 Planned | Text processing models |
+| YOLO v8n | ~6MB | 📋 Planned | Object detection |
+| Custom Models | Varies | ✅ **Supported** | Train your own with Burn |
 
-*Current tests: MNIST-like MLP on standard hardware. Production model benchmarks coming soon.*
+**Current Reality**: Burn is a newer framework with limited pre-trained models. Most production use cases require training custom models or converting from other frameworks.
+
+### 🚧 For Production Use Cases
+If you need production-ready models right now, consider:
+- **Training your own models** with Burn (recommended for new projects)
+- **Converting existing models** from PyTorch/TensorFlow via ONNX
+- **Using other inference servers** (TorchServe, TensorFlow Serving) for immediate production needs
+- **Waiting for Burn ecosystem maturity** for more pre-trained models
 
 ## � API Enpdpoints
 

@@ -31,11 +31,12 @@ default = []
 wgpu = []
 metal = []
 cuda = []
+burn-import = ["dep:burn-import"]
 
 [dependencies]
 # ML Framework
 burn = { version = "0.17", features = ["train", "std", "ndarray"] }
-burn-import = { version = "0.17", features = ["onnx"] }
+burn-import = { version = "0.17", features = ["onnx"], optional = true }
 ndarray = "0.16"
 
 # Web Framework
@@ -70,6 +71,11 @@ tower = { version = "0.5", features = ["util"] }
 
 # Benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
+
+# Examples dependencies
+rand = "0.8"
+ureq = "2.10"
+protobuf = "3.4"
 
 
 
