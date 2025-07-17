@@ -79,8 +79,10 @@ model.save_file("my_model", &recorder)?; // Creates my_model.mpk
 ```
 
 ### 📥 From Model Sources
-- **Burn Model Zoo**: Community models in Burn format
-- **Hugging Face**: Models converted to Burn format
+- **[Burn Examples](https://github.com/tracel-ai/burn/tree/main/examples)**: Official Burn examples with pre-trained models
+- **[Burn Book](https://burn.dev/book/)**: Official documentation with model examples
+- **[Hugging Face](https://huggingface.co/models?library=burn)**: Models converted to Burn format
+- **[Burn Community](https://github.com/tracel-ai/burn/discussions)**: Community-shared models and discussions
 - **Your Training**: Export from your Burn training scripts
 - **Converted Models**: ONNX/PyTorch models converted to Burn
 
@@ -93,6 +95,12 @@ burn-import --input model.onnx --output model.mpk
 # 1. Export PyTorch to ONNX
 # 2. Convert ONNX to Burn
 ```
+
+### 🎯 Popular Burn Model Examples
+- **[MNIST CNN](https://github.com/tracel-ai/burn/tree/main/examples/mnist)**: Convolutional neural network for digit recognition
+- **[Text Classification](https://github.com/tracel-ai/burn/tree/main/examples/text-classification)**: BERT-like models for NLP tasks
+- **[Image Classification](https://github.com/tracel-ai/burn/tree/main/examples/image-classification)**: ResNet and other vision models
+- **[Custom Training](https://github.com/tracel-ai/burn/tree/main/examples/custom-training-loop)**: How to train and save your own models
 
 ### 🧪 For Testing/Development
 Use our examples to create sample models:

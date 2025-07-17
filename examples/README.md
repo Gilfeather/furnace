@@ -37,10 +37,11 @@ model.save_file("my_model", &recorder)?; // Creates my_model.mpk
 ```
 
 ### 📥 **From Model Repositories**
-- Hugging Face models (if converted to Burn format)
-- Burn model zoo repositories
-- Community-shared Burn models
-- Your own trained models
+- **[Burn Examples](https://github.com/tracel-ai/burn/tree/main/examples)**: Official Burn examples with pre-trained models
+- **[Burn Book](https://burn.dev/book/)**: Official documentation with model examples  
+- **[Hugging Face](https://huggingface.co/models?library=burn)**: Models converted to Burn format
+- **[Burn Community](https://github.com/tracel-ai/burn/discussions)**: Community-shared models and discussions
+- **Your own trained models**
 
 ### 🛠️ **Converting from Other Formats**
 - ONNX → Burn (using burn-import)
