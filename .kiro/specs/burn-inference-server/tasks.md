@@ -28,8 +28,8 @@
     - Handle inference errors and timeouts gracefully
     - _Requirements: 2.1, 2.2, 2.5, 8.4_
 
-- [ ] 3. Enhance CLI argument handling and validation
-  - [ ] 3.1 Improve CLI argument parsing and validation
+- [x] 3. Enhance CLI argument handling and validation
+  - [x] 3.1 Improve CLI argument parsing and validation
     - Add comprehensive input validation for model path, host, and port
     - Implement backend selection argument with validation (CPU, WGPU, Metal, CUDA)
     - Add max-concurrent-requests argument for concurrency control
@@ -39,7 +39,7 @@
     - Validate model file existence and permissions
     - _Requirements: 1.1, 1.3, 1.4, 5.1, 5.2, 5.4, 5.5, 10.1, 11.2_
 
-  - [ ] 3.2 Implement structured logging setup
+  - [x] 3.2 Implement structured logging setup
     - Configure tracing subscriber with appropriate log levels
     - Add structured logging for model loading, server startup, and requests
     - Implement log formatting for production and development environments
