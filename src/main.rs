@@ -4,6 +4,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::{error, info, Level};
+use uuid::Uuid;
 
 use error::{CliError, Result};
 use furnace::{api, error, model};
@@ -38,10 +39,11 @@ fn parse_args() -> Result<CliArgs> {
                 .long("model-path")
                 .short('m')
                 .value_name("PATH")
-                .help("Path to the .burn model file")
+                .help("Path to the .burn or .mpk model file")
                 .long_help(
-                    "Path to the .burn model file to load for inference. \
-                    The file must exist, be readable, and have a .burn extension."
+                    "Path to the model file to load for inference. \
+                    Supports both .burn and .mpk (MessagePack) formats. \
+                    The file must exist, be readable, and have a supported extension."
                 )
                 .required(true),
         )
@@ -255,19 +257,19 @@ fn validate_model_path(model_path: &PathBuf) -> Result<()> {
         }.into());
     }
 
-    // Validate .burn extension
+    // Validate .burn or .mpk extension
     match model_path.extension() {
-        Some(ext) if ext == "burn" => {},
+        Some(ext) if ext == "burn" || ext == "mpk" => {},
         Some(ext) => {
             return Err(CliError::InvalidModelPath {
                 path: model_path.clone(),
-                reason: format!("invalid extension '.{}', expected '.burn'", ext.to_string_lossy()),
+                reason: format!("invalid extension '.{}', expected '.burn' or '.mpk'", ext.to_string_lossy()),
             }.into());
         },
         None => {
             return Err(CliError::InvalidModelPath {
                 path: model_path.clone(),
-                reason: "file must have .burn extension".to_string(),
+                reason: "file must have .burn or .mpk extension".to_string(),
             }.into());
         }
     }
@@ -318,7 +320,7 @@ fn validate_model_path(model_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn setup_logging(log_level: &str) {
+fn setup_logging(log_level: &str) -> Result<()> {
     let level = match log_level.to_lowercase().as_str() {
         "error" => Level::ERROR,
         "warn" => Level::WARN,
@@ -328,43 +330,94 @@ fn setup_logging(log_level: &str) {
         _ => Level::INFO,
     };
 
-    tracing_subscriber::fmt()
-        .with_max_level(level)
-        .with_target(false)
-        .with_thread_ids(true)
-        .with_file(true)
-        .with_line_number(true)
-        .with_env_filter(tracing_subscriber::EnvFilter::new(format!(
-            "{}={}",
-            env!("CARGO_PKG_NAME"),
-            level
-        )))
-        .init();
+    // Check if we're in production mode (via environment variable)
+    let is_production = std::env::var("FURNACE_ENV")
+        .unwrap_or_else(|_| "development".to_string())
+        .to_lowercase() == "production";
+
+    // Create environment filter for better log control
+    let env_filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(level.into())
+        .from_env()
+        .map_err(|e| CliError::InvalidArgument {
+            arg: "log-level".to_string(),
+            value: log_level.to_string(),
+            reason: format!("failed to create log filter: {}", e),
+        })?;
+
+    if is_production {
+        // Production: JSON structured logging
+        tracing_subscriber::fmt()
+            .json()
+            .with_max_level(level)
+            .with_current_span(false)
+            .with_span_list(true)
+            .with_target(true)
+            .with_thread_ids(true)
+            .with_file(false)
+            .with_line_number(false)
+            .with_env_filter(env_filter)
+            .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc_3339())
+            .init();
+    } else {
+        // Development: Human-readable logging with colors
+        tracing_subscriber::fmt()
+            .with_max_level(level)
+            .with_target(false)
+            .with_thread_ids(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_env_filter(env_filter)
+            .with_timer(tracing_subscriber::fmt::time::ChronoLocal::rfc_3339())
+            .init();
+    }
+
+    // Log the logging configuration
+    tracing::info!(
+        log_level = %level,
+        is_production = is_production,
+        "🔧 Logging initialized"
+    );
+
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = parse_args()?;
-    setup_logging(&args.log_level);
+    setup_logging(&args.log_level)?;
 
+    // Generate a unique session ID for this server instance
+    let session_id = Uuid::new_v4();
+    
     info!(
-        "🔥 Starting furnace inference server v{}",
-        env!("CARGO_PKG_VERSION")
+        session_id = %session_id,
+        version = env!("CARGO_PKG_VERSION"),
+        "🔥 Starting furnace inference server"
     );
-    info!("Configuration:");
-    info!("  Model path: {:?}", args.model_path);
-    info!("  Server address: {}:{}", args.host, args.port);
-    info!("  Backend: {:?}", args.backend.as_deref().unwrap_or("cpu"));
+    
     info!(
-        "  Max concurrent requests: {:?}",
-        args.max_concurrent_requests
+        session_id = %session_id,
+        model_path = %args.model_path.display(),
+        server_host = %args.host,
+        server_port = args.port,
+        backend = %args.backend.as_deref().unwrap_or("cpu"),
+        max_concurrent_requests = ?args.max_concurrent_requests,
+        kernel_fusion = args.enable_kernel_fusion,
+        autotuning = args.enable_autotuning,
+        log_level = %args.log_level,
+        "📋 Server configuration"
     );
-    info!("  Kernel fusion: {}", args.enable_kernel_fusion);
-    info!("  Autotuning: {}", args.enable_autotuning);
-    info!("  Log level: {}", args.log_level);
 
     // Load model with optimization settings
-    info!("📦 Loading model from: {:?}", args.model_path);
+    info!(
+        session_id = %session_id,
+        model_path = %args.model_path.display(),
+        backend = %args.backend.as_deref().unwrap_or("cpu"),
+        kernel_fusion = args.enable_kernel_fusion,
+        autotuning = args.enable_autotuning,
+        "📦 Loading model"
+    );
 
     let model_config = model::ModelConfig {
         backend: args.backend.clone(),
@@ -374,20 +427,40 @@ async fn main() -> Result<()> {
 
     let model = match model::load_model_with_config(&args.model_path, model_config) {
         Ok(model) => {
-            info!("✅ Model loaded successfully: {}", model.get_info().name);
-            info!("  Input shape: {:?}", model.get_info().input_spec.shape);
-            info!("  Output shape: {:?}", model.get_info().output_spec.shape);
-            info!("  Backend: {}", model.get_info().backend);
+            let model_info = model.get_info();
+            info!(
+                session_id = %session_id,
+                model_name = %model_info.name,
+                input_shape = ?model_info.input_spec.shape,
+                output_shape = ?model_info.output_spec.shape,
+                backend = %model_info.backend,
+                model_type = %model_info.model_type,
+                kernel_fusion = args.enable_kernel_fusion,
+                autotuning = args.enable_autotuning,
+                "✅ Model loaded successfully"
+            );
+            
             if args.enable_kernel_fusion {
-                info!("  🚀 Kernel fusion enabled");
+                info!(
+                    session_id = %session_id,
+                    "🚀 Kernel fusion optimizations enabled"
+                );
             }
             if args.enable_autotuning {
-                info!("  🎯 Autotuning cache enabled");
+                info!(
+                    session_id = %session_id,
+                    "🎯 Autotuning cache optimizations enabled"
+                );
             }
             model
         }
         Err(e) => {
-            error!("❌ Failed to load model: {}", e);
+            error!(
+                session_id = %session_id,
+                model_path = %args.model_path.display(),
+                error = %e,
+                "❌ Failed to load model"
+            );
             std::process::exit(1);
         }
     };
@@ -399,9 +472,22 @@ async fn main() -> Result<()> {
         max_concurrent_requests: args.max_concurrent_requests,
     };
 
-    info!("🚀 Starting HTTP server on {}:{}", args.host, args.port);
+    info!(
+        session_id = %session_id,
+        host = %args.host,
+        port = args.port,
+        max_concurrent_requests = ?args.max_concurrent_requests,
+        "🚀 Starting HTTP server"
+    );
+    
     if let Err(e) = api::start_server_with_config(server_config, model).await {
-        error!("❌ Server failed to start: {}", e);
+        error!(
+            session_id = %session_id,
+            host = %args.host,
+            port = args.port,
+            error = %e,
+            "❌ Server failed to start"
+        );
         std::process::exit(1);
     }
 
