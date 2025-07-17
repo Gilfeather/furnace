@@ -55,6 +55,7 @@ impl BackendType {
 
     #[allow(dead_code)]
     pub fn available_backends() -> Vec<BackendType> {
+        #[allow(unused_mut)]
         let mut backends = vec![BackendType::NdArray];
 
         #[cfg(feature = "wgpu")]

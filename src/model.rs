@@ -17,6 +17,13 @@ pub struct TensorSpec {
     pub max_value: Option<f32>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ModelConfig {
+    pub backend: Option<String>,
+    pub enable_kernel_fusion: bool,
+    pub enable_autotuning: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OptimizationInfo {
     pub kernel_fusion: bool,
@@ -196,7 +203,7 @@ impl Model {
                 max_value: None,
             },
             model_type: "burn".to_string(),
-            backend: "ndarray".to_string(),
+            backend: inner.get_backend_info(),
             created_at: Utc::now().to_rfc3339(),
             model_size_bytes,
         };
@@ -457,10 +464,24 @@ impl Model {
 }
 
 pub fn load_model(path: &PathBuf) -> Result<Model> {
-    load_model_with_config(path, None, true, true)
+    let config = ModelConfig {
+        backend: None,
+        enable_kernel_fusion: true,
+        enable_autotuning: true,
+    };
+    load_model_with_config(path, config)
 }
 
-pub fn load_model_with_config(
+pub fn load_model_with_config(path: &PathBuf, config: ModelConfig) -> Result<Model> {
+    load_model_with_config_detailed(
+        path,
+        config.backend.as_deref(),
+        config.enable_kernel_fusion,
+        config.enable_autotuning,
+    )
+}
+
+fn load_model_with_config_detailed(
     path: &PathBuf,
     backend_name: Option<&str>,
     enable_kernel_fusion: bool,
