@@ -122,14 +122,22 @@ Real-world model performance will vary significantly based on model size and com
 | Memory Usage | **<50MB** |
 | Startup Time | **<100ms** |
 
-### 🚧 Planned Benchmarks (Coming Soon)
-| Model Type | Size | Inference Time | Status |
-|------------|------|----------------|---------|
-| ResNet-18 | ~45MB | TBD | 🔄 In Progress |
-| BERT-base | ~110MB | TBD | 📋 Planned |
-| YOLO v8n | ~6MB | TBD | 📋 Planned |
+### 🚧 Production Model Support (Roadmap)
+| Model Type | Size | Status | Notes |
+|------------|------|---------|-------|
+| ResNet-18 | ~45MB | 📋 Planned | Awaiting Burn ecosystem maturity |
+| BERT-base | ~110MB | 📋 Planned | Text processing models |
+| YOLO v8n | ~6MB | 📋 Planned | Object detection |
+| Custom Models | Varies | ✅ **Supported** | Train your own with Burn |
 
-*Current tests: MNIST-like MLP on standard hardware. Production model benchmarks coming soon.*
+**Current Reality**: Burn is a newer framework with limited pre-trained models. Most production use cases require training custom models or converting from other frameworks.
+
+### 🚧 For Production Use Cases
+If you need production-ready models right now, consider:
+- **Training your own models** with Burn (recommended for new projects)
+- **Converting existing models** from PyTorch/TensorFlow via ONNX
+- **Using other inference servers** (TorchServe, TensorFlow Serving) for immediate production needs
+- **Waiting for Burn ecosystem maturity** for more pre-trained models
 
 ## � API Enpdpoints
 
