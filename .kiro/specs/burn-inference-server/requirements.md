@@ -2,20 +2,22 @@
 
 ## Introduction
 
-furnaceは、Rust製のBurnベース推論サーバです。Pythonに依存せず、単一バイナリとして動作し、HTTP APIを通じて機械学習モデルの推論サービスを提供します。このプロジェクトでは、CLIによるモデルロード機能、基本的なHTTP APIエンドポイント、そしてBurnの高度なバックエンド・最適化機能（kernel fusion、autotuning cache、async backend）を活用した高性能推論システムの実装を行います。
+furnaceは、Rust製のBurnベース推論サーバです。Pythonに依存せず、単一バイナリとして動作し、HTTP APIを通じて機械学習モデルの推論サービスを提供します。このプロジェクトでは、CLIによるモデルロード機能（.mpkファイルおよびONNXファイル対応）、基本的なHTTP APIエンドポイント、そしてBurnの高度なバックエンド・最適化機能（kernel fusion、autotuning cache、async backend）を活用した高性能推論システムの実装を行います。
 
 ## Requirements
 
 ### Requirement 1
 
-**User Story:** As a developer, I want to specify a .burn model file path via CLI arguments, so that the server can load and serve the specified model for inference.
+**User Story:** As a developer, I want to specify a model file path via CLI arguments, so that the server can load and serve the specified model for inference.
 
 #### Acceptance Criteria
 
-1. WHEN the user runs the furnace command with --model-path argument THEN the system SHALL accept the path to a .burn model file
-2. WHEN a valid .burn model file path is provided THEN the system SHALL successfully load the model into memory
-3. WHEN an invalid or non-existent model file path is provided THEN the system SHALL display an appropriate error message and exit gracefully
-4. WHEN the --model-path argument is missing THEN the system SHALL display usage information and exit with an error code
+1. WHEN the user runs the furnace command with --model-path argument THEN the system SHALL accept the path to a .mpk or .onnx model file
+2. WHEN a valid .mpk model file path is provided THEN the system SHALL successfully load the Burn model into memory
+3. WHEN a valid .onnx model file path is provided THEN the system SHALL successfully load the ONNX model into memory using Burn's ONNX support
+4. WHEN an invalid or non-existent model file path is provided THEN the system SHALL display an appropriate error message and exit gracefully
+5. WHEN an unsupported model file format is provided THEN the system SHALL display an error message indicating supported formats (.mpk, .onnx)
+6. WHEN the --model-path argument is missing THEN the system SHALL display usage information and exit with an error code
 
 ### Requirement 2
 

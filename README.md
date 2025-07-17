@@ -27,7 +27,7 @@ A high-performance, lightweight HTTP inference server that serves machine learni
 ### 1. Clone and Build
 
 ```bash
-git clone https://github.com/yourusername/furnace.git
+git clone https://github.com/Gilfeather/furnace.git
 cd furnace
 cargo build --release
 ```

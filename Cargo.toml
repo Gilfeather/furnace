@@ -6,8 +6,8 @@ rust-version = "1.75"
 authors = ["Furnace Contributors"]
 description = "🔥 High-performance Rust ML inference server powered by Burn framework"
 documentation = "https://docs.rs/furnace"
-homepage = "https://github.com/yourusername/furnace"
-repository = "https://github.com/yourusername/furnace"
+homepage = "https://github.com/Gilfeather/furnace"
+repository = "https://github.com/Gilfeather/furnace"
 license = "MIT"
 keywords = ["machine-learning", "inference", "server", "rust", "burn"]
 categories = ["web-programming::http-server", "science"]
@@ -35,6 +35,7 @@ cuda = []
 [dependencies]
 # ML Framework
 burn = { version = "0.17", features = ["train", "std", "ndarray"] }
+burn-import = { version = "0.17", features = ["onnx"] }
 ndarray = "0.16"
 
 # Web Framework

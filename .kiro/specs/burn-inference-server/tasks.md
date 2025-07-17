@@ -10,13 +10,14 @@
   - [x] 2.1 Create BurnModel trait and model abstractions
     - Define the BurnModel trait with predict method and metadata accessors
     - Implement ModelInfo, TensorSpec, and ModelMetadata structures
-    - Create model validation functions for .burn file format
-    - _Requirements: 1.1, 1.2, 4.2_
+    - Create model validation functions for .mpk and .onnx file formats
+    - _Requirements: 1.1, 1.2, 1.5, 4.2_
 
-  - [x] 2.2 Implement actual .burn model loading with advanced backend support
-    - Research and implement Burn model deserialization from .burn files
+  - [x] 2.2 Implement actual .mpk and ONNX model loading with advanced backend support
+    - Research and implement Burn model deserialization from .mpk files
+    - Add ONNX model loading support using Burn's ONNX integration
     - Add backend selection (CPU, WGPU, Metal, CUDA) with fallback mechanisms
-    - Implement model file validation and error handling
+    - Implement model file validation and error handling for both formats
     - Add model metadata extraction from loaded models
     - Enable kernel fusion and autotuning cache during model initialization
     - _Requirements: 1.1, 1.2, 1.3, 6.5, 9.1, 9.2, 10.1, 10.2, 10.3_

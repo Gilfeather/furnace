@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>
 ### 2. Model Management Component (`model.rs`)
 
 **Responsibilities:**
-- Load and validate .burn model files
+- Load and validate .mpk and .onnx model files
 - Provide model metadata and inference capabilities
 - Handle model-specific errors and validation
 - Manage model state and lifecycle
@@ -317,7 +317,7 @@ mod integration_tests {
 
 ### Burn Framework Integration
 
-1. **Model Loading**: Use Burn's model serialization format (.burn files)
+1. **Model Loading**: Support both Burn's native .mpk format and ONNX files through Burn's ONNX integration
 2. **Backend Selection**: Support CPU and potentially GPU backends
 3. **Tensor Operations**: Leverage Burn's tensor abstractions for input/output handling
 4. **Memory Management**: Efficient tensor memory allocation and cleanup
