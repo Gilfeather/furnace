@@ -39,10 +39,10 @@ fn parse_args() -> Result<CliArgs> {
                 .long("model-path")
                 .short('m')
                 .value_name("PATH")
-                .help("Path to the .onnx, .mpk, or .onnx model file")
+                .help("Path to the .burn, .mpk, or .onnx model file")
                 .long_help(
                     "Path to the model file to load for inference. \
-                    Supports .onnx, .mpk (MessagePack), and .onnx formats. \
+                    Supports .burn, .mpk (MessagePack), and .onnx formats. \
                     The file must exist, be readable, and have a supported extension."
                 )
                 .required(true),
@@ -267,14 +267,14 @@ fn validate_model_path(model_path: &PathBuf) -> Result<()> {
         .into());
     }
 
-    // Validate .onnx, .mpk, or .onnx extension
+    // Validate .burn, .mpk, or .onnx extension
     match model_path.extension() {
         Some(ext) if ext == "burn" || ext == "mpk" || ext == "onnx" => {}
         Some(ext) => {
             return Err(CliError::InvalidModelPath {
                 path: model_path.clone(),
                 reason: format!(
-                    "invalid extension '.{}', expected '.onnx', '.mpk', or '.onnx'",
+                    "invalid extension '.{}', expected '.burn', '.mpk', or '.onnx'",
                     ext.to_string_lossy()
                 ),
             }
@@ -283,7 +283,7 @@ fn validate_model_path(model_path: &PathBuf) -> Result<()> {
         None => {
             return Err(CliError::InvalidModelPath {
                 path: model_path.clone(),
-                reason: "file must have .onnx, .mpk, or .onnx extension".to_string(),
+                reason: "file must have .burn, .mpk, or .onnx extension".to_string(),
             }
             .into());
         }
