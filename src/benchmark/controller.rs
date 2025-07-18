@@ -8,8 +8,8 @@ use super::load_generator::{LoadConfig, LoadGenerator, LoadPattern, RequestConfi
 use super::metrics::{MetricsCollector, ResourceStats};
 use super::reports::{ExportFormat, ReportGenerator};
 use super::{
-    BenchmarkConfig, BenchmarkResults, ComparisonAnalysis, ModelConfig,
-    PerformanceRank, RelativeImprovement, ResourceLimits, ServerConfig, ServerResults,
+    BenchmarkConfig, BenchmarkResults, ComparisonAnalysis, ModelConfig, PerformanceRank,
+    RelativeImprovement, ResourceLimits, ServerConfig, ServerResults,
 };
 use super::{BenchmarkError, Result};
 

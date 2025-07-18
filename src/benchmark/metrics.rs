@@ -299,7 +299,7 @@ impl MetricsCollector {
         let index = percentile * (sorted_values.len() - 1) as f64;
         let lower_index = index.floor() as usize;
         let upper_index = index.ceil() as usize;
-        
+
         if lower_index == upper_index {
             sorted_values[lower_index]
         } else {
