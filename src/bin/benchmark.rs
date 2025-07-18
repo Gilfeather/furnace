@@ -381,7 +381,7 @@ fn print_benchmark_summary(results: &furnace::benchmark::BenchmarkResults) {
     println!("\n🚀 PERFORMANCE IMPROVEMENTS");
     println!("============================");
 
-    for (server_id, improvement) in &results.comparison_analysis.relative_improvements {
+    for (_server_id, improvement) in &results.comparison_analysis.relative_improvements {
         println!(
             "\n📈 {} vs {}",
             improvement.comparison_server, improvement.baseline_server

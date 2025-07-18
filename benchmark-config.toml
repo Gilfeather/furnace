@@ -1,0 +1,50 @@
+# Benchmark Configuration for Local Testing
+
+[benchmark]
+duration = 30
+warmup_duration = 10
+
+[[servers]]
+server_type = "Furnace"
+image = "furnace:latest"
+port = 3000
+pull_policy = "Never"  # Use local image only
+
+[servers.environment]
+MODEL_PATH = "/app/models/model.burn"
+
+[servers.resource_limits]
+cpu_limit = "1.0"
+memory_limit = "512Mi"
+
+[[models]]
+name = "test_model"
+size_category = "Small"
+model_type = "ImageClassification"
+input_shape = [784]
+
+[models.formats]
+Furnace = "/app/models/model.burn"
+
+[[load_patterns]]
+pattern_type = "Constant"
+requests_per_second = 10
+duration = 30
+
+[[load_patterns]]
+pattern_type = "Ramp"
+start_rps = 1
+end_rps = 20
+duration = 30
+
+[[load_patterns]]
+pattern_type = "Spike"
+base_rps = 5
+spike_rps = 50
+spike_duration = 5
+duration = 30
+
+[[load_patterns]]
+pattern_type = "Step"
+steps = [5, 10, 15, 20]
+step_duration = 7

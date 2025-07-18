@@ -3,12 +3,12 @@ use std::time::Duration;
 
 use tracing::{error, info, warn};
 
-use super::containers::{ContainerManager, ServerType};
+use super::containers::ContainerManager;
 use super::load_generator::{LoadConfig, LoadGenerator, LoadPattern, RequestConfig};
-use super::metrics::{LatencyStats, MetricsCollector, ResourceStats, ThroughputStats};
+use super::metrics::{MetricsCollector, ResourceStats};
 use super::reports::{ExportFormat, ReportGenerator};
 use super::{
-    BenchmarkConfig, BenchmarkResults, ComparisonAnalysis, ErrorStats, ModelConfig,
+    BenchmarkConfig, BenchmarkResults, ComparisonAnalysis, ModelConfig,
     PerformanceRank, RelativeImprovement, ResourceLimits, ServerConfig, ServerResults,
 };
 use super::{BenchmarkError, Result};

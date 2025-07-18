@@ -1,6 +1,0 @@
-# This is a dummy .burn model file for testing
-# In a real implementation, this would contain serialized Burn model data
-model_name: test_model
-input_shape: [784]
-output_shape: [10]
-version: 1.0.0

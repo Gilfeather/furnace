@@ -1,0 +1,22 @@
+# Local Benchmark Configuration (without Docker)
+
+[benchmark]
+duration = 10
+warmup_duration = 2
+
+[[models]]
+name = "local_test_model"
+size_category = "Small"
+model_type = "ImageClassification"
+input_shape = [784]
+
+[[load_patterns]]
+pattern_type = "Constant"
+requests_per_second = 5
+duration = 10
+
+[[load_patterns]]
+pattern_type = "Ramp"
+start_rps = 1
+end_rps = 10
+duration = 10
