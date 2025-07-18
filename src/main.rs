@@ -30,9 +30,9 @@ fn parse_args() -> Result<CliArgs> {
             with zero Python dependencies. Built with Rust for maximum performance and the Burn \
             framework for native ML operations.\n\n\
             EXAMPLES:\n  \
-            furnace --model-path ./model.burn --port 8080\n  \
-            furnace --model-path ./model.burn --host 0.0.0.0 --backend wgpu\n  \
-            furnace --model-path ./model.burn --enable-kernel-fusion --enable-autotuning"
+            furnace --model-path ./model.mpk --port 8080\n  \
+            furnace --model-path ./model.mpk --host 0.0.0.0 --backend wgpu\n  \
+            furnace --model-path ./model.mpk --enable-kernel-fusion --enable-autotuning"
         )
         .arg(
             Arg::new("model-path")

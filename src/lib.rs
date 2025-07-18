@@ -1,4 +1,5 @@
 pub mod api;
+pub mod benchmark;
 pub mod burn_model;
 pub mod error;
 pub mod model;

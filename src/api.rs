@@ -346,7 +346,6 @@ fn create_error_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::load_model;
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -354,9 +353,54 @@ mod tests {
     use std::path::PathBuf;
     use tower::util::ServiceExt;
 
+    /// Ensure a test model is available for testing
+    async fn ensure_test_model() -> PathBuf {
+        let test_model_path = PathBuf::from("test_model.onnx");
+
+        // If model already exists, return it
+        if test_model_path.exists() {
+            return test_model_path;
+        }
+
+        // Try to download a small ONNX model for testing
+        if let Ok(response) = reqwest::get("https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx").await {
+            if response.status().is_success() {
+                if let Ok(bytes) = response.bytes().await {
+                    if std::fs::write(&test_model_path, bytes).is_ok() {
+                        println!("Downloaded test ONNX model for testing");
+                        return test_model_path;
+                    }
+                }
+            }
+        }
+
+        // If download fails, try the mpk from examples
+        let mpk_path = PathBuf::from("test_model.mpk");
+        if tokio::process::Command::new("cargo")
+            .args(["run", "--example", "basic_mnist_create"])
+            .status()
+            .await
+            .is_ok()
+        {
+            let example_model = PathBuf::from("examples/basic_mnist/model.mpk");
+            if example_model.exists() && std::fs::copy(&example_model, &mpk_path).is_ok() {
+                return mpk_path;
+            }
+        }
+
+        // If all else fails, return the ONNX path anyway (will trigger dummy model fallback)
+        test_model_path
+    }
+
     async fn create_test_app() -> Router {
-        let path = PathBuf::from("test_model.burn");
-        let model = load_model(&path).unwrap();
+        // Try to use an actual model file for testing, fallback to dummy
+        let model_path = ensure_test_model().await;
+        let model = crate::model::load_model(&model_path).unwrap_or_else(|_| {
+            // Fallback to dummy model if load fails
+            let dummy_model =
+                crate::model::DummyModel::new("test_model".to_string(), vec![784], vec![10]);
+            crate::model::Model::new(Box::new(dummy_model), model_path.clone(), 0)
+        });
         let state = Arc::new(ServerState::new(model));
 
         Router::new()

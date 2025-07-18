@@ -26,6 +26,10 @@ exclude = [
 name = "furnace"
 path = "src/main.rs"
 
+[[bin]]
+name = "benchmark"
+path = "src/bin/benchmark.rs"
+
 [features]
 default = []
 wgpu = []
@@ -62,6 +66,18 @@ thiserror = "2.0"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
+
+# Benchmarking dependencies
+bollard = "0.17"  # Docker API client
+plotters = "0.3"  # Chart generation
+hdrhistogram = "7.5"  # High-performance histogram for latency metrics
+statistical = "1.0"  # Statistical analysis
+futures-util = "0.3"  # Async utilities
+futures = "0.3"  # Futures executor
+toml = "0.8"  # TOML configuration parsing
+tempfile = "3.12"  # Temporary file handling
+rand = "0.8"  # Random number generation
+reqwest = { version = "0.12", features = ["json"] }  # HTTP client
 
 [dev-dependencies]
 # Testing utilities

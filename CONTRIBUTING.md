@@ -49,7 +49,7 @@ cargo build
 cargo test
 
 # Run the development server
-cargo run -- --model-path ./test_model.burn --port 3000
+cargo run -- --model-path ./test_model.mpk --port 3000
 ```
 
 ### Development Tools

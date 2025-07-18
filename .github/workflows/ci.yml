@@ -28,6 +28,12 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    - name: Install system dependencies (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
+
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@master
       with:
@@ -66,6 +72,11 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -125,6 +136,11 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
+
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
 
@@ -170,6 +186,11 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable

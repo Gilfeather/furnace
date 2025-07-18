@@ -29,7 +29,6 @@ Thumbs.db
 logs/
 
 # Models and sample data (generated at runtime)
-*.burn
 *.mpk
 *.onnx
 *.pt

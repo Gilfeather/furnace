@@ -28,7 +28,7 @@ in
           ./benches
 
           # For tests and benchmark
-          ./test_model.burn
+          ./test_model.mpk
         ]
       );
     };
