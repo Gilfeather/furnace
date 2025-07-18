@@ -26,9 +26,7 @@ exclude = [
 name = "furnace"
 path = "src/main.rs"
 
-[[bin]]
-name = "benchmark"
-path = "src/bin/benchmark.rs"
+
 
 [features]
 default = []

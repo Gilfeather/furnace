@@ -6,6 +6,13 @@ The furnace inference server is designed as a lightweight, high-performance HTTP
 
 The system uses Rust's async/await capabilities with Tokio runtime for concurrent request handling, Axum for HTTP routing, and Burn framework for model operations. The design prioritizes performance through advanced Burn optimizations (kernel fusion, autotuning cache), backend flexibility (CPU/GPU), concurrency control with backpressure, and optimized I/O processing.
 
+Key design principles:
+- Single binary deployment with no external dependencies
+- Comprehensive error handling with structured responses
+- Advanced Burn framework integration for optimal performance
+- Flexible backend support (CPU, WGPU, Metal, CUDA)
+- Production-ready features including CORS, logging, and health checks
+
 ## Architecture
 
 ### High-Level Architecture

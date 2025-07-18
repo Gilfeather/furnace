@@ -5,13 +5,19 @@ use std::sync::Arc;
 use std::time::Instant;
 
 fn create_test_model() -> Model {
-    // Try to load sample model first, fallback to test model
-    let sample_path = PathBuf::from("sample_model");
-    if sample_path.with_extension("mpk").exists() {
-        load_model(&sample_path).expect("Failed to load sample model")
+    // Try to load ResNet-18 ONNX model first, then fallback to other models
+    let resnet_path = PathBuf::from("resnet18.onnx");
+    if resnet_path.exists() {
+        load_model(&resnet_path).expect("Failed to load ResNet-18 model")
     } else {
-        let test_path = PathBuf::from("test_model.mpk");
-        load_model(&test_path).expect("Failed to load test model")
+        // Fallback to sample model
+        let sample_path = PathBuf::from("sample_model");
+        if sample_path.with_extension("mpk").exists() {
+            load_model(&sample_path).expect("Failed to load sample model")
+        } else {
+            let test_path = PathBuf::from("test_model.mpk");
+            load_model(&test_path).expect("Failed to load test model")
+        }
     }
 }
 
@@ -33,7 +39,9 @@ fn create_optimized_model(backend: Option<&str>, kernel_fusion: bool, autotuning
 
 fn bench_single_inference(c: &mut Criterion) {
     let model = Arc::new(create_test_model());
-    let input = vec![0.5f32; 784]; // MNIST-like input
+    let model_info = model.get_info();
+    let input_size: usize = model_info.input_spec.shape.iter().product();
+    let input = vec![0.5f32; input_size]; // Dynamic input size based on model
 
     c.bench_function("single_inference", |b| {
         b.iter(|| {
@@ -45,11 +53,14 @@ fn bench_single_inference(c: &mut Criterion) {
 
 fn bench_batch_inference(c: &mut Criterion) {
     let model = Arc::new(create_test_model());
-    let single_input = vec![0.5f32; 784];
+    let model_info = model.get_info();
+    let input_size: usize = model_info.input_spec.shape.iter().product();
+    let single_input = vec![0.5f32; input_size];
 
     let mut group = c.benchmark_group("batch_inference");
 
-    for batch_size in [1, 2, 4, 8, 16, 32].iter() {
+    for batch_size in [1, 2, 4, 8].iter() {
+        // Reduced batch sizes for ResNet-18
         let inputs: Vec<Vec<f32>> = (0..*batch_size).map(|_| single_input.clone()).collect();
 
         group.throughput(Throughput::Elements(*batch_size as u64));
@@ -69,7 +80,9 @@ fn bench_batch_inference(c: &mut Criterion) {
 
 fn bench_concurrent_inference(c: &mut Criterion) {
     let model = Arc::new(create_test_model());
-    let input = vec![0.5f32; 784];
+    let model_info = model.get_info();
+    let input_size: usize = model_info.input_spec.shape.iter().product();
+    let input = vec![0.5f32; input_size];
 
     c.bench_function("concurrent_inference", |b| {
         b.iter(|| {
@@ -89,11 +102,13 @@ fn bench_concurrent_inference(c: &mut Criterion) {
 }
 
 fn bench_optimization_comparison(c: &mut Criterion) {
-    let input = vec![0.5f32; 784];
+    let baseline_model = Arc::new(create_optimized_model(None, false, false));
+    let model_info = baseline_model.get_info();
+    let input_size: usize = model_info.input_spec.shape.iter().product();
+    let input = vec![0.5f32; input_size];
     let mut group = c.benchmark_group("optimization_comparison");
 
     // Baseline: no optimizations
-    let baseline_model = Arc::new(create_optimized_model(None, false, false));
     group.bench_function("baseline", |b| {
         b.iter(|| {
             let result = baseline_model.predict_batch(vec![black_box(input.clone())]);
@@ -132,11 +147,13 @@ fn bench_optimization_comparison(c: &mut Criterion) {
 }
 
 fn bench_backend_comparison(c: &mut Criterion) {
-    let input = vec![0.5f32; 784];
+    let cpu_model = Arc::new(create_optimized_model(Some("cpu"), true, true));
+    let model_info = cpu_model.get_info();
+    let input_size: usize = model_info.input_spec.shape.iter().product();
+    let input = vec![0.5f32; input_size];
     let mut group = c.benchmark_group("backend_comparison");
 
     // CPU backend
-    let cpu_model = Arc::new(create_optimized_model(Some("cpu"), true, true));
     group.bench_function("cpu_backend", |b| {
         b.iter(|| {
             let result = cpu_model.predict_batch(vec![black_box(input.clone())]);
@@ -159,11 +176,13 @@ fn bench_backend_comparison(c: &mut Criterion) {
 
 fn bench_memory_efficiency(c: &mut Criterion) {
     let model = Arc::new(create_test_model());
+    let model_info = model.get_info();
+    let input_size: usize = model_info.input_spec.shape.iter().product();
     let mut group = c.benchmark_group("memory_efficiency");
 
-    // Test different batch sizes with correct input size (784 for MNIST-like model)
-    let input_size = 784; // Fixed input size for the model
-    for batch_size in [1, 4, 8, 16, 32].iter() {
+    // Test different batch sizes with dynamic input size
+    for batch_size in [1, 2, 4, 8].iter() {
+        // Reduced batch sizes for ResNet-18
         let inputs: Vec<Vec<f32>> = (0..*batch_size).map(|_| vec![0.5f32; input_size]).collect();
 
         group.throughput(Throughput::Bytes(
@@ -185,7 +204,9 @@ fn bench_memory_efficiency(c: &mut Criterion) {
 
 fn bench_latency_percentiles(c: &mut Criterion) {
     let model = Arc::new(create_test_model());
-    let input = vec![0.5f32; 784];
+    let model_info = model.get_info();
+    let input_size: usize = model_info.input_spec.shape.iter().product();
+    let input = vec![0.5f32; input_size];
 
     c.bench_function("latency_measurement", |b| {
         b.iter_custom(|iters| {
@@ -219,11 +240,13 @@ fn bench_latency_percentiles(c: &mut Criterion) {
 
 fn bench_throughput_scaling(c: &mut Criterion) {
     let model = Arc::new(create_test_model());
-    let single_input = vec![0.5f32; 784];
+    let model_info = model.get_info();
+    let input_size: usize = model_info.input_spec.shape.iter().product();
+    let single_input = vec![0.5f32; input_size];
     let mut group = c.benchmark_group("throughput_scaling");
 
-    // Test throughput with increasing concurrent requests
-    for concurrency in [1, 2, 4, 8, 16].iter() {
+    // Test throughput with increasing concurrent requests (reduced for ResNet-18)
+    for concurrency in [1, 2, 4, 8].iter() {
         group.throughput(Throughput::Elements(*concurrency as u64));
         group.bench_with_input(
             BenchmarkId::new("concurrency", concurrency),
