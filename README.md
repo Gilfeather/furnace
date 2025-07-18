@@ -46,7 +46,19 @@ curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification
 ./target/release/furnace --model-path resnet18.onnx --host 127.0.0.1 --port 3000
 ```
 
-### 4. Test the API
+### 4. Generate Test Data
+
+```bash
+# Generate ResNet-18 test samples (creates JSON files locally)
+cargo run --example resnet18_sample_data
+```
+
+This creates the following test files:
+- `resnet18_single_sample.json` - Single image test data
+- `resnet18_batch_sample.json` - Batch of 3 images test data  
+- `resnet18_full_test.json` - Full-size single image (150,528 values)
+
+### 5. Test the API
 
 ```bash
 # Health check
@@ -55,11 +67,15 @@ curl http://localhost:3000/healthz
 # Model info
 curl http://localhost:3000/model/info
 
-# Generate test data and make prediction
-cargo run --example resnet18_sample_data
+# Single image prediction
 curl -X POST http://localhost:3000/predict \
   -H "Content-Type: application/json" \
   --data-binary @resnet18_full_test.json
+
+# Batch prediction
+curl -X POST http://localhost:3000/predict \
+  -H "Content-Type: application/json" \
+  --data-binary @resnet18_batch_sample.json
 ```
 
 ## 🖼️ Supported Models
@@ -122,8 +138,16 @@ torch.onnx.export(model, dummy_input, "my_model.onnx")
 
 ### 🚀 Benchmark Results
 
-Run comprehensive benchmarks with Criterion:
+**Prerequisites:**
+```bash
+# 1. Download ResNet-18 model (if not already done)
+curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o resnet18.onnx
 
+# 2. Generate test data (benchmarks use dynamic model detection)
+cargo run --example resnet18_sample_data
+```
+
+**Run benchmarks:**
 ```bash
 # Run all benchmarks
 cargo bench
