@@ -708,7 +708,7 @@ fn try_load_burn_model_with_backend(
         }
     }
 
-    // If no proper .burn/.json pair found, try to create a sample model
+    // If no proper .mpk/.json pair found, try to create a sample model
     if path
         .file_name()
         .and_then(|s| s.to_str())
@@ -784,7 +784,7 @@ mod tests {
 
     #[test]
     fn test_model_loading_success() {
-        let path = PathBuf::from("test_model.burn");
+        let path = PathBuf::from("test_model.mpk");
         let result = load_model(&path);
         assert!(result.is_ok());
 
@@ -796,7 +796,7 @@ mod tests {
 
     #[test]
     fn test_model_loading_invalid_path() {
-        let path = PathBuf::from("nonexistent_model.burn");
+        let path = PathBuf::from("nonexistent_model.mpk");
         let result = load_model(&path);
         assert!(result.is_err());
 
@@ -808,7 +808,7 @@ mod tests {
 
     #[test]
     fn test_inference_with_valid_input() {
-        let path = PathBuf::from("test_model.burn");
+        let path = PathBuf::from("test_model.mpk");
         let model = load_model(&path).unwrap();
 
         let input = vec![0.5; 784]; // Valid input size
@@ -821,7 +821,7 @@ mod tests {
 
     #[test]
     fn test_inference_with_invalid_shape() {
-        let path = PathBuf::from("test_model.burn");
+        let path = PathBuf::from("test_model.mpk");
         let model = load_model(&path).unwrap();
 
         let input = vec![0.5; 100]; // Invalid input size
@@ -836,7 +836,7 @@ mod tests {
 
     #[test]
     fn test_model_info() {
-        let path = PathBuf::from("test_model.burn");
+        let path = PathBuf::from("test_model.mpk");
         let model = load_model(&path).unwrap();
 
         let info = model.get_info();
@@ -848,7 +848,7 @@ mod tests {
 
     #[test]
     fn test_model_stats() {
-        let path = PathBuf::from("test_model.burn");
+        let path = PathBuf::from("test_model.mpk");
         let model = load_model(&path).unwrap();
 
         let stats = model.get_stats();

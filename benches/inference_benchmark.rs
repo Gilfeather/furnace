@@ -10,7 +10,7 @@ fn create_test_model() -> Model {
     if sample_path.with_extension("mpk").exists() {
         load_model(&sample_path).expect("Failed to load sample model")
     } else {
-        let test_path = PathBuf::from("test_model.burn");
+        let test_path = PathBuf::from("test_model.mpk");
         load_model(&test_path).expect("Failed to load test model")
     }
 }
@@ -26,7 +26,7 @@ fn create_optimized_model(backend: Option<&str>, kernel_fusion: bool, autotuning
     if sample_path.with_extension("mpk").exists() {
         load_model_with_config(&sample_path, config).expect("Failed to load optimized sample model")
     } else {
-        let test_path = PathBuf::from("test_model.burn");
+        let test_path = PathBuf::from("test_model.mpk");
         load_model_with_config(&test_path, config).expect("Failed to load optimized test model")
     }
 }

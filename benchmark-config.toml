@@ -11,7 +11,7 @@ port = 3000
 pull_policy = "Never"  # Use local image only
 
 [servers.environment]
-MODEL_PATH = "/app/models/model.burn"
+MODEL_PATH = "/app/models/model.mpk"
 
 [servers.resource_limits]
 cpu_limit = "1.0"
@@ -24,7 +24,7 @@ model_type = "ImageClassification"
 input_shape = [784]
 
 [models.formats]
-Furnace = "/app/models/model.burn"
+Furnace = "/app/models/model.mpk"
 
 [[load_patterns]]
 pattern_type = "Constant"

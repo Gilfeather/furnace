@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model_path = PathBuf::from("sample_model");
     container.save(&model_path)?;
 
-    info!("Sample model saved to: sample_model.burn and sample_model.json");
+    info!("Sample model saved to: sample_model.mpk and sample_model.json");
     info!("Model details:");
     info!("  Name: {}", container.metadata.name);
     info!("  Input size: {}", container.metadata.input_size);

@@ -73,4 +73,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 
 # Default command
 ENTRYPOINT ["furnace"]
-CMD ["--model-path", "/app/models/model.burn", "--host", "0.0.0.0", "--port", "3000"]
+CMD ["--model-path", "/app/models/model.mpk", "--host", "0.0.0.0", "--port", "3000"]

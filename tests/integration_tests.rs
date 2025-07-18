@@ -9,7 +9,7 @@ use tokio::time::sleep;
 #[tokio::test]
 async fn test_end_to_end_inference() {
     // Start server in background
-    let model_path = PathBuf::from("test_model.burn");
+    let model_path = PathBuf::from("test_model.mpk");
     let model = load_model(&model_path).expect("Failed to load test model");
 
     let server_handle = tokio::spawn(async move {
@@ -110,7 +110,7 @@ async fn test_end_to_end_inference() {
 
 #[tokio::test]
 async fn test_server_startup_with_invalid_model() {
-    let model_path = PathBuf::from("nonexistent_model.burn");
+    let model_path = PathBuf::from("nonexistent_model.mpk");
     let result = load_model(&model_path);
 
     assert!(result.is_err());
@@ -120,7 +120,7 @@ async fn test_server_startup_with_invalid_model() {
 #[tokio::test]
 async fn test_concurrent_requests() {
     // Start server in background
-    let model_path = PathBuf::from("test_model.burn");
+    let model_path = PathBuf::from("test_model.mpk");
     let model = load_model(&model_path).expect("Failed to load test model");
 
     let server_handle = tokio::spawn(async move {

@@ -134,7 +134,7 @@ examples/
 ## Key Features Demonstrated
 
 - ✅ **Model Creation**: How to create and save Burn models
-- ✅ **Multiple Formats**: Support for .burn and .mpk formats
+- ✅ **Multiple Formats**: Support for .onnx and .mpk formats
 - ✅ **HTTP API**: Complete inference API testing
 - ✅ **Error Handling**: Input validation and error responses
 - ✅ **Performance**: Timing and throughput testing
@@ -143,7 +143,7 @@ examples/
 
 ## Development Notes
 
-- **Model files** (.mpk, .burn) are generated at runtime and not tracked in git
+- **Model files** (.mpk, .onnx) are generated at runtime and not tracked in git
 - **Data files** are also generated and gitignored to keep the repository clean
 - **Examples are self-contained** - each can run independently
 - **Comprehensive testing** - each example includes validation and error testing

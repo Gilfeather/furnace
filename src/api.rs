@@ -355,7 +355,7 @@ mod tests {
     use tower::util::ServiceExt;
 
     async fn create_test_app() -> Router {
-        let path = PathBuf::from("test_model.burn");
+        let path = PathBuf::from("test_model.mpk");
         let model = load_model(&path).unwrap();
         let state = Arc::new(ServerState::new(model));
 
