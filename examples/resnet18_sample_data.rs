@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✅ Generated ResNet-18 sample data:");
     println!("   - resnet18_single_sample.json (single image)");
     println!("   - resnet18_batch_sample.json (batch of 3 images)");
-    println!("   - Input shape: [3, 224, 224] = {} values", input_size);
+    println!("   - Input shape: [3, 224, 224] = {input_size} values");
 
     Ok(())
 }

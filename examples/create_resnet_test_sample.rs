@@ -31,10 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("✅ Generated ResNet-18 test samples:");
     println!("   - resnet18_small_test.json (1000 values for testing)");
-    println!(
-        "   - resnet18_full_test.json ({} values, full size)",
-        input_size
-    );
+    println!("   - resnet18_full_test.json ({input_size} values, full size)");
 
     Ok(())
 }
