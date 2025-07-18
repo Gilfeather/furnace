@@ -161,8 +161,10 @@ impl OnnxModel {
             }
         };
 
-        info!("Successfully loaded ONNX model: {} with input shape {:?} and output shape {:?}", 
-              model_name, input_shape, output_shape);
+        info!(
+            "Successfully loaded ONNX model: {} with input shape {:?} and output shape {:?}",
+            model_name, input_shape, output_shape
+        );
 
         Ok(Self {
             name: model_name,
