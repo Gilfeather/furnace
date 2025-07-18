@@ -170,7 +170,7 @@ impl ContainerManager {
             host_config: Some(host_config),
             exposed_ports: Some({
                 let mut ports = HashMap::new();
-                ports.insert(format!("{}/tcp", port), HashMap::new());
+                ports.insert(format!("{port}/tcp"), HashMap::new());
                 ports
             }),
             ..Default::default()
@@ -187,14 +187,14 @@ impl ContainerManager {
                 config,
             )
             .await
-            .map_err(|e| BenchmarkError::Container(e))?
+            .map_err(BenchmarkError::Container)?
             .id;
 
         // Start container
         self.docker
             .start_container(&container_id, None::<StartContainerOptions<String>>)
             .await
-            .map_err(|e| BenchmarkError::Container(e))?;
+            .map_err(BenchmarkError::Container)?;
 
         let container = Container {
             id: container_id.clone(),
@@ -226,7 +226,7 @@ impl ContainerManager {
         self.docker
             .stop_container(container_id, None)
             .await
-            .map_err(|e| BenchmarkError::Container(e))?;
+            .map_err(BenchmarkError::Container)?;
 
         // Remove container
         self.docker
@@ -238,7 +238,7 @@ impl ContainerManager {
                 }),
             )
             .await
-            .map_err(|e| BenchmarkError::Container(e))?;
+            .map_err(BenchmarkError::Container)?;
 
         self.containers.remove(container_id);
 
@@ -294,7 +294,7 @@ impl ContainerManager {
         );
 
         if let Some(stats_result) = stats_stream.next().await {
-            let stats = stats_result.map_err(|e| BenchmarkError::Container(e))?;
+            let stats = stats_result.map_err(BenchmarkError::Container)?;
             Ok(self.parse_stats(stats))
         } else {
             Err(BenchmarkError::Metrics {
@@ -374,8 +374,7 @@ impl ContainerManager {
 
         Err(BenchmarkError::Environment {
             message: format!(
-                "Container failed to become healthy within {:?}: {}",
-                timeout, container_id
+                "Container failed to become healthy within {timeout:?}: {container_id}"
             ),
         })
     }

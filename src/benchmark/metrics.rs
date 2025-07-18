@@ -318,10 +318,10 @@ impl MetricsCollector {
 
     pub fn export_raw_data(&self) -> Result<serde_json::Value> {
         let latency_data: Vec<u64> = (0..self.latency_histogram.len())
-            .filter_map(|_| {
+            .filter(|_| {
                 // Note: This is a simplified export. In a real implementation,
-                // you'd want to iterate through the histogram properly
-                None
+                // you'd want to filter through the histogram properly
+                false
             })
             .collect();
 

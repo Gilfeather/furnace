@@ -112,7 +112,7 @@ impl ReportGenerator {
     pub fn new(output_dir: String) -> Result<Self> {
         // Create output directory if it doesn't exist
         fs::create_dir_all(&output_dir).map_err(|e| BenchmarkError::Report {
-            message: format!("Failed to create output directory: {}", e),
+            message: format!("Failed to create output directory: {e}"),
         })?;
 
         Ok(Self { output_dir })
@@ -342,7 +342,7 @@ impl ReportGenerator {
         let lower = &areas[1];
 
         // CPU Usage Chart
-        let mut cpu_chart = ChartBuilder::on(&upper)
+        let mut cpu_chart = ChartBuilder::on(upper)
             .caption("CPU Usage (%)", ("sans-serif", 30))
             .margin(5)
             .x_label_area_size(40)
@@ -358,7 +358,7 @@ impl ReportGenerator {
             .map_err(plot_error)?;
 
         // Memory Usage Chart
-        let mut memory_chart = ChartBuilder::on(&lower)
+        let mut memory_chart = ChartBuilder::on(lower)
             .caption("Memory Usage (%)", ("sans-serif", 30))
             .margin(5)
             .x_label_area_size(40)
@@ -451,7 +451,7 @@ impl ReportGenerator {
             chart
                 .draw_series(std::iter::once(PathElement::new(
                     vec![(0.0, 0.0), (x, y)],
-                    &BLACK,
+                    BLACK,
                 )))
                 .map_err(plot_error)?;
         }
@@ -469,11 +469,11 @@ impl ReportGenerator {
     fn export_json(&self, report: &Report) -> Result<String> {
         let file_path = format!("{}/report.json", self.output_dir);
         let json = serde_json::to_string_pretty(report).map_err(|e| BenchmarkError::Report {
-            message: format!("Failed to serialize report to JSON: {}", e),
+            message: format!("Failed to serialize report to JSON: {e}"),
         })?;
 
         fs::write(&file_path, json).map_err(|e| BenchmarkError::Report {
-            message: format!("Failed to write JSON report: {}", e),
+            message: format!("Failed to write JSON report: {e}"),
         })?;
 
         Ok(file_path)
@@ -484,7 +484,7 @@ impl ReportGenerator {
         let html = self.generate_html_report(report)?;
 
         fs::write(&file_path, html).map_err(|e| BenchmarkError::Report {
-            message: format!("Failed to write HTML report: {}", e),
+            message: format!("Failed to write HTML report: {e}"),
         })?;
 
         Ok(file_path)
@@ -503,7 +503,7 @@ impl ReportGenerator {
         let csv = self.generate_csv_data(report)?;
 
         fs::write(&file_path, csv).map_err(|e| BenchmarkError::Report {
-            message: format!("Failed to write CSV report: {}", e),
+            message: format!("Failed to write CSV report: {e}"),
         })?;
 
         Ok(file_path)
@@ -543,8 +543,7 @@ impl ReportGenerator {
         _improvements: &HashMap<String, f64>,
     ) -> Result<String> {
         Ok(format!(
-            "Based on comprehensive benchmarking, {} is recommended for production deployment due to its superior performance characteristics and resource efficiency.",
-            winner
+            "Based on comprehensive benchmarking, {winner} is recommended for production deployment due to its superior performance characteristics and resource efficiency."
         ))
     }
 
@@ -720,7 +719,7 @@ mod tests {
 
     #[test]
     fn test_export_format_variants() {
-        let formats = vec![
+        let formats = [
             ExportFormat::Json,
             ExportFormat::Html,
             ExportFormat::Pdf,

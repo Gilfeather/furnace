@@ -191,7 +191,7 @@ fn parse_servers(servers_str: &str) -> Result<Vec<ServerType>, Box<dyn std::erro
             "tensorflow" => servers.push(ServerType::TensorFlowServing),
             "torchserve" => servers.push(ServerType::TorchServe),
             "onnxruntime" => servers.push(ServerType::OnnxRuntime),
-            _ => return Err(format!("Unknown server type: {}", server).into()),
+            _ => return Err(format!("Unknown server type: {server}").into()),
         }
     }
 
@@ -214,7 +214,7 @@ fn parse_export_formats(
             "html" => formats.push(ExportFormat::Html),
             "csv" => formats.push(ExportFormat::Csv),
             "pdf" => formats.push(ExportFormat::Pdf),
-            _ => return Err(format!("Unknown export format: {}", format).into()),
+            _ => return Err(format!("Unknown export format: {format}").into()),
         }
     }
 
@@ -356,7 +356,7 @@ fn print_benchmark_summary(results: &furnace::benchmark::BenchmarkResults) {
     println!("===================");
 
     for (server_id, result) in &results.server_results {
-        println!("\n🔥 {}", server_id);
+        println!("\n🔥 {server_id}");
         println!("   Latency (mean): {:.2}ms", result.latency_stats.mean);
         println!("   Latency (p95):  {:.2}ms", result.latency_stats.p95);
         println!("   Latency (p99):  {:.2}ms", result.latency_stats.p99);
@@ -381,7 +381,7 @@ fn print_benchmark_summary(results: &furnace::benchmark::BenchmarkResults) {
     println!("\n🚀 PERFORMANCE IMPROVEMENTS");
     println!("============================");
 
-    for (_server_id, improvement) in &results.comparison_analysis.relative_improvements {
+    for improvement in results.comparison_analysis.relative_improvements.values() {
         println!(
             "\n📈 {} vs {}",
             improvement.comparison_server, improvement.baseline_server

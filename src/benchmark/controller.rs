@@ -5,7 +5,7 @@ use tracing::{error, info, warn};
 
 use super::containers::ContainerManager;
 use super::load_generator::{LoadConfig, LoadGenerator, LoadPattern, RequestConfig};
-use super::metrics::{MetricsCollector, ResourceStats};
+use super::metrics::MetricsCollector;
 use super::reports::{ExportFormat, ReportGenerator};
 use super::{
     BenchmarkConfig, BenchmarkResults, ComparisonAnalysis, ModelConfig, PerformanceRank,
@@ -376,8 +376,8 @@ impl BenchmarkController {
 
     fn calculate_memory_improvement(
         &self,
-        baseline: &ResourceStats,
-        current: &ResourceStats,
+        baseline: &crate::benchmark::metrics::ResourceStats,
+        current: &crate::benchmark::metrics::ResourceStats,
     ) -> f64 {
         if baseline.avg_memory_usage > 0.0 {
             ((baseline.avg_memory_usage - current.avg_memory_usage) / baseline.avg_memory_usage)
@@ -473,6 +473,9 @@ impl Drop for BenchmarkController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::benchmark::containers::ServerType;
+    use crate::benchmark::metrics::{LatencyStats, ResourceStats, ThroughputStats};
+    use crate::benchmark::ErrorStats;
 
     #[test]
     fn test_performance_score_calculation() {
@@ -488,7 +491,7 @@ mod tests {
         let server_result = ServerResults {
             server_id: "test".to_string(),
             server_type: ServerType::Furnace,
-            latency_stats: super::LatencyStats {
+            latency_stats: LatencyStats {
                 mean: 10.0,
                 median: 9.0,
                 p50: 9.0,
@@ -501,7 +504,7 @@ mod tests {
                 std_dev: 5.0,
                 total_requests: 1000,
             },
-            throughput_stats: super::ThroughputStats {
+            throughput_stats: ThroughputStats {
                 requests_per_second: 100.0,
                 successful_rps: 99.0,
                 failed_rps: 1.0,
@@ -511,7 +514,7 @@ mod tests {
                 error_rate: 0.01,
                 duration_seconds: 10.0,
             },
-            resource_stats: super::ResourceStats {
+            resource_stats: ResourceStats {
                 avg_cpu_usage: 50.0,
                 max_cpu_usage: 75.0,
                 min_cpu_usage: 25.0,
@@ -524,7 +527,7 @@ mod tests {
                 network_bytes_received: 2000000,
                 samples_count: 100,
             },
-            error_stats: super::ErrorStats {
+            error_stats: ErrorStats {
                 total_requests: 1000,
                 successful_requests: 990,
                 failed_requests: 10,
@@ -549,7 +552,7 @@ mod tests {
             }
         };
 
-        let baseline = super::LatencyStats {
+        let baseline = LatencyStats {
             mean: 20.0,
             median: 18.0,
             p50: 18.0,
@@ -563,7 +566,7 @@ mod tests {
             total_requests: 1000,
         };
 
-        let current = super::LatencyStats {
+        let current = LatencyStats {
             mean: 10.0,
             median: 9.0,
             p50: 9.0,

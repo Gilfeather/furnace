@@ -351,7 +351,7 @@ mod tests {
         assert_eq!(input.len(), 10);
         // Check that values are in expected range
         for value in input {
-            assert!(value >= -1.0 && value <= 1.0);
+            assert!((-1.0..=1.0).contains(&value));
         }
     }
 
