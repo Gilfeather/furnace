@@ -150,6 +150,7 @@ impl ContainerManager {
                 );
                 bindings
             }),
+            binds: Some(vec!["/tmp/furnace-models:/app/models:ro".to_string()]),
             memory: Some(self.parse_memory_limit(&resource_limits.memory_limit)?),
             nano_cpus: Some(self.parse_cpu_limit(&resource_limits.cpu_limit)?),
             restart_policy: Some(RestartPolicy {
@@ -316,7 +317,16 @@ impl ContainerManager {
     }
 
     async fn pull_image(&self, image: &str) -> Result<()> {
-        info!("Pulling image: {}", image);
+        // First check if image exists locally
+        match self.docker.inspect_image(image).await {
+            Ok(_) => {
+                info!("Image already exists locally: {}", image);
+                return Ok(());
+            }
+            Err(_) => {
+                info!("Image not found locally, pulling: {}", image);
+            }
+        }
 
         let mut stream = self.docker.create_image(
             Some(CreateImageOptions {
