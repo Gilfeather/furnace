@@ -38,6 +38,11 @@ examples/*/model.*
 examples/*/data/
 examples/*/output/
 
+# Generated test data files
+resnet18_*.json
+*_test.json
+*_sample.json
+
 # Temporary files
 *.tmp
 *.temp

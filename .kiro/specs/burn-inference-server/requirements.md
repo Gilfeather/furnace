@@ -142,14 +142,3 @@ furnaceは、Rust製のBurnベース推論サーバです。Pythonに依存せ�
 2. WHEN responses are generated THEN the system SHALL use zero-copy serialization where possible
 3. WHEN large payloads are handled THEN the system SHALL use streaming JSON processing
 4. WHEN binary data is transferred THEN the system SHALL support efficient byte transfer using bytes::Bytes
-
-### Requirement 13
-
-**User Story:** As a developer, I want performance monitoring and metrics collection, so that I can analyze and optimize inference performance.
-
-#### Acceptance Criteria
-
-1. WHEN inference is performed THEN the system SHALL measure and log inference latency (p50, p95, p99)
-2. WHEN requests are processed THEN the system SHALL track memory usage during inference
-3. WHEN the server is running THEN the system SHALL expose performance metrics via /metrics endpoint
-4. WHEN optimization features are used THEN the system SHALL report kernel fusion and cache hit rates
