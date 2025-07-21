@@ -1,7 +1,7 @@
 # 🔥 Furnace
 
 [![Build Status](https://github.com/Gilfeather/furnace/actions/workflows/ci.yml/badge.svg)](https://github.com/Gilfeather/furnace/actions/workflows/ci.yml)
-[![Binary Size](https://img.shields.io/badge/binary%20size-2.3MB-blue)](https://github.com/Gilfeather/furnace)
+[![Binary Size](https://img.shields.io/badge/binary%20size-4.5MB-blue)](https://github.com/Gilfeather/furnace)
 [![Inference Time](https://img.shields.io/badge/inference-~0.2ms*-brightgreen)](https://github.com/Gilfeather/furnace)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/Gilfeather/furnace/blob/main/LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/Gilfeather/furnace?style=social)](https://github.com/Gilfeather/furnace/stargazers)
@@ -15,7 +15,7 @@ A high-performance, lightweight HTTP inference server specialized for ONNX model
 
 ## ✨ Features
 
-- 🦀 **Pure Rust**: Maximum performance, minimal memory footprint (2.3MB binary)
+- 🦀 **Pure Rust**: Maximum performance, minimal memory footprint (4.5MB binary)
 - 🔥 **ONNX Support**: Direct ONNX model loading with automatic shape detection
 - ⚡ **Fast Inference**: ~0.2ms inference times for ResNet-18
 - 🛡️ **Production Ready**: Graceful shutdown, comprehensive error handling
@@ -39,7 +39,7 @@ cd furnace
 cargo build --release
 ```
 
-Expected output: Binary created at `./target/release/furnace` (~2.3MB)
+Expected output: Binary created at `./target/release/furnace` (~4.5MB)
 
 ### 2. Download ResNet-18 Model
 
@@ -153,7 +153,7 @@ torch.onnx.export(model, dummy_input, "my_model.onnx")
 ### ResNet-18 Benchmarks
 | Metric | Value |
 |--------|-------|
-| Binary Size | **2.3MB** |
+| Binary Size | **4.5MB** |
 | Model Size | **45MB** |
 | Inference Time | **~0.2ms** |
 | Memory Usage | **<200MB** |
