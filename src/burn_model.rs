@@ -426,8 +426,26 @@ fn try_load_with_backend(
 
 /// Create a sample model for testing
 pub fn create_sample_model() -> FurnaceResult<BurnModelContainer> {
-    let config = MlpConfig::new(784, 128, 10); // MNIST-like model
-    let container = BurnModelContainer::new(config, "sample_mnist_model".to_string());
+    create_sample_model_with_config(784, 128, 10)
+}
+
+/// Create a sample model with custom dimensions
+pub fn create_sample_model_with_config(
+    input_size: usize,
+    hidden_size: usize,
+    output_size: usize,
+) -> FurnaceResult<BurnModelContainer> {
+    let config = MlpConfig::new(input_size, hidden_size, output_size);
+    let container = BurnModelContainer::new(
+        config,
+        format!(
+            "sample_model_{}_{}_{}_{}",
+            input_size,
+            hidden_size,
+            output_size,
+            chrono::Utc::now().timestamp()
+        ),
+    );
     Ok(container)
 }
 

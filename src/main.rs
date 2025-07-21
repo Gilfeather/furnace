@@ -9,6 +9,22 @@ use uuid::Uuid;
 use error::{CliError, Result};
 use furnace::{api, error, model};
 
+fn parse_shape_string(shape_str: &str) -> Result<Vec<usize>> {
+    shape_str
+        .split(',')
+        .map(|s| {
+            s.trim()
+                .parse::<usize>()
+                .map_err(|_| CliError::InvalidArgument {
+                    arg: "shape".to_string(),
+                    value: s.to_string(),
+                    reason: "must be a positive integer".to_string(),
+                })
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
 #[derive(Debug)]
 struct CliArgs {
     model_path: PathBuf,
@@ -19,6 +35,9 @@ struct CliArgs {
     enable_kernel_fusion: bool,
     enable_autotuning: bool,
     log_level: String,
+    input_shape: Option<Vec<usize>>,
+    output_shape: Option<Vec<usize>>,
+    max_batch_size: Option<usize>,
 }
 
 fn parse_args() -> Result<CliArgs> {
@@ -138,6 +157,43 @@ fn parse_args() -> Result<CliArgs> {
                 .value_parser(["error", "warn", "info", "debug", "trace"])
                 .default_value("info"),
         )
+        .arg(
+            Arg::new("input-shape")
+                .long("input-shape")
+                .value_name("SHAPE")
+                .help("Override model input shape (comma-separated dimensions)")
+                .long_help(
+                    "Override the model's default input shape. Provide dimensions as comma-separated values.\n\
+                    Examples:\n  \
+                    --input-shape 784 (for MNIST flattened)\n  \
+                    --input-shape 3,224,224 (for ResNet-style images)\n  \
+                    --input-shape 128 (for custom 1D input)"
+                ),
+        )
+        .arg(
+            Arg::new("output-shape")
+                .long("output-shape")
+                .value_name("SHAPE")
+                .help("Override model output shape (comma-separated dimensions)")
+                .long_help(
+                    "Override the model's default output shape. Provide dimensions as comma-separated values.\n\
+                    Examples:\n  \
+                    --output-shape 10 (for 10-class classification)\n  \
+                    --output-shape 1000 (for ImageNet classification)\n  \
+                    --output-shape 256,256,3 (for image generation)"
+                ),
+        )
+        .arg(
+            Arg::new("max-batch-size")
+                .long("max-batch-size")
+                .value_name("SIZE")
+                .help("Maximum batch size for inference (default: 1000)")
+                .long_help(
+                    "Set the maximum number of samples that can be processed in a single batch. \n\
+                    Higher values allow more throughput but consume more memory."
+                )
+                .value_parser(clap::value_parser!(usize)),
+        )
         .get_matches();
 
     // Extract and validate arguments
@@ -185,6 +241,17 @@ fn parse_args() -> Result<CliArgs> {
     let enable_autotuning = matches.get_flag("enable-autotuning");
     let log_level = matches.get_one::<String>("log-level").unwrap().clone();
 
+    // Parse shape arguments
+    let input_shape = matches
+        .get_one::<String>("input-shape")
+        .map(|s| parse_shape_string(s))
+        .transpose()?;
+    let output_shape = matches
+        .get_one::<String>("output-shape")
+        .map(|s| parse_shape_string(s))
+        .transpose()?;
+    let max_batch_size = matches.get_one::<usize>("max-batch-size").copied();
+
     let model_path = PathBuf::from(model_path_str);
 
     // Enhanced model path validation
@@ -199,6 +266,9 @@ fn parse_args() -> Result<CliArgs> {
         enable_kernel_fusion,
         enable_autotuning,
         log_level,
+        input_shape,
+        output_shape,
+        max_batch_size,
     })
 }
 
@@ -445,7 +515,38 @@ async fn main() -> Result<()> {
         backend: args.backend.clone(),
         enable_kernel_fusion: args.enable_kernel_fusion,
         enable_autotuning: args.enable_autotuning,
+        dimension_config: model::DynamicDimensionConfig {
+            allow_variable_batch: true,
+            max_batch_size: args.max_batch_size,
+            allow_variable_input: args.input_shape.is_some() || args.output_shape.is_some(),
+            supported_input_shapes: args.input_shape.as_ref().map(|s| vec![s.clone()]),
+            default_input_shape: args.input_shape.clone(),
+            default_output_shape: args.output_shape.clone(),
+        },
     };
+
+    // Log dimension configuration if custom shapes provided
+    if let Some(ref input_shape) = args.input_shape {
+        info!(
+            session_id = %session_id,
+            input_shape = ?input_shape,
+            "📏 Using custom input shape"
+        );
+    }
+    if let Some(ref output_shape) = args.output_shape {
+        info!(
+            session_id = %session_id,
+            output_shape = ?output_shape,
+            "📏 Using custom output shape"
+        );
+    }
+    if let Some(max_batch_size) = args.max_batch_size {
+        info!(
+            session_id = %session_id,
+            max_batch_size = max_batch_size,
+            "📦 Using custom max batch size"
+        );
+    }
 
     let model = match model::load_model_with_config(&args.model_path, model_config) {
         Ok(model) => {
@@ -455,6 +556,9 @@ async fn main() -> Result<()> {
                 model_name = %model_info.name,
                 input_shape = ?model_info.input_spec.shape,
                 output_shape = ?model_info.output_spec.shape,
+                custom_input = ?args.input_shape,
+                custom_output = ?args.output_shape,
+                max_batch_size = ?args.max_batch_size,
                 backend = %model_info.backend,
                 model_type = %model_info.model_type,
                 kernel_fusion = args.enable_kernel_fusion,

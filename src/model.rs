@@ -17,11 +17,42 @@ pub struct TensorSpec {
     pub max_value: Option<f32>,
 }
 
+/// Configuration for dynamic model dimensions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DynamicDimensionConfig {
+    /// Allow variable batch sizes
+    pub allow_variable_batch: bool,
+    /// Maximum batch size allowed (None for unlimited)
+    pub max_batch_size: Option<usize>,
+    /// Allow variable input dimensions
+    pub allow_variable_input: bool,
+    /// Supported input shapes (None means infer from model)
+    pub supported_input_shapes: Option<Vec<Vec<usize>>>,
+    /// Default input shape when creating models
+    pub default_input_shape: Option<Vec<usize>>,
+    /// Default output shape when creating models
+    pub default_output_shape: Option<Vec<usize>>,
+}
+
+impl Default for DynamicDimensionConfig {
+    fn default() -> Self {
+        Self {
+            allow_variable_batch: true,
+            max_batch_size: Some(1000),
+            allow_variable_input: false,
+            supported_input_shapes: None,
+            default_input_shape: None,
+            default_output_shape: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
     pub backend: Option<String>,
     pub enable_kernel_fusion: bool,
     pub enable_autotuning: bool,
+    pub dimension_config: DynamicDimensionConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -284,6 +315,7 @@ pub struct Model {
     #[allow(dead_code)]
     path: PathBuf,
     stats: Arc<std::sync::Mutex<ModelStats>>,
+    dimension_config: DynamicDimensionConfig,
 }
 
 impl Model {
@@ -329,7 +361,106 @@ impl Model {
             info,
             path,
             stats,
+            dimension_config: DynamicDimensionConfig::default(),
         }
+    }
+
+    pub fn new_with_config(
+        inner: Box<dyn BurnModel>,
+        path: PathBuf,
+        model_size_bytes: u64,
+        dimension_config: DynamicDimensionConfig,
+    ) -> Self {
+        // Use custom shapes if provided, otherwise use model's natural shapes
+        let (input_shape, output_shape) = if let (Some(input), Some(output)) = (
+            &dimension_config.default_input_shape,
+            &dimension_config.default_output_shape,
+        ) {
+            (input.clone(), output.clone())
+        } else {
+            (
+                inner.get_input_shape().to_vec(),
+                inner.get_output_shape().to_vec(),
+            )
+        };
+
+        let info = ModelInfo {
+            name: inner.get_name().to_string(),
+            version: "1.0.0".to_string(),
+            input_spec: TensorSpec {
+                shape: input_shape,
+                dtype: "float32".to_string(),
+                min_value: None,
+                max_value: None,
+            },
+            output_spec: TensorSpec {
+                shape: output_shape,
+                dtype: "float32".to_string(),
+                min_value: None,
+                max_value: None,
+            },
+            model_type: "burn".to_string(),
+            backend: inner.get_backend_info(),
+            created_at: Utc::now().to_rfc3339(),
+            model_size_bytes,
+        };
+
+        let stats = Arc::new(std::sync::Mutex::new(ModelStats {
+            inference_count: 0,
+            total_inference_time_ms: 0.0,
+            last_inference_time: None,
+            average_inference_time_ms: 0.0,
+            error_count: 0,
+            success_count: 0,
+            memory_usage_bytes: 0,
+            min_inference_time_ms: f64::MAX,
+            max_inference_time_ms: 0.0,
+        }));
+
+        Self {
+            inner,
+            info,
+            path,
+            stats,
+            dimension_config,
+        }
+    }
+
+    fn get_max_batch_size(&self) -> usize {
+        self.dimension_config.max_batch_size.unwrap_or(1000)
+    }
+
+    pub fn supports_variable_input(&self) -> bool {
+        self.dimension_config.allow_variable_input
+    }
+
+    pub fn get_supported_input_shapes(&self) -> Option<&[Vec<usize>]> {
+        self.dimension_config.supported_input_shapes.as_deref()
+    }
+
+    pub fn validate_input_shape_flexible(&self, input: &[f32]) -> Result<()> {
+        if !self.supports_variable_input() {
+            // Use existing strict validation
+            return self.validate_input_shape(input);
+        }
+
+        // Check against supported shapes if configured
+        if let Some(supported_shapes) = self.get_supported_input_shapes() {
+            for shape in supported_shapes {
+                let expected_size: usize = shape.iter().product();
+                if input.len() == expected_size {
+                    return Ok(());
+                }
+            }
+            return Err(ModelError::InputValidation {
+                expected: supported_shapes.first().unwrap_or(&vec![]).clone(),
+                actual: vec![input.len()],
+            }
+            .into());
+        }
+
+        // If no specific shapes configured, allow any size
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -359,13 +490,26 @@ impl Model {
         }
 
         let batch_size = inputs.len();
-        let expected_size: usize = self.info.input_spec.shape.iter().product();
 
-        // Validate batch size limits
-        const MAX_BATCH_SIZE: usize = 1000;
-        if batch_size > MAX_BATCH_SIZE {
+        // Use flexible validation if enabled
+        if self.supports_variable_input() {
+            // Validate first input to determine expected size
+            if let Some(first_input) = inputs.first() {
+                self.validate_input_shape_flexible(first_input)?;
+            }
+        }
+
+        let expected_size: usize = if self.supports_variable_input() && !inputs.is_empty() {
+            inputs[0].len() // Use actual input size for variable inputs
+        } else {
+            self.info.input_spec.shape.iter().product() // Use configured size for fixed inputs
+        };
+
+        // Validate batch size limits using configuration
+        let max_batch_size = self.get_max_batch_size();
+        if batch_size > max_batch_size {
             return Err(ModelError::InputValidation {
-                expected: vec![MAX_BATCH_SIZE],
+                expected: vec![max_batch_size],
                 actual: vec![batch_size],
             }
             .into());
@@ -592,6 +736,31 @@ pub fn load_model(path: &PathBuf) -> Result<Model> {
         backend: None,
         enable_kernel_fusion: true,
         enable_autotuning: true,
+        dimension_config: DynamicDimensionConfig::default(),
+    };
+    load_model_with_config(path, config)
+}
+
+pub fn load_model_with_dimensions(
+    path: &PathBuf,
+    input_shape: Option<Vec<usize>>,
+    output_shape: Option<Vec<usize>>,
+    max_batch_size: Option<usize>,
+) -> Result<Model> {
+    let dim_config = DynamicDimensionConfig {
+        allow_variable_batch: true,
+        max_batch_size,
+        allow_variable_input: input_shape.is_some(),
+        supported_input_shapes: input_shape.as_ref().map(|s| vec![s.clone()]),
+        default_input_shape: input_shape,
+        default_output_shape: output_shape,
+    };
+
+    let config = ModelConfig {
+        backend: None,
+        enable_kernel_fusion: true,
+        enable_autotuning: true,
+        dimension_config: dim_config,
     };
     load_model_with_config(path, config)
 }
@@ -795,6 +964,14 @@ fn try_load_onnx_model(path: &Path) -> Result<Model> {
 }
 
 fn load_dummy_model(path: &Path, model_size_bytes: u64) -> Result<Model> {
+    load_dummy_model_with_config(path, model_size_bytes, &DynamicDimensionConfig::default())
+}
+
+fn load_dummy_model_with_config(
+    path: &Path,
+    model_size_bytes: u64,
+    dim_config: &DynamicDimensionConfig,
+) -> Result<Model> {
     warn!("Loading dummy model as fallback");
 
     let model_name = path
@@ -803,13 +980,24 @@ fn load_dummy_model(path: &Path, model_size_bytes: u64) -> Result<Model> {
         .unwrap_or("unknown")
         .to_string();
 
-    let dummy_model = DummyModel::new(
-        model_name,
-        vec![784], // Example: MNIST input shape (28*28)
-        vec![10],  // Example: 10 classes output
-    );
+    // Use configured dimensions or fallback to defaults
+    let input_shape = dim_config
+        .default_input_shape
+        .clone()
+        .unwrap_or_else(|| vec![784]); // MNIST-like default
+    let output_shape = dim_config
+        .default_output_shape
+        .clone()
+        .unwrap_or_else(|| vec![10]); // 10 classes default
 
-    let model = Model::new(Box::new(dummy_model), path.to_path_buf(), model_size_bytes);
+    let dummy_model = DummyModel::new(model_name, input_shape, output_shape);
+
+    let model = Model::new_with_config(
+        Box::new(dummy_model),
+        path.to_path_buf(),
+        model_size_bytes,
+        dim_config.clone(),
+    );
 
     info!("Dummy model loaded successfully: {}", model.get_info().name);
     Ok(model)

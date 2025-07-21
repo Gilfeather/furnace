@@ -1,9 +1,9 @@
 {
-  "name": "sample_mnist_model",
+  "name": "sample_model_784_128_10_1753088785",
   "version": "1.0.0",
   "input_size": 784,
   "hidden_size": 128,
   "output_size": 10,
   "model_type": "mlp",
-  "created_at": "2025-07-17T02:50:27.345483+00:00"
+  "created_at": "2025-07-21T09:06:25.443031+00:00"
 }
