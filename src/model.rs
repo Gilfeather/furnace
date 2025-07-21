@@ -8,6 +8,7 @@ use tracing::{error, info, warn};
 
 use crate::burn_model::{create_sample_model, BurnModelContainer};
 use crate::error::{ModelError, Result};
+use crate::onnx_models::GeneratedOnnxModel;
 // Temporarily define these here until module import is resolved
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TensorSpec {
@@ -115,109 +116,7 @@ impl BurnModel for RealBurnModel {
     }
 }
 
-/// ONNX model wrapper using burn-import
-#[derive(Debug)]
-pub struct OnnxModel {
-    name: String,
-    input_shape: Vec<usize>,
-    output_shape: Vec<usize>,
-    // Note: In a real implementation, you would store the generated model here
-    // For now, we'll use a placeholder approach
-}
 
-impl OnnxModel {
-    pub fn from_file(path: &Path) -> Result<Self> {
-        info!("Loading ONNX model from: {:?}", path);
-
-        // Read ONNX file
-        let _onnx_bytes = std::fs::read(path).map_err(|e| ModelError::LoadFailed {
-            path: path.to_path_buf(),
-            source: Box::new(e),
-        })?;
-
-        // Extract model information
-        let model_name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("onnx_model")
-            .to_string();
-
-        // Detect model type and set appropriate shapes
-        let (input_shape, output_shape) = if model_name.to_lowercase().contains("resnet") {
-            // ResNet models typically use [3, 224, 224] input and [1000] output
-            (vec![3, 224, 224], vec![1000])
-        } else if model_name.to_lowercase().contains("mnist") {
-            // MNIST models use [784] input and [10] output
-            (vec![784], vec![10])
-        } else {
-            // Try to infer from file size or use ResNet as default for larger models
-            let file_size = _onnx_bytes.len();
-            if file_size > 10_000_000 {
-                // Large model, likely ResNet or similar
-                (vec![3, 224, 224], vec![1000])
-            } else {
-                // Small model, likely MNIST or similar
-                (vec![784], vec![10])
-            }
-        };
-
-        info!(
-            "Successfully loaded ONNX model: {} with input shape {:?} and output shape {:?}",
-            model_name, input_shape, output_shape
-        );
-
-        Ok(Self {
-            name: model_name,
-            input_shape,
-            output_shape,
-        })
-    }
-}
-
-impl BurnModel for OnnxModel {
-    fn predict(&self, input: Tensor<B, 2>) -> Result<Tensor<B, 2>> {
-        let [batch_size, _] = input.dims();
-        let output_size = self.output_shape.iter().product::<usize>();
-
-        // For now, create a dummy output - in a real implementation,
-        // you would run the actual ONNX model inference here
-        let output_data = vec![0.1; batch_size * output_size];
-        let output_tensor = Tensor::from_data(
-            TensorData::new(output_data, [batch_size, output_size]),
-            &Default::default(),
-        );
-
-        info!(
-            "ONNX model inference completed for batch size: {}",
-            batch_size
-        );
-        Ok(output_tensor)
-    }
-
-    fn get_input_shape(&self) -> &[usize] {
-        &self.input_shape
-    }
-
-    fn get_output_shape(&self) -> &[usize] {
-        &self.output_shape
-    }
-
-    fn get_name(&self) -> &str {
-        &self.name
-    }
-
-    fn get_backend_info(&self) -> String {
-        "onnx".to_string()
-    }
-
-    fn get_optimization_info(&self) -> OptimizationInfo {
-        OptimizationInfo {
-            kernel_fusion: false,
-            autotuning_cache: false,
-            backend_type: self.get_backend_info(),
-        }
-    }
-}
 
 // Dummy model implementation for now
 #[derive(Debug, Clone)]
@@ -773,24 +672,33 @@ fn try_load_onnx_model(path: &Path) -> Result<Model> {
         })?
         .len();
 
-    // Load ONNX model
-    match OnnxModel::from_file(path) {
-        Ok(onnx_model) => {
-            info!(
-                "Successfully loaded ONNX model: {} with backend: {}",
-                onnx_model.get_name(),
-                onnx_model.get_backend_info()
-            );
-            let model = Model::new(Box::new(onnx_model), path.to_path_buf(), model_size_bytes);
-            Ok(model)
+    // Load ONNX model using the new implementation
+    #[cfg(feature = "burn-import")]
+    {
+        match GeneratedOnnxModel::from_onnx_file(path) {
+            Ok(onnx_model) => {
+                info!(
+                    "Successfully loaded ONNX model: {} with input shape {:?} and output shape {:?}",
+                    onnx_model.get_name(),
+                    onnx_model.get_input_shape(),
+                    onnx_model.get_output_shape()
+                );
+                let model = Model::new(Box::new(onnx_model), path.to_path_buf(), model_size_bytes);
+                Ok(model)
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to load ONNX model ({}), falling back to dummy model",
+                    e
+                );
+                load_dummy_model(path, model_size_bytes)
+            }
         }
-        Err(e) => {
-            warn!(
-                "Failed to load ONNX model ({}), falling back to dummy model",
-                e
-            );
-            load_dummy_model(path, model_size_bytes)
-        }
+    }
+    #[cfg(not(feature = "burn-import"))]
+    {
+        warn!("burn-import feature not enabled, falling back to dummy model");
+        load_dummy_model(path, model_size_bytes)
     }
 }
 
@@ -930,18 +838,18 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "burn-import")]
     fn test_onnx_model_creation() {
         // Test direct ONNX model creation (without file)
-        let onnx_model = OnnxModel {
-            name: "test_onnx".to_string(),
-            input_shape: vec![784],
-            output_shape: vec![10],
-        };
+        let onnx_model = GeneratedOnnxModel::new(
+            "test_onnx".to_string(),
+            vec![784],
+            vec![10],
+        );
 
         assert_eq!(onnx_model.get_name(), "test_onnx");
         assert_eq!(onnx_model.get_input_shape(), &[784]);
         assert_eq!(onnx_model.get_output_shape(), &[10]);
-        assert_eq!(onnx_model.get_backend_info(), "onnx");
 
         // Test inference
         let input_tensor = Tensor::from_data(

@@ -2,6 +2,7 @@ pub mod api;
 pub mod burn_model;
 pub mod error;
 pub mod model;
+pub mod onnx_models;
 pub mod types;
 
 pub use api::start_server;

@@ -29,7 +29,7 @@ path = "src/main.rs"
 
 
 [features]
-default = []
+default = ["burn-import"]
 wgpu = []
 metal = []
 cuda = []
@@ -76,6 +76,9 @@ toml = "0.8"  # TOML configuration parsing
 tempfile = "3.12"  # Temporary file handling
 rand = "0.8"  # Random number generation
 reqwest = { version = "0.12", features = ["json"] }  # HTTP client
+
+[build-dependencies]
+burn-import = { version = "0.17", features = ["onnx"], optional = true }
 
 [dev-dependencies]
 # Testing utilities
