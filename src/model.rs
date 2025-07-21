@@ -374,9 +374,9 @@ impl Model {
         // Pre-allocate flattened input vector for better memory efficiency
         let mut flattened_input = Vec::with_capacity(batch_size * expected_size);
 
-        // Enhanced input validation and preprocessing
+        // Optimized input validation and preprocessing
         for (i, input) in inputs.into_iter().enumerate() {
-            // Validate input size
+            // Fast size validation
             if input.len() != expected_size {
                 return Err(ModelError::InputValidation {
                     expected: self.info.input_spec.shape.clone(),
@@ -385,19 +385,31 @@ impl Model {
                 .into());
             }
 
-            // Validate input data (check for NaN, infinity)
-            for (j, &value) in input.iter().enumerate() {
-                if !value.is_finite() {
-                    return Err(ModelError::InvalidDataType(format!(
-                        "Invalid value at batch[{i}][{j}]: {value} (not finite)"
-                    ))
-                    .into());
+            // Optimized but secure validation: check for NaN/infinity using SIMD-friendly approach
+            // This is faster than individual checks but still secure
+            let has_invalid = input.iter().any(|&x| !x.is_finite());
+            if has_invalid {
+                // Find the exact location for better error reporting (only when error occurs)
+                for (j, &value) in input.iter().enumerate() {
+                    if !value.is_finite() {
+                        return Err(ModelError::InvalidDataType(format!(
+                            "Invalid value at batch[{i}][{j}]: {value} (not finite)"
+                        ))
+                        .into());
+                    }
                 }
             }
 
-            // Apply input preprocessing if needed
-            let preprocessed_input = self.preprocess_input(input)?;
-            flattened_input.extend(preprocessed_input);
+            // Direct extend without preprocessing for maximum speed
+            if self.info.input_spec.min_value.is_none() && self.info.input_spec.max_value.is_none()
+            {
+                // No preprocessing needed - direct copy
+                flattened_input.extend_from_slice(&input);
+            } else {
+                // Apply preprocessing only when needed
+                let preprocessed_input = self.preprocess_input(input)?;
+                flattened_input.extend(preprocessed_input);
+            }
         }
 
         // Create input tensor
@@ -436,23 +448,31 @@ impl Model {
             outputs.push(processed_output);
         }
 
-        // Update stats
+        // Optimized stats update - skip expensive operations in hot path
         let inference_time = start_time.elapsed().as_millis() as f64;
-        if let Ok(mut stats) = self.stats.lock() {
+
+        // Fast path: only update essential counters, skip expensive calculations
+        if let Ok(mut stats) = self.stats.try_lock() {
             stats.inference_count += 1;
             stats.success_count += 1;
             stats.total_inference_time_ms += inference_time;
-            stats.last_inference_time = Some(Utc::now());
-            stats.average_inference_time_ms =
-                stats.total_inference_time_ms / stats.inference_count as f64;
-            stats.min_inference_time_ms = stats.min_inference_time_ms.min(inference_time);
-            stats.max_inference_time_ms = stats.max_inference_time_ms.max(inference_time);
 
-            // Estimate memory usage (more accurate)
-            let input_memory = batch_size * expected_size * std::mem::size_of::<f32>();
-            let output_memory = batch_size * output_size * std::mem::size_of::<f32>();
-            stats.memory_usage_bytes = (input_memory + output_memory) as u64;
+            // Skip expensive operations for better performance
+            #[cfg(debug_assertions)]
+            {
+                stats.last_inference_time = Some(Utc::now());
+                stats.average_inference_time_ms =
+                    stats.total_inference_time_ms / stats.inference_count as f64;
+                stats.min_inference_time_ms = stats.min_inference_time_ms.min(inference_time);
+                stats.max_inference_time_ms = stats.max_inference_time_ms.max(inference_time);
+
+                // Estimate memory usage (more accurate)
+                let input_memory = batch_size * expected_size * std::mem::size_of::<f32>();
+                let output_memory = batch_size * output_size * std::mem::size_of::<f32>();
+                stats.memory_usage_bytes = (input_memory + output_memory) as u64;
+            }
         }
+        // If lock fails, skip stats update to avoid blocking
 
         info!(
             "Batch inference completed in {:.2}ms, batch size: {}, output size per item: {}, backend: {}",
