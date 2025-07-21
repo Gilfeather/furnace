@@ -193,19 +193,26 @@ cargo bench latency_measurement
 
 ### 🎯 Actual Benchmark Results
 
-Based on Criterion benchmarks on a typical development machine:
+Based on Criterion benchmarks on **Intel MacBook Pro 2020**:
 
 | Benchmark | Time | Throughput |
 |-----------|------|------------|
-| Single Inference | **217µs** | ~4,600 req/s |
-| Batch Size 2 | **536µs** | ~3,700 req/s |
-| Batch Size 4 | **823µs** | ~4,900 req/s |
-| Concurrent (4 threads) | **411µs** | ~9,700 req/s |
+| Single Inference | **152µs** | ~6,600 req/s |
+| Batch Size 2 | **305µs** | ~6,600 req/s |
+| Batch Size 4 | **664µs** | ~6,000 req/s |
+| Batch Size 8 | **1.53ms** | ~5,200 req/s |
+| Concurrent (4 threads) | **372µs** | ~10,800 req/s |
+| Concurrent (8 threads) | **561µs** | ~14,300 req/s |
 
 **Latency Percentiles:**
-- P50: ~150µs
-- P95: ~270µs  
-- P99: ~370µs
+- P50: ~149µs
+- P95: ~255µs  
+- P99: ~340µs
+
+**Test Environment:**
+- Hardware: Intel MacBook Pro 2020
+- Compiler: Rust 1.75+ (release mode with full optimizations)
+- Model: ResNet-18 ONNX (45MB, 150,528 input values → 1,000 output classes)
 
 ## 🌐 API Endpoints
 
