@@ -21,6 +21,17 @@ fn create_test_model() -> Model {
     }
 }
 
+fn create_dummy_model() -> Model {
+    // Create a dummy model with ResNet-18 shape but no actual inference
+    let dummy_model = furnace::model::DummyModel::new(
+        "dummy_resnet18".to_string(),
+        vec![3, 224, 224], // ResNet-18 input shape
+        vec![1000],        // ResNet-18 output shape
+    );
+    let dummy_path = PathBuf::from("dummy_model");
+    furnace::model::Model::new(Box::new(dummy_model), dummy_path, 0)
+}
+
 fn create_optimized_model(backend: Option<&str>, kernel_fusion: bool, autotuning: bool) -> Model {
     let config = furnace::model::ModelConfig {
         backend: backend.map(|s| s.to_string()),
@@ -271,6 +282,35 @@ fn bench_throughput_scaling(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_server_overhead_comparison(c: &mut Criterion) {
+    let onnx_model = Arc::new(create_test_model());
+    let dummy_model = Arc::new(create_dummy_model());
+
+    let model_info = onnx_model.get_info();
+    let input_size: usize = model_info.input_spec.shape.iter().product();
+    let input = vec![0.5f32; input_size];
+
+    let mut group = c.benchmark_group("server_overhead_comparison");
+
+    // ONNX model (includes actual inference)
+    group.bench_function("onnx_model", |b| {
+        b.iter(|| {
+            let result = onnx_model.predict_batch(vec![black_box(input.clone())]);
+            black_box(result).unwrap()
+        })
+    });
+
+    // Dummy model (server overhead only)
+    group.bench_function("dummy_model", |b| {
+        b.iter(|| {
+            let result = dummy_model.predict_batch(vec![black_box(input.clone())]);
+            black_box(result).unwrap()
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_single_inference,
@@ -280,6 +320,7 @@ criterion_group!(
     bench_backend_comparison,
     bench_memory_efficiency,
     bench_latency_percentiles,
-    bench_throughput_scaling
+    bench_throughput_scaling,
+    bench_server_overhead_comparison
 );
 criterion_main!(benches);
