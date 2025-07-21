@@ -103,6 +103,161 @@ curl -X POST http://localhost:3000/predict \
   --data-binary @resnet18_batch_sample.json
 ```
 
+## 🖼️ ONNX Model Integration
+
+Furnace uses Burn's native ONNX import system to generate Rust code from ONNX models at build time. This provides maximum performance and eliminates runtime dependencies.
+
+### 🔧 How ONNX Integration Works
+
+1. **Build-time Code Generation**: ONNX models are converted to native Rust code during compilation
+2. **Zero Runtime Dependencies**: No ONNX runtime required - everything is compiled into the binary
+3. **Native Performance**: Generated code is optimized by the Rust compiler
+4. **Type Safety**: Full Rust type checking for model inputs and outputs
+
+### 📁 Project Structure for ONNX Models
+
+```
+furnace/
+├── models/                    # Place your ONNX files here
+│   ├── resnet18.onnx         # ResNet-18 model (auto-detected)
+│   └── your_model.onnx       # Your custom ONNX models
+├── build.rs                  # Generates Rust code from ONNX files
+├── src/
+│   ├── onnx_models.rs        # Generated model integration
+│   └── ...
+└── target/debug/build/.../out/models/
+    ├── resnet18.rs           # Generated Rust code for ResNet-18
+    └── your_model.rs         # Generated code for your models
+```
+
+### 🚀 Adding New ONNX Models
+
+**Step 1: Add ONNX File**
+```bash
+# Place your ONNX model in the models/ directory
+cp your_model.onnx models/
+```
+
+**Step 2: Build (Automatic Code Generation)**
+```bash
+# Build process automatically generates Rust code
+cargo build --release
+```
+
+**Step 3: Integrate Generated Code**
+
+The build process generates Rust code in `target/debug/build/.../out/models/your_model.rs`. To integrate it:
+
+1. **Update `src/onnx_models.rs`**:
+```rust
+#[cfg(feature = "burn-import")]
+pub mod your_model {
+    include!(concat!(env!("OUT_DIR"), "/models/your_model.rs"));
+}
+```
+
+2. **Add Model Loading Logic**:
+```rust
+// In GeneratedOnnxModel::load_by_name()
+"your_model" => {
+    info!("Loading generated Your Model ONNX model");
+    let device = burn::backend::ndarray::NdArrayDevice::default();
+    let model = your_model::Model::<B>::default(&device);
+    
+    let mut wrapper = Self::new(
+        "your_model".to_string(),
+        vec![1, 3, 224, 224], // Your model's input shape
+        vec![1000],           // Your model's output shape
+    );
+    wrapper.inner_model = Some(Box::new(model));
+    Ok(wrapper)
+}
+```
+
+3. **Update Inference Logic**:
+```rust
+// In GeneratedOnnxModel::predict()
+"your_model" => {
+    if let Some(model) = inner_model.downcast_ref::<your_model::Model<B>>() {
+        // Reshape input to match your model's expected format
+        let input_reshaped = input.reshape([batch_size, 3, 224, 224]);
+        
+        // Run inference
+        let output = model.forward(input_reshaped);
+        
+        // Reshape output back to 2D
+        let output_2d = output.reshape([batch_size, output_size]);
+        return Ok(output_2d);
+    }
+}
+```
+
+### 🔍 Generated Code Structure
+
+When you build with an ONNX model, Burn generates a complete Rust implementation:
+
+```rust
+// Example: Generated ResNet-18 code structure
+#[derive(Module, Debug)]
+pub struct Model<B: Backend> {
+    conv2d1: Conv2d<B>,
+    batchnormalization1: BatchNorm<B, 2>,
+    maxpool2d1: MaxPool2d,
+    // ... all layers defined
+}
+
+impl<B: Backend> Model<B> {
+    pub fn forward(&self, input: Tensor<B, 4>) -> Tensor<B, 2> {
+        // Complete forward pass implementation
+        let x = self.conv2d1.forward(input);
+        let x = self.batchnormalization1.forward(x);
+        // ... full computation graph
+    }
+}
+```
+
+### ⚠️ ONNX Compatibility Notes
+
+**Supported ONNX Features:**
+- ✅ Opset 16+ (required)
+- ✅ Standard CNN operations (Conv2d, BatchNorm, ReLU, etc.)
+- ✅ Image classification models
+- ✅ Most PyTorch-exported models
+
+**Known Limitations:**
+- ❌ Some complex models may have unsupported operations
+- ❌ Dynamic shapes require manual handling
+- ❌ Some models may need ONNX version upgrade
+
+**Upgrading ONNX Models:**
+```python
+# If your model uses older ONNX opset, upgrade it:
+import onnx
+from onnx import version_converter
+
+model = onnx.load('old_model.onnx')
+upgraded_model = version_converter.convert_version(model, 16)
+onnx.save(upgraded_model, 'upgraded_model.onnx')
+```
+
+### 🧪 Testing Generated Models
+
+```bash
+# 1. Build with your ONNX model
+cargo build --release
+
+# 2. Check generated code
+ls target/debug/build/furnace-*/out/models/
+
+# 3. Test the server
+./target/release/furnace --model-path models/your_model.onnx
+
+# 4. Test inference
+curl -X POST http://localhost:3000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"input": [/* your test data */]}'
+```
+
 ## 🖼️ Supported Models
 
 Furnace supports ONNX models with automatic shape detection. Currently optimized for image classification models.
@@ -364,6 +519,61 @@ pwd  # Should end with /furnace
 
 # Run with verbose output
 cargo run --example resnet18_sample_data --verbose
+```
+
+**ONNX Model Integration Issues:**
+
+*Generated Code Not Found:*
+```bash
+# Check if ONNX models are in the right place
+ls -la models/
+
+# Verify code generation during build
+cargo build --release 2>&1 | grep -i onnx
+
+# Check generated files
+find target -name "*.rs" -path "*/out/models/*"
+```
+
+*Model Loading Fails:*
+```bash
+# Check ONNX model compatibility
+# Ensure your model uses ONNX opset 16+
+python3 -c "
+import onnx
+model = onnx.load('models/your_model.onnx')
+print(f'ONNX version: {model.opset_import[0].version}')
+"
+
+# If version < 16, upgrade the model:
+python3 -c "
+import onnx
+from onnx import version_converter
+model = onnx.load('models/your_model.onnx')
+upgraded = version_converter.convert_version(model, 16)
+onnx.save(upgraded, 'models/your_model_v16.onnx')
+"
+```
+
+*Build Fails with ONNX Errors:*
+```bash
+# Some models may have compatibility issues
+# Check build warnings for specific ONNX operations
+cargo build 2>&1 | grep -A5 -B5 "ONNX\|onnx"
+
+# Try building without problematic models
+mv models/problematic_model.onnx models/problematic_model.onnx.bak
+cargo build --release
+```
+
+*Runtime Errors with Generated Models:*
+```bash
+# Check tensor shape mismatches
+# Ensure your input data matches the expected format
+curl -X POST http://localhost:3000/model/info  # Check expected shapes
+
+# Test with correct input format
+# For ResNet-18: [batch_size, 3*224*224] = [1, 150528] values
 ```
 
 ### Performance Issues

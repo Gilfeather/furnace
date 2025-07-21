@@ -13,9 +13,8 @@ type B = NdArray<f32>;
 
 #[cfg(feature = "burn-import")]
 pub mod resnet18 {
-    // This will include the generated code for resnet18.onnx if it exists
-    // The include! macro will be added when the model is actually generated
-    // include!(concat!(env!("OUT_DIR"), "/models/resnet18.rs"));
+    // Include the generated code for resnet18.onnx
+    include!(concat!(env!("OUT_DIR"), "/models/resnet18.rs"));
 }
 
 #[cfg(feature = "burn-import")]
@@ -32,6 +31,8 @@ pub struct GeneratedOnnxModel {
     input_shape: Vec<usize>,
     output_shape: Vec<usize>,
     model_type: String,
+    #[cfg(feature = "burn-import")]
+    inner_model: Option<Box<dyn std::any::Any + Send + Sync>>,
 }
 
 impl GeneratedOnnxModel {
@@ -42,6 +43,8 @@ impl GeneratedOnnxModel {
             input_shape,
             output_shape,
             model_type: "onnx".to_string(),
+            #[cfg(feature = "burn-import")]
+            inner_model: None,
         }
     }
 
@@ -52,19 +55,24 @@ impl GeneratedOnnxModel {
                 #[cfg(feature = "burn-import")]
                 {
                     info!("Loading generated ResNet18 ONNX model");
-                    // TODO: Use actual generated model
-                    // let model = resnet18::Model::<B>::default();
-                    Ok(Self::new(
+                    // Create the actual generated ResNet18 model
+                    let device = burn::backend::ndarray::NdArrayDevice::default();
+                    let model = resnet18::Model::<B>::default(&device);
+
+                    let mut wrapper = Self::new(
                         "resnet18".to_string(),
                         vec![1, 3, 224, 224], // Standard ResNet input
                         vec![1000],           // ImageNet classes
-                    ))
+                    );
+                    wrapper.inner_model = Some(Box::new(model));
+                    Ok(wrapper)
                 }
                 #[cfg(not(feature = "burn-import"))]
                 {
-                    Err(ModelError::InvalidFormat(
-                        "burn-import feature not enabled".to_string(),
-                    ).into())
+                    Err(
+                        ModelError::InvalidFormat("burn-import feature not enabled".to_string())
+                            .into(),
+                    )
                 }
             }
             "gptneox_Opset18" | "gptneox" => {
@@ -81,17 +89,15 @@ impl GeneratedOnnxModel {
                 }
                 #[cfg(not(feature = "burn-import"))]
                 {
-                    Err(ModelError::InvalidFormat(
-                        "burn-import feature not enabled".to_string(),
-                    ).into())
+                    Err(
+                        ModelError::InvalidFormat("burn-import feature not enabled".to_string())
+                            .into(),
+                    )
                 }
             }
             _ => {
                 warn!("Unknown ONNX model: {}", model_name);
-                Err(ModelError::InvalidFormat(format!(
-                    "Unknown ONNX model: {}",
-                    model_name
-                )).into())
+                Err(ModelError::InvalidFormat(format!("Unknown ONNX model: {}", model_name)).into())
             }
         }
     }
@@ -122,14 +128,15 @@ impl GeneratedOnnxModel {
     /// Perform inference using the generated ONNX model
     pub fn predict(&self, input: Tensor<B, 2>) -> Result<Tensor<B, 2>> {
         let [batch_size, input_size] = input.dims();
-        
+
         // Validate input shape
         let expected_input_size: usize = self.input_shape.iter().product();
         if input_size != expected_input_size {
             return Err(ModelError::InputValidation {
                 expected: self.input_shape.clone(),
                 actual: vec![input_size],
-            }.into());
+            }
+            .into());
         }
 
         let output_size = self.output_shape.iter().product::<usize>();
@@ -164,7 +171,7 @@ impl GeneratedOnnxModel {
             "Generated ONNX model '{}' inference completed for batch size: {}",
             self.name, batch_size
         );
-        
+
         Ok(output_tensor)
     }
 }
@@ -207,11 +214,8 @@ mod tests {
     #[test]
     #[cfg(feature = "burn-import")]
     fn test_generated_onnx_model_creation() {
-        let model = GeneratedOnnxModel::new(
-            "test_model".to_string(),
-            vec![1, 3, 224, 224],
-            vec![1000],
-        );
+        let model =
+            GeneratedOnnxModel::new("test_model".to_string(), vec![1, 3, 224, 224], vec![1000]);
 
         assert_eq!(model.get_name(), "test_model");
         assert_eq!(model.get_input_shape(), &[1, 3, 224, 224]);
@@ -223,7 +227,7 @@ mod tests {
     fn test_load_by_name() {
         let result = GeneratedOnnxModel::load_by_name("resnet18");
         assert!(result.is_ok());
-        
+
         let model = result.unwrap();
         assert_eq!(model.get_name(), "resnet18");
         assert_eq!(model.get_input_shape(), &[1, 3, 224, 224]);
@@ -235,7 +239,7 @@ mod tests {
     fn test_from_onnx_file() {
         let path = PathBuf::from("models/resnet18.onnx");
         let result = GeneratedOnnxModel::from_onnx_file(&path);
-        
+
         // This will succeed if the model name is recognized
         if result.is_ok() {
             let model = result.unwrap();

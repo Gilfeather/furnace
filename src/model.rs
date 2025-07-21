@@ -116,8 +116,6 @@ impl BurnModel for RealBurnModel {
     }
 }
 
-
-
 // Dummy model implementation for now
 #[derive(Debug, Clone)]
 pub struct DummyModel {
@@ -841,11 +839,7 @@ mod tests {
     #[cfg(feature = "burn-import")]
     fn test_onnx_model_creation() {
         // Test direct ONNX model creation (without file)
-        let onnx_model = GeneratedOnnxModel::new(
-            "test_onnx".to_string(),
-            vec![784],
-            vec![10],
-        );
+        let onnx_model = GeneratedOnnxModel::new("test_onnx".to_string(), vec![784], vec![10]);
 
         assert_eq!(onnx_model.get_name(), "test_onnx");
         assert_eq!(onnx_model.get_input_shape(), &[784]);
