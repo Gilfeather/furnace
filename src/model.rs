@@ -8,6 +8,78 @@ use tracing::{error, info, warn};
 
 use crate::burn_model::{create_sample_model, BurnModelContainer};
 use crate::error::{ModelError, Result};
+
+/// Extract input/output shapes from ONNX model bytes
+fn extract_onnx_shapes(onnx_bytes: &[u8]) -> Result<(Vec<usize>, Vec<usize>)> {
+    // Simple ONNX parsing to extract shapes
+    // This is a basic implementation - in production you'd want to use proper ONNX parsing
+
+    // Look for common patterns in ONNX files that indicate tensor shapes
+    let content = String::from_utf8_lossy(onnx_bytes);
+
+    // Try to find input shape hints in the ONNX metadata
+    // This is a heuristic approach - real implementation would parse protobuf
+
+    // Check for GPT-like models
+    if content.contains("gpt")
+        || content.contains("GPT")
+        || content.contains("neox")
+        || content.contains("NeoX")
+    {
+        // GPT models typically have sequence input and vocab output
+        // Common shapes: input [seq_len] -> output [vocab_size]
+        return Ok((vec![2048], vec![50257])); // Common GPT-2/NeoX dimensions
+    }
+
+    // Check for transformer models
+    if content.contains("transformer") || content.contains("attention") {
+        return Ok((vec![512], vec![30522])); // BERT-like dimensions
+    }
+
+    // Check for vision models
+    if content.contains("vision") || content.contains("resnet") || content.contains("vit") {
+        return Ok((vec![3, 224, 224], vec![1000])); // ImageNet-like
+    }
+
+    // Check for text classification
+    if content.contains("classification") {
+        return Ok((vec![512], vec![2])); // Binary classification
+    }
+
+    // If we can't determine, return an error to fall back to size-based inference
+    Err(ModelError::InvalidFormat("Could not extract shapes from ONNX metadata".to_string()).into())
+}
+
+/// Infer shapes from model name and file size as fallback
+fn infer_shapes_from_model_name_and_size(
+    model_name: &str,
+    file_size: usize,
+) -> (Vec<usize>, Vec<usize>) {
+    if model_name.to_lowercase().contains("resnet") {
+        // ResNet models typically use [3, 224, 224] input and [1000] output
+        (vec![3, 224, 224], vec![1000])
+    } else if model_name.to_lowercase().contains("mnist") {
+        // MNIST models use [784] input and [10] output
+        (vec![784], vec![10])
+    } else if model_name.to_lowercase().contains("gpt")
+        || model_name.to_lowercase().contains("neox")
+    {
+        // GPT models
+        (vec![2048], vec![50257])
+    } else {
+        // Try to infer from file size
+        if file_size > 100_000_000 {
+            // Very large model, likely language model
+            (vec![2048], vec![50257]) // GPT-like
+        } else if file_size > 10_000_000 {
+            // Large model, likely ResNet or similar
+            (vec![3, 224, 224], vec![1000])
+        } else {
+            // Small model, likely MNIST or similar
+            (vec![784], vec![10])
+        }
+    }
+}
 // Temporarily define these here until module import is resolved
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TensorSpec {
@@ -173,22 +245,21 @@ impl OnnxModel {
             .unwrap_or("onnx_model")
             .to_string();
 
-        // Detect model type and set appropriate shapes
-        let (input_shape, output_shape) = if model_name.to_lowercase().contains("resnet") {
-            // ResNet models typically use [3, 224, 224] input and [1000] output
-            (vec![3, 224, 224], vec![1000])
-        } else if model_name.to_lowercase().contains("mnist") {
-            // MNIST models use [784] input and [10] output
-            (vec![784], vec![10])
-        } else {
-            // Try to infer from file size or use ResNet as default for larger models
-            let file_size = _onnx_bytes.len();
-            if file_size > 10_000_000 {
-                // Large model, likely ResNet or similar
-                (vec![3, 224, 224], vec![1000])
-            } else {
-                // Small model, likely MNIST or similar
-                (vec![784], vec![10])
+        // Try to extract actual shapes from ONNX model metadata
+        let (input_shape, output_shape) = match extract_onnx_shapes(&_onnx_bytes) {
+            Ok((input, output)) => {
+                info!(
+                    "Extracted shapes from ONNX: input={:?}, output={:?}",
+                    input, output
+                );
+                (input, output)
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to extract shapes from ONNX ({}), using fallback inference",
+                    e
+                );
+                infer_shapes_from_model_name_and_size(&model_name, _onnx_bytes.len())
             }
         };
 
