@@ -37,6 +37,7 @@ fn create_optimized_model(backend: Option<&str>, kernel_fusion: bool, autotuning
         backend: backend.map(|s| s.to_string()),
         enable_kernel_fusion: kernel_fusion,
         enable_autotuning: autotuning,
+        dimension_config: furnace::model::DynamicDimensionConfig::default(),
     };
 
     let sample_path = PathBuf::from("sample_model");
