@@ -17,10 +17,10 @@ pub mod gptneox_opset18 {
 // Re-export for easier access
 use burn::backend::ndarray::NdArray;
 use burn::tensor::Tensor;
-#[cfg(feature = "burn-import")]
-pub use resnet18::Model as ResNet18Model;
 #[cfg(all(feature = "burn-import", model_gptneox_opset18))]
 pub use gptneox_opset18::Model as GptNeoxModel;
+#[cfg(feature = "burn-import")]
+pub use resnet18::Model as ResNet18Model;
 
 use crate::error::{ModelError, Result};
 use crate::model::{BurnModel, OptimizationInfo};
@@ -117,14 +117,15 @@ impl BurnModel for SimpleResNet18ModelWrapper {
 impl BurnModel for SimpleGptNeoxModelWrapper {
     fn predict(&self, input: Tensor<Backend, 2>) -> Result<Tensor<Backend, 2>> {
         let [batch_size, input_size] = input.dims();
-        
+
         // Validate input size
         let expected_input_size: usize = self.input_shape.iter().product();
         if input_size != expected_input_size {
             return Err(ModelError::InputValidation {
                 expected: self.input_shape.clone(),
                 actual: vec![input_size],
-            }.into());
+            }
+            .into());
         }
 
         // For GPT-NeoX, input is typically [batch_size, seq_length]
@@ -181,16 +182,19 @@ impl BuiltInModel {
                 Err(ModelError::InvalidArgument {
                     arg: "model-name".to_string(),
                     value: name.to_string(),
-                    reason: format!("unknown built-in model. Available models: {}", available_models),
+                    reason: format!(
+                        "unknown built-in model. Available models: {}",
+                        available_models
+                    ),
                 }
                 .into())
             }
         }
     }
-    
+
     /// Get list of available built-in models
     pub fn available_models() -> Vec<&'static str> {
-        let mut models = vec!["resnet18"];
+        let models = vec!["resnet18"];
         #[cfg(model_gptneox_opset18)]
         models.push("gptneox");
         models
@@ -230,6 +234,7 @@ impl BuiltInModel {
                     )
                 }
             }
+            #[cfg(model_gptneox_opset18)]
             Self::GptNeox => {
                 #[cfg(all(feature = "burn-import", model_gptneox_opset18))]
                 {

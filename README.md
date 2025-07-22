@@ -69,38 +69,67 @@ This creates the following test files:
 - `resnet18_batch_sample.json` - Batch of 3 images test data  
 - `resnet18_full_test.json` - Full-size single image (150,528 values)
 
-### 4. Start the Server
+### 4. Build with ONNX Support
 
 ```bash
-./target/release/furnace --model-path resnet18.onnx --host 127.0.0.1 --port 3000
+# Build with burn-import feature for ONNX model generation
+cargo build --features burn-import --release
+```
+
+Expected build output:
+```
+Generating ONNX models following Burn documentation
+Generating model: resnet18
+✅ Model 'resnet18' generated successfully
+   Compiling furnace v0.3.0
+    Finished release [optimized] target(s)
+```
+
+### 5. Start the Server
+
+```bash
+# Start server with built-in ResNet-18 model
+./target/release/furnace --model-name resnet18 --host 127.0.0.1 --port 3000
 ```
 
 Expected output:
 ```
-✅ Model loaded successfully: resnet18 with input shape [3, 224, 224] and output shape [1000]
+🔧 Logging initialized log_level=INFO is_production=false
+🔥 Starting furnace inference server session_id=...
+📋 Server configuration model_name=resnet18 server_host=127.0.0.1 server_port=3000
+📦 Loading model model_name=resnet18
+Loading built-in model: resnet18
+Successfully loaded built-in model: resnet18 with backend: burn-resnet18
+✅ Model loaded successfully input_shape=[1, 3, 224, 224] output_shape=[1000]
+🚀 Starting HTTP server
+🚦 Concurrency limit set to 100 requests  
 ✅ Server running on http://127.0.0.1:3000
 ```
 
-### 5. Test the API
+### 6. Test the API
 
 Open a new terminal and test the endpoints:
 
 ```bash
 # Health check
-curl http://localhost:3000/healthz
+curl http://localhost:3000/health
+# Expected: {"status":"healthy","model_loaded":true,...}
 
-# Model info
+# Model info  
 curl http://localhost:3000/model/info
+# Expected: {"model_info":{"name":"resnet18","input_spec":{"shape":[1,3,224,224]},...}}
 
 # Single image prediction (~0.2ms inference time)
 curl -X POST http://localhost:3000/predict \
   -H "Content-Type: application/json" \
   --data-binary @resnet18_full_test.json
+# Expected: {"output":[0.1,0.05,0.02,...],...}
 
 # Batch prediction
 curl -X POST http://localhost:3000/predict \
   -H "Content-Type: application/json" \
   --data-binary @resnet18_batch_sample.json
+# Expected: {"output":[[...],[...],[...]],"batch_size":3,...}
 ```
 
 ## 🖼️ ONNX Model Integration
@@ -130,66 +159,251 @@ furnace/
     └── your_model.rs         # Generated code for your models
 ```
 
-### 🚀 Adding New ONNX Models
+### 🚀 Adding Custom ONNX Models
 
-**Step 1: Add ONNX File**
+**Furnace automatically detects and integrates ONNX models!** Just place them in the `models/` directory and rebuild.
+
+#### Step 1: Add Your ONNX File
 ```bash
 # Place your ONNX model in the models/ directory
 cp your_model.onnx models/
+
+# Verify file placement
+ls -la models/
+# Should show: resnet18.onnx, your_model.onnx, etc.
 ```
 
-**Step 2: Build (Automatic Code Generation)**
+#### Step 2: Automatic Build Process
 ```bash
-# Build process automatically generates Rust code
-cargo build --release
+# Build with burn-import feature for ONNX processing
+cargo build --features burn-import
 ```
 
-**Step 3: Integrate Generated Code**
+**What happens during build:**
+- 🔍 Auto-detects all `.onnx` files in `models/` directory
+- 🦀 Converts each ONNX model to native Rust code
+- ✅ Successfully generated models become available
+- ❌ Failed models are skipped (with helpful error messages)
 
-The build process generates Rust code in `target/debug/build/.../out/models/your_model.rs`. To integrate it:
+**Build Output Example:**
+```
+Generating ONNX models following Burn documentation
+Generating model: resnet18
+✅ Model 'resnet18' generated successfully
+Generating model: your_model
+❌ Failed to generate model 'your_model' - incompatible ONNX format
+   This model will be skipped. Consider simplifying the ONNX file.
+```
 
-1. **Update `src/onnx_models.rs`**:
+#### Step 3: Add Model to Code (Manual Integration)
+
+For successfully generated models, add them to `src/models/mod.rs`:
+
+**3a. Add Module Declaration:**
 ```rust
-#[cfg(feature = "burn-import")]
+// Add your model module
+#[cfg(all(feature = "burn-import", model_your_model))]
 pub mod your_model {
     include!(concat!(env!("OUT_DIR"), "/models/your_model.rs"));
 }
+
+// Re-export the model
+#[cfg(all(feature = "burn-import", model_your_model))]
+pub use your_model::Model as YourModel;
 ```
 
-2. **Add Model Loading Logic**:
+**3b. Add to BuiltInModel enum:**
 ```rust
-// In GeneratedOnnxModel::load_by_name()
-"your_model" => {
-    info!("Loading generated Your Model ONNX model");
-    let device = burn::backend::ndarray::NdArrayDevice::default();
-    let model = your_model::Model::<B>::default(&device);
-    
-    let mut wrapper = Self::new(
-        "your_model".to_string(),
-        vec![1, 3, 224, 224], // Your model's input shape
-        vec![1000],           // Your model's output shape
-    );
-    wrapper.inner_model = Some(Box::new(model));
-    Ok(wrapper)
+pub enum BuiltInModel {
+    ResNet18,
+    #[cfg(model_your_model)]
+    YourModel,  // Add your model here
 }
 ```
 
-3. **Update Inference Logic**:
+**3c. Add Model Loading Logic:**
 ```rust
-// In GeneratedOnnxModel::predict()
-"your_model" => {
-    if let Some(model) = inner_model.downcast_ref::<your_model::Model<B>>() {
-        // Reshape input to match your model's expected format
-        let input_reshaped = input.reshape([batch_size, 3, 224, 224]);
-        
-        // Run inference
-        let output = model.forward(input_reshaped);
-        
-        // Reshape output back to 2D
-        let output_2d = output.reshape([batch_size, output_size]);
-        return Ok(output_2d);
+impl BuiltInModel {
+    pub fn from_name(name: &str) -> Result<Self> {
+        match name.to_lowercase().as_str() {
+            "resnet18" => Ok(Self::ResNet18),
+            #[cfg(model_your_model)]
+            "yourmodel" => Ok(Self::YourModel),  // Add your model
+            // ...
+        }
+    }
+
+    pub fn create_model(&self) -> Result<Box<dyn BurnModel>> {
+        match self {
+            // ... existing models ...
+            #[cfg(model_your_model)]
+            Self::YourModel => {
+                let model = YourModel::<Backend>::default();
+                Ok(Box::new(SimpleYourModelWrapper {
+                    model: Arc::new(Mutex::new(model)),
+                    name: "yourmodel".to_string(),
+                    input_shape: vec![1, 3, 224, 224],  // Adjust for your model
+                    output_shape: vec![1000],            // Adjust for your model
+                }))
+            }
+        }
     }
 }
+```
+
+**3d. Create Model Wrapper:**
+```rust
+// Add wrapper struct for your model
+#[cfg(all(feature = "burn-import", model_your_model))]
+#[derive(Debug)]
+pub struct SimpleYourModelWrapper {
+    model: Arc<Mutex<YourModel<Backend>>>,
+    name: String,
+    input_shape: Vec<usize>,
+    output_shape: Vec<usize>,
+}
+
+// Implement BurnModel trait
+#[cfg(all(feature = "burn-import", model_your_model))]
+impl BurnModel for SimpleYourModelWrapper {
+    fn predict(&self, input: Tensor<Backend, 2>) -> Result<Tensor<Backend, 2>> {
+        // Validate input and reshape as needed for your model
+        let model = self.model.lock().unwrap();
+        let output = model.forward(input);  // Adjust based on your model's requirements
+        Ok(output)
+    }
+    
+    // Implement other required methods...
+    fn get_name(&self) -> &str { &self.name }
+    fn get_input_shape(&self) -> &[usize] { &self.input_shape }
+    fn get_output_shape(&self) -> &[usize] { &self.output_shape }
+    fn get_backend_info(&self) -> String { "burn-yourmodel".to_string() }
+    // ...
+}
+```
+
+#### Step 4: Build and Test
+```bash
+# Rebuild with your new model integration
+cargo build --features burn-import
+
+# List available models
+cargo run --bin furnace --features burn-import -- --help
+
+# Start server with your model
+cargo run --bin furnace --features burn-import -- --model-name yourmodel --port 3000
+
+# Test inference
+curl -X POST http://localhost:3000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"input": [/* your test data */]}'
+```
+
+### 🎯 Complete Example: Adding MobileNet
+
+**Step-by-step example of adding MobileNet v2:**
+
+```bash
+# 1. Download MobileNet ONNX model
+curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/mobilenet/model/mobilenetv2-12.onnx" -o models/mobilenetv2.onnx
+
+# 2. Build (automatic generation)
+cargo build --features burn-import
+# Expected output: ✅ Model 'mobilenetv2' generated successfully
+
+# 3. Add cfg declaration to build.rs (if not already present)
+# Add to build.rs: println!("cargo:rustc-check-cfg=cfg(model_mobilenetv2)");
+```
+
+**Add to src/models/mod.rs:**
+```rust
+// Module declaration
+#[cfg(all(feature = "burn-import", model_mobilenetv2))]
+pub mod mobilenetv2 {
+    include!(concat!(env!("OUT_DIR"), "/models/mobilenetv2.rs"));
+}
+
+// Re-export
+#[cfg(all(feature = "burn-import", model_mobilenetv2))]
+pub use mobilenetv2::Model as MobileNetV2Model;
+
+// Add to BuiltInModel enum
+pub enum BuiltInModel {
+    ResNet18,
+    #[cfg(model_mobilenetv2)]
+    MobileNetV2,
+}
+
+// Wrapper struct
+#[cfg(all(feature = "burn-import", model_mobilenetv2))]
+#[derive(Debug)]
+pub struct SimpleMobileNetV2ModelWrapper {
+    model: Arc<Mutex<MobileNetV2Model<Backend>>>,
+    name: String,
+    input_shape: Vec<usize>,
+    output_shape: Vec<usize>,
+}
+
+// Add to from_name, create_model, etc...
+```
+
+**Test the new model:**
+```bash
+# Build and test
+cargo build --features burn-import
+cargo run --bin furnace --features burn-import -- --model-name mobilenetv2
+```
+
+### 📋 Best Practices for Custom Models
+
+**✅ Recommended Workflow:**
+1. **Test with smaller models first** (SqueezeNet, MobileNet)
+2. **Verify ONNX compatibility** before integration
+3. **Use descriptive model names** (lowercase, no spaces)
+4. **Add comprehensive error handling** in your wrapper
+5. **Test thoroughly** with your specific input data
+
+**⚠️ Common Pitfalls:**
+- Don't forget the `#[cfg(...)]` attributes
+- Match model names exactly (case-sensitive in file paths)
+- Ensure input/output shapes match your actual model
+- Add cfg check declarations to build.rs for new models
+- Test with both single and batch predictions
+
+**📋 Model Integration Checklist:**
+- [ ] ONNX file placed in `models/` directory
+- [ ] Build succeeds with "✅ Model generated successfully"
+- [ ] Added module declaration with proper cfg attributes
+- [ ] Added to BuiltInModel enum
+- [ ] Added to from_name() method
+- [ ] Added to create_model() method
+- [ ] Added wrapper struct and BurnModel implementation
+- [ ] Added cfg check to build.rs
+- [ ] Tested server startup
+- [ ] Tested inference API
+
+### 🔍 Debugging Model Integration
+
+**Check if model was generated:**
+```bash
+# Look for generated Rust files
+find target -name "*.rs" -path "*/out/models/*"
+
+# Check build output for your model
+cargo build --features burn-import 2>&1 | grep -i "your_model"
+```
+
+**Verify conditional compilation:**
+```bash
+# Check which models are enabled
+cargo build --features burn-import -v 2>&1 | grep "model_"
+```
+
+**Test model loading:**
+```bash
+# Try to start server (will show available models if yours isn't found)
+cargo run --bin furnace --features burn-import -- --model-name nonexistent
+# Error message will list available models
 ```
 
 ### 🔍 Generated Code Structure
@@ -226,36 +440,91 @@ impl<B: Backend> Model<B> {
 
 **Known Limitations:**
 - ❌ Some complex models may have unsupported operations
-- ❌ Dynamic shapes require manual handling
+- ❌ Dynamic shapes require manual handling  
 - ❌ Some models may need ONNX version upgrade
+- ❌ Models with broadcasting dimension conflicts
+- ❌ Extremely large models (>2GB) may cause memory issues
 
-**Upgrading ONNX Models:**
+**Troubleshooting Failed Model Generation:**
+
+*1. ONNX Version Issues:*
 ```python
-# If your model uses older ONNX opset, upgrade it:
+# Check ONNX opset version
 import onnx
-from onnx import version_converter
+model = onnx.load('models/your_model.onnx')
+print(f'ONNX opset version: {model.opset_import[0].version}')
 
-model = onnx.load('old_model.onnx')
-upgraded_model = version_converter.convert_version(model, 16)
-onnx.save(upgraded_model, 'upgraded_model.onnx')
+# Upgrade to supported version (16+)
+from onnx import version_converter
+upgraded = version_converter.convert_version(model, 16)
+onnx.save(upgraded, 'models/your_model_v16.onnx')
+```
+
+*2. Model Simplification:*
+```bash
+# Install ONNX simplifier
+pip install onnx-simplifier
+
+# Simplify complex models
+python -c "
+import onnx
+from onnxsim import simplify
+model = onnx.load('models/complex_model.onnx')
+simplified, check = simplify(model)
+onnx.save(simplified, 'models/simple_model.onnx')
+"
+```
+
+*3. Shape Broadcasting Issues:*
+```bash
+# If you see "Invalid shape for broadcasting" errors:
+# - Try model simplification first
+# - Check if model has dynamic shapes
+# - Consider using a different model architecture
+# - Report issue with model details for potential fix
+```
+
+*4. Memory Issues:*
+```bash
+# For very large models:
+export RUST_MIN_STACK=8388608  # Increase stack size
+cargo build --features burn-import
 ```
 
 ### 🧪 Testing Generated Models
 
+**Quick validation workflow:**
 ```bash
-# 1. Build with your ONNX model
-cargo build --release
+# 1. Build with burn-import feature
+cargo build --features burn-import
 
 # 2. Check generated code
-ls target/debug/build/furnace-*/out/models/
+find target -name "*.rs" -path "*/out/models/*"
+# Should show: resnet18.rs, your_model.rs, etc.
 
-# 3. Test the server
-./target/release/furnace --model-path models/your_model.onnx
+# 3. Test available models
+cargo run --bin furnace --features burn-import -- --help
+# Will show available model names in help text
 
-# 4. Test inference
+# 4. Test server startup
+cargo run --bin furnace --features burn-import -- --model-name yourmodel --port 3000
+
+# 5. Test model info endpoint
+curl http://localhost:3000/model/info
+
+# 6. Test inference
 curl -X POST http://localhost:3000/predict \
   -H "Content-Type: application/json" \
-  -d '{"input": [/* your test data */]}'
+  -d '{"input": [/* your test data matching model input shape */]}'
+```
+
+**Performance testing:**
+```bash
+# Generate test data for your model
+cargo run --example create_test_data -- --model yourmodel
+
+# Run benchmarks
+cargo bench --features burn-import
 ```
 
 ## 🖼️ Supported Models
@@ -267,8 +536,10 @@ Furnace supports ONNX models with automatic shape detection. Currently optimized
 | Model | Input Shape | Output Shape | Size | Status |
 |-------|-------------|--------------|------|---------|
 | **ResNet-18** | `[3, 224, 224]` | `[1000]` | 45MB | ✅ **Supported** |
-| **MobileNet v2** | `[3, 224, 224]` | `[1000]` | 14MB | 🧪 **Testing** |
-| **SqueezeNet** | `[3, 224, 224]` | `[1000]` | 5MB | 🧪 **Testing** |
+| **MobileNet v2** | `[3, 224, 224]` | `[1000]` | 14MB | 🧪 **Compatible** |
+| **SqueezeNet** | `[3, 224, 224]` | `[1000]` | 5MB | 🧪 **Compatible** |
+| **GPT-NeoX** | `[1, 512]` | `[50257]` | 1.7MB | ❌ **Incompatible** |
+| **Your Custom Model** | `[?, ?, ?]` | `[?]` | ?MB | 🔄 **Add with guide above** |
 
 ### 📥 Download Pre-trained Models
 

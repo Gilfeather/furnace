@@ -17,7 +17,7 @@ fn main() {
 
     // Rerun if any ONNX files change
     println!("cargo:rerun-if-changed=models/");
-    
+
     // Declare possible cfg flags
     println!("cargo:rustc-check-cfg=cfg(model_resnet18)");
     println!("cargo:rustc-check-cfg=cfg(model_gptneox_opset18)");
@@ -26,13 +26,13 @@ fn main() {
 #[cfg(feature = "burn-import")]
 fn generate_onnx_models() {
     eprintln!("Generating ONNX models following Burn documentation");
-    
+
     let models_dir = Path::new("models");
     if !models_dir.exists() {
         eprintln!("Models directory not found, skipping ONNX generation");
         return;
     }
-    
+
     // Find all ONNX files in the models directory
     let onnx_files = match fs::read_dir(models_dir) {
         Ok(entries) => entries
@@ -51,21 +51,22 @@ fn generate_onnx_models() {
             return;
         }
     };
-    
+
     if onnx_files.is_empty() {
         eprintln!("No ONNX files found in models directory");
         return;
     }
-    
+
     // Generate Rust code for each ONNX model
     for onnx_path in onnx_files {
-        let model_name = onnx_path.file_stem()
+        let model_name = onnx_path
+            .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
-            
+
         eprintln!("Generating model: {}", model_name);
         println!("cargo:rerun-if-changed={}", onnx_path.display());
-        
+
         // Try to generate the model, but don't fail the entire build if one model fails
         match std::panic::catch_unwind(|| {
             ModelGen::new()
@@ -77,9 +78,12 @@ fn generate_onnx_models() {
                 eprintln!("✅ Model '{}' generated successfully", model_name);
                 // Tell Cargo that this model was successfully generated
                 println!("cargo:rustc-cfg=model_{}", model_name.replace("-", "_"));
-            },
+            }
             Err(_) => {
-                eprintln!("❌ Failed to generate model '{}' - incompatible ONNX format", model_name);
+                eprintln!(
+                    "❌ Failed to generate model '{}' - incompatible ONNX format",
+                    model_name
+                );
                 eprintln!("   This model will be skipped. Consider simplifying the ONNX file.");
             }
         }
