@@ -1,16 +1,14 @@
 use furnace::api::start_server;
-use furnace::model::load_model;
+use furnace::model::load_built_in_model;
 use reqwest::Client;
 use serde_json::json;
-use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::sleep;
 
 #[tokio::test]
 async fn test_end_to_end_inference() {
-    // Start server in background
-    let model_path = PathBuf::from("test_model.mpk");
-    let model = load_model(&model_path).expect("Failed to load test model");
+    // Start server in background with built-in model
+    let model = load_built_in_model("resnet18").expect("Failed to load built-in model");
 
     let server_handle = tokio::spawn(async move {
         start_server("127.0.0.1", 3001, model).await.unwrap();
@@ -43,12 +41,18 @@ async fn test_end_to_end_inference() {
 
     assert_eq!(info_response.status(), 200);
     let info_json: serde_json::Value = info_response.json().await.unwrap();
-    assert_eq!(info_json["model_info"]["input_spec"]["shape"], json!([784]));
-    assert_eq!(info_json["model_info"]["output_spec"]["shape"], json!([10]));
+    assert_eq!(
+        info_json["model_info"]["input_spec"]["shape"],
+        json!([1, 3, 224, 224])
+    );
+    assert_eq!(
+        info_json["model_info"]["output_spec"]["shape"],
+        json!([1000])
+    );
 
-    // Test single prediction
+    // Test single prediction (ResNet18 input size: 3 * 224 * 224 = 150,528)
     let predict_payload = json!({
-        "input": vec![0.5; 784]
+        "inputs": [vec![0.5; 150528]]
     });
 
     let predict_response = client
@@ -63,14 +67,14 @@ async fn test_end_to_end_inference() {
     assert_eq!(predict_json["status"], "success");
     assert_eq!(predict_json["batch_size"], 1);
     assert!(predict_json["output"].is_array());
-    assert_eq!(predict_json["output"].as_array().unwrap().len(), 10);
+    assert_eq!(predict_json["output"].as_array().unwrap().len(), 1000);
 
-    // Test batch prediction
+    // Test batch prediction (ResNet18 input size: 3 * 224 * 224 = 150,528)
     let batch_payload = json!({
         "inputs": vec![
-            vec![0.5; 784],
-            vec![0.3; 784],
-            vec![0.7; 784]
+            vec![0.5; 150528],
+            vec![0.3; 150528],
+            vec![0.7; 150528]
         ]
     });
 
@@ -87,10 +91,12 @@ async fn test_end_to_end_inference() {
     assert_eq!(batch_json["batch_size"], 3);
     assert!(batch_json["outputs"].is_array());
     assert_eq!(batch_json["outputs"].as_array().unwrap().len(), 3);
+    // Each output should have 1000 elements (ImageNet classes)
+    assert_eq!(batch_json["outputs"][0].as_array().unwrap().len(), 1000);
 
-    // Test invalid input
+    // Test invalid input (wrong size for ResNet18)
     let invalid_payload = json!({
-        "input": vec![0.5; 100] // Wrong size
+        "inputs": [vec![0.5; 100]] // Wrong size - should be 150,528
     });
 
     let invalid_response = client
@@ -110,8 +116,7 @@ async fn test_end_to_end_inference() {
 
 #[tokio::test]
 async fn test_server_startup_with_invalid_model() {
-    let model_path = PathBuf::from("nonexistent_model.mpk");
-    let result = load_model(&model_path);
+    let result = load_built_in_model("nonexistent_model");
 
     assert!(result.is_err());
     // Should gracefully handle model loading failure
@@ -119,9 +124,8 @@ async fn test_server_startup_with_invalid_model() {
 
 #[tokio::test]
 async fn test_concurrent_requests() {
-    // Start server in background
-    let model_path = PathBuf::from("test_model.mpk");
-    let model = load_model(&model_path).expect("Failed to load test model");
+    // Start server in background with built-in model
+    let model = load_built_in_model("resnet18").expect("Failed to load built-in model");
 
     let server_handle = tokio::spawn(async move {
         start_server("127.0.0.1", 3002, model).await.unwrap();
@@ -140,7 +144,7 @@ async fn test_concurrent_requests() {
         let base_url = base_url.to_string();
         let handle = tokio::spawn(async move {
             let predict_payload = json!({
-                "input": vec![0.5; 784]
+                "inputs": [vec![0.5; 150528]] // ResNet18 input size: 3 * 224 * 224 = 150,528
             });
 
             let response = client

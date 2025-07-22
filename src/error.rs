@@ -46,6 +46,13 @@ pub enum ModelError {
     #[allow(dead_code)]
     #[error("Invalid input data type: {0}")]
     InvalidDataType(String),
+
+    #[error("Invalid argument '{arg}': {value} - {reason}")]
+    InvalidArgument {
+        arg: String,
+        value: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -153,6 +160,16 @@ impl IntoResponse for FurnaceError {
                     "INVALID_DATA_TYPE",
                     msg.clone(),
                     None,
+                ),
+                ModelError::InvalidArgument { arg, value, reason } => (
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_ARGUMENT",
+                    format!("Invalid argument '{arg}': {value} - {reason}"),
+                    Some(serde_json::json!({
+                        "argument": arg,
+                        "provided_value": value,
+                        "reason": reason
+                    })),
                 ),
             },
             FurnaceError::Api(api_err) => match api_err {

@@ -2,94 +2,105 @@
 
 ## Overview
 
-Complete rewrite of README.md to accurately reflect the current ResNet-18 focused implementation, with clear setup instructions, accurate performance metrics, and comprehensive API documentation.
+Update README.md to accurately reflect the current simplified Furnace implementation that uses built-in models with dummy implementations, removing all outdated ONNX file loading documentation.
 
 ## Architecture
 
 ### Document Structure
-1. **Header Section**: Project title, badges, and description
-2. **Features Section**: Current capabilities with ResNet-18 focus
-3. **Quick Start Section**: Step-by-step setup instructions
-4. **Model Support Section**: Supported models and download instructions
-5. **Performance Section**: Actual benchmark results
-6. **API Documentation**: Complete endpoint documentation with examples
-7. **Development Section**: Build, test, and contribution instructions
+1. **Header Section**: Updated project description and simplified features
+2. **Quick Start Section**: Simplified setup without ONNX downloads
+3. **Built-in Models Section**: Current model support (resnet18 with dummy implementation)
+4. **API Documentation**: Updated examples with dummy model responses
+5. **Performance Section**: Current dummy model performance metrics
+6. **Development Section**: Simplified build and test instructions
+7. **Troubleshooting Section**: Updated for current functionality
 
 ## Components and Interfaces
 
 ### Header Component
-- **Purpose**: Project introduction and key metrics
+- **Purpose**: Accurate project introduction
 - **Content**: 
-  - Updated badges with ResNet-18 performance (~4ms)
-  - Clear description focusing on ONNX and ResNet-18
-  - Key selling points (Pure Rust, fast inference, production ready)
+  - Updated description focusing on built-in models
+  - Simplified feature list (remove ONNX complexity)
+  - Current performance badges reflecting dummy model behavior
+  - Clear positioning as inference server with built-in models
 
 ### Quick Start Component
-- **Purpose**: Get users running quickly
+- **Purpose**: Get users running with current functionality
 - **Content**:
-  - Prerequisites (Rust, curl)
-  - Model download instructions
-  - Build commands
-  - Test data generation
-  - Server startup
-  - Basic API testing
+  - Prerequisites (Rust only, no model downloads)
+  - Simple build command: `cargo build --release`
+  - Server startup: `./target/release/furnace --model-name resnet18 --port 3001`
+  - API testing with dummy responses
+  - Remove all ONNX download steps
 
-### Performance Component
-- **Purpose**: Showcase actual performance metrics
+### Built-in Models Component
+- **Purpose**: Explain current model support
 - **Content**:
-  - ResNet-18 specific benchmarks
-  - Benchmark reproduction instructions
-  - Performance characteristics explanation
+  - Available models: resnet18 (dummy implementation)
+  - Input/output specifications
+  - Backend information (dummy)
+  - Remove custom model addition instructions
 
 ### API Documentation Component
-- **Purpose**: Complete API reference
+- **Purpose**: Accurate API reference with current behavior
 - **Content**:
-  - All endpoints with ResNet-18 examples
-  - Input format specifications
-  - Response format documentation
-  - Error handling examples
+  - Health check endpoint examples
+  - Model info endpoint with dummy backend response
+  - Inference endpoint with dummy output (0.1 values)
+  - Correct input validation behavior
+  - Remove ONNX-specific examples
 
 ## Data Models
 
-### Performance Metrics
+### Current Performance Metrics
 ```
-ResNet-18 Benchmarks:
-- Binary Size: 2.3MB
-- Model Size: 45MB  
-- Inference Time: ~4ms
+Built-in Model Performance:
+- Binary Size: ~4.5MB
+- Inference Time: ~0.2ms (dummy model)
 - Memory Usage: <200MB
-- Input Size: 150,528 values
-- Output Size: 1,000 classes
+- Input Size: 150,528 values (ResNet-18 format)
+- Output Size: 1,000 classes (dummy values)
+- Backend: dummy
 ```
 
-### API Examples
+### API Response Examples
 ```
-Input Format:
-- Shape: [3, 224, 224] (150,528 values)
-- Format: Flattened float32 array
-- Range: 0.0 to 1.0 (normalized)
-- Order: Channel-first (RGB, Height, Width)
+Model Info Response:
+{
+  "name": "resnet18",
+  "backend": "dummy",
+  "input_spec": {"shape": [1, 3, 224, 224]},
+  "output_spec": {"shape": [1000]}
+}
+
+Inference Response:
+{
+  "outputs": [[0.1, 0.1, 0.1, ...]], // 1000 dummy values
+  "status": "success"
+}
 ```
 
 ## Error Handling
 
-### Common Issues
-- Model download failures
+### Updated Common Issues
 - Build compilation errors
-- Test data generation issues
-- Server startup problems
+- Server startup problems with --model-name
+- Port binding issues
+- Input validation errors
 
 ### Solutions
-- Provide alternative download methods
-- Include troubleshooting section
-- Add validation steps
-- Include common error messages and fixes
+- Provide correct build commands
+- Include troubleshooting for --model-name vs --model-path confusion
+- Add validation steps for current CLI
+- Remove ONNX-related error solutions
 
 ## Testing Strategy
 
 ### Validation Steps
-1. Follow all setup instructions from scratch
-2. Verify all curl commands work
-3. Test benchmark reproduction
-4. Validate all links and references
-5. Check formatting and readability
+1. Test simplified build process (cargo build --release)
+2. Verify server startup with --model-name resnet18
+3. Test all API endpoints return dummy responses
+4. Validate all command examples work with current CLI
+5. Ensure no broken links or outdated references
+6. Check that removed ONNX sections don't leave orphaned content
