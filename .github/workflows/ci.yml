@@ -51,13 +51,23 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-cargo-
 
-    - name: Download ONNX models
+    - name: Download ONNX models (Unix)
+      if: runner.os != 'Windows'
       run: |
         mkdir -p models
         # Download ResNet-18 model if it doesn't exist
         if [ ! -f models/resnet18.onnx ]; then
           curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
         fi
+
+    - name: Download ONNX models (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        if (!(Test-Path "models")) { New-Item -ItemType Directory -Path "models" }
+        if (!(Test-Path "models/resnet18.onnx")) {
+          Invoke-WebRequest -Uri "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -OutFile "models/resnet18.onnx"
+        }
+      shell: pwsh
 
     - name: Check formatting
       run: cargo fmt --all -- --check
