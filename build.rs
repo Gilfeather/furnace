@@ -80,9 +80,7 @@ fn generate_onnx_models() {
                 println!("cargo:rustc-cfg=model_{}", model_name.replace("-", "_"));
             }
             Err(_) => {
-                eprintln!(
-                    "❌ Failed to generate model '{model_name}' - incompatible ONNX format"
-                );
+                eprintln!("❌ Failed to generate model '{model_name}' - incompatible ONNX format");
                 eprintln!("   This model will be skipped. Consider simplifying the ONNX file.");
             }
         }
