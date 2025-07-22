@@ -1,5 +1,4 @@
 use clap::{Arg, Command};
-use std::fs;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -11,7 +10,7 @@ use furnace::{api, error, model};
 
 #[derive(Debug)]
 struct CliArgs {
-    model_path: PathBuf,
+    model_name: String,
     host: String,
     port: u16,
     backend: Option<String>,
@@ -35,17 +34,17 @@ fn parse_args() -> Result<CliArgs> {
             furnace --model-path ./model.mpk --enable-kernel-fusion --enable-autotuning"
         )
         .arg(
-            Arg::new("model-path")
-                .long("model-path")
+            Arg::new("model-name")
+                .long("model-name")
                 .short('m')
-                .value_name("PATH")
-                .help("Path to the .burn, .mpk, or .onnx model file")
+                .value_name("NAME")
+                .help("Name of the built-in model to use")
                 .long_help(
-                    "Path to the model file to load for inference. \
-                    Supports .burn, .mpk (MessagePack), and .onnx formats. \
-                    The file must exist, be readable, and have a supported extension."
+                    "Name of the built-in model to load for inference. \
+                    Available models: resnet18. \
+                    Models are compiled into the binary using burn-import."
                 )
-                .required(true),
+                .default_value("resnet18"),
         )
         .arg(
             Arg::new("port")
@@ -141,9 +140,7 @@ fn parse_args() -> Result<CliArgs> {
         .get_matches();
 
     // Extract and validate arguments
-    let model_path_str = matches
-        .get_one::<String>("model-path")
-        .ok_or_else(|| CliError::MissingArgument("model-path".to_string()))?;
+    let model_name = matches.get_one::<String>("model-name").unwrap().clone();
 
     // Port validation with range check
     let port = *matches.get_one::<u16>("port").unwrap();
@@ -185,13 +182,11 @@ fn parse_args() -> Result<CliArgs> {
     let enable_autotuning = matches.get_flag("enable-autotuning");
     let log_level = matches.get_one::<String>("log-level").unwrap().clone();
 
-    let model_path = PathBuf::from(model_path_str);
-
-    // Enhanced model path validation
-    validate_model_path(&model_path)?;
+    // Validate model name
+    validate_built_in_model_name(&model_name)?;
 
     Ok(CliArgs {
-        model_path,
+        model_name,
         host,
         port,
         backend,
@@ -247,98 +242,17 @@ fn validate_host(host: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validate model path existence, permissions, and format
-fn validate_model_path(model_path: &PathBuf) -> Result<()> {
-    // Check if path exists
-    if !model_path.exists() {
-        return Err(CliError::InvalidModelPath {
-            path: model_path.clone(),
-            reason: "file does not exist".to_string(),
+/// Validate built-in model name
+fn validate_built_in_model_name(model_name: &str) -> Result<()> {
+    match model_name {
+        "resnet18" => Ok(()),
+        _ => Err(CliError::InvalidArgument {
+            arg: "model-name".to_string(),
+            value: model_name.to_string(),
+            reason: "unknown built-in model. Available models: resnet18".to_string(),
         }
-        .into());
+        .into()),
     }
-
-    // Check if it's a file (not a directory)
-    if !model_path.is_file() {
-        return Err(CliError::InvalidModelPath {
-            path: model_path.clone(),
-            reason: "path is not a file".to_string(),
-        }
-        .into());
-    }
-
-    // Validate .burn, .mpk, or .onnx extension
-    match model_path.extension() {
-        Some(ext) if ext == "burn" || ext == "mpk" || ext == "onnx" => {}
-        Some(ext) => {
-            return Err(CliError::InvalidModelPath {
-                path: model_path.clone(),
-                reason: format!(
-                    "invalid extension '.{}', expected '.burn', '.mpk', or '.onnx'",
-                    ext.to_string_lossy()
-                ),
-            }
-            .into());
-        }
-        None => {
-            return Err(CliError::InvalidModelPath {
-                path: model_path.clone(),
-                reason: "file must have .burn, .mpk, or .onnx extension".to_string(),
-            }
-            .into());
-        }
-    }
-
-    // Check file permissions (readable)
-    match fs::metadata(model_path) {
-        Ok(metadata) => {
-            if metadata.permissions().readonly() && !metadata.is_file() {
-                return Err(CliError::InvalidModelPath {
-                    path: model_path.clone(),
-                    reason: "file is not readable".to_string(),
-                }
-                .into());
-            }
-        }
-        Err(e) => {
-            return Err(CliError::InvalidModelPath {
-                path: model_path.clone(),
-                reason: format!("cannot access file metadata: {e}"),
-            }
-            .into());
-        }
-    }
-
-    // Check file size (basic sanity check)
-    match fs::metadata(model_path) {
-        Ok(metadata) => {
-            let size = metadata.len();
-            if size == 0 {
-                return Err(CliError::InvalidModelPath {
-                    path: model_path.clone(),
-                    reason: "file is empty".to_string(),
-                }
-                .into());
-            }
-            if size > 10 * 1024 * 1024 * 1024 {
-                // 10GB limit
-                return Err(CliError::InvalidModelPath {
-                    path: model_path.clone(),
-                    reason: "file is too large (>10GB)".to_string(),
-                }
-                .into());
-            }
-        }
-        Err(e) => {
-            return Err(CliError::InvalidModelPath {
-                path: model_path.clone(),
-                reason: format!("cannot read file size: {e}"),
-            }
-            .into());
-        }
-    }
-
-    Ok(())
 }
 
 fn setup_logging(log_level: &str) -> Result<()> {
@@ -420,7 +334,7 @@ async fn main() -> Result<()> {
 
     info!(
         session_id = %session_id,
-        model_path = %args.model_path.display(),
+        model_name = %args.model_name,
         server_host = %args.host,
         server_port = args.port,
         backend = %args.backend.as_deref().unwrap_or("cpu"),
@@ -434,7 +348,7 @@ async fn main() -> Result<()> {
     // Load model with optimization settings
     info!(
         session_id = %session_id,
-        model_path = %args.model_path.display(),
+        model_name = %args.model_name,
         backend = %args.backend.as_deref().unwrap_or("cpu"),
         kernel_fusion = args.enable_kernel_fusion,
         autotuning = args.enable_autotuning,
@@ -447,7 +361,9 @@ async fn main() -> Result<()> {
         enable_autotuning: args.enable_autotuning,
     };
 
-    let model = match model::load_model_with_config(&args.model_path, model_config) {
+    // Create a dummy path for built-in models
+    let model_path = PathBuf::from(format!("{}.mpk", args.model_name));
+    let model = match model::load_model_with_config(&model_path, model_config) {
         Ok(model) => {
             let model_info = model.get_info();
             info!(
@@ -479,7 +395,7 @@ async fn main() -> Result<()> {
         Err(e) => {
             error!(
                 session_id = %session_id,
-                model_path = %args.model_path.display(),
+                model_name = %args.model_name,
                 error = %e,
                 "❌ Failed to load model"
             );

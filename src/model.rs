@@ -8,7 +8,6 @@ use tracing::{error, info, warn};
 
 use crate::burn_model::{create_sample_model, BurnModelContainer};
 use crate::error::{ModelError, Result};
-use crate::onnx_models::GeneratedOnnxModel;
 // Temporarily define these here until module import is resolved
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TensorSpec {
@@ -517,29 +516,16 @@ fn load_model_with_config_detailed(
         enable_kernel_fusion, enable_autotuning
     );
 
-    // Check if model files exist (either .mpk, .json, .onnx should exist)
+    // Check if model files exist (either .mpk, .json should exist)
     let mpk_path = path.with_extension("mpk");
     let json_path = path.with_extension("json");
-    let onnx_path = path.with_extension("onnx");
 
-    if !mpk_path.exists() && !json_path.exists() && !onnx_path.exists() && !path.exists() {
+    if !mpk_path.exists() && !json_path.exists() && !path.exists() {
         error!(
-            "Model file not found: {:?} (checked .mpk, .json, .onnx, and exact path)",
+            "Model file not found: {:?} (checked .mpk, .json, and exact path)",
             path
         );
         return Err(ModelError::FileNotFound(path.clone()).into());
-    }
-
-    // Check if this is an ONNX file
-    if path.extension().and_then(|s| s.to_str()) == Some("onnx") || onnx_path.exists() {
-        let onnx_file_path = if path.extension().and_then(|s| s.to_str()) == Some("onnx") {
-            path
-        } else {
-            &onnx_path
-        };
-
-        info!("Detected ONNX model file: {:?}", onnx_file_path);
-        return try_load_onnx_model(onnx_file_path);
     }
 
     // Get file size (try different extensions)
@@ -659,47 +645,6 @@ fn try_load_burn_model_with_backend(
     Err(ModelError::InvalidFormat("Not a valid Burn model file".to_string()).into())
 }
 
-fn try_load_onnx_model(path: &Path) -> Result<Model> {
-    info!("Attempting to load ONNX model from: {:?}", path);
-
-    // Get file size
-    let model_size_bytes = std::fs::metadata(path)
-        .map_err(|e| ModelError::LoadFailed {
-            path: path.to_path_buf(),
-            source: Box::new(e),
-        })?
-        .len();
-
-    // Load ONNX model using the new implementation
-    #[cfg(feature = "burn-import")]
-    {
-        match GeneratedOnnxModel::from_onnx_file(path) {
-            Ok(onnx_model) => {
-                info!(
-                    "Successfully loaded ONNX model: {} with input shape {:?} and output shape {:?}",
-                    onnx_model.get_name(),
-                    onnx_model.get_input_shape(),
-                    onnx_model.get_output_shape()
-                );
-                let model = Model::new(Box::new(onnx_model), path.to_path_buf(), model_size_bytes);
-                Ok(model)
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to load ONNX model ({}), falling back to dummy model",
-                    e
-                );
-                load_dummy_model(path, model_size_bytes)
-            }
-        }
-    }
-    #[cfg(not(feature = "burn-import"))]
-    {
-        warn!("burn-import feature not enabled, falling back to dummy model");
-        load_dummy_model(path, model_size_bytes)
-    }
-}
-
 fn load_dummy_model(path: &Path, model_size_bytes: u64) -> Result<Model> {
     warn!("Loading dummy model as fallback");
 
@@ -726,16 +671,10 @@ mod tests {
     use std::path::PathBuf;
 
     fn get_test_model() -> Model {
-        // Try to use actual model or fallback to dummy
-        let model_path = PathBuf::from("test_model.onnx");
-        match load_model(&model_path) {
-            Ok(model) => model,
-            Err(_) => {
-                // Fallback to dummy model
-                let dummy_model = DummyModel::new("test".to_string(), vec![784], vec![10]);
-                Model::new(Box::new(dummy_model), model_path, 0)
-            }
-        }
+        // Use dummy model for testing
+        let model_path = PathBuf::from("test_model.mpk");
+        let dummy_model = DummyModel::new("test".to_string(), vec![784], vec![10]);
+        Model::new(Box::new(dummy_model), model_path, 0)
     }
 
     #[test]
@@ -744,10 +683,8 @@ mod tests {
         let info = model.get_info();
 
         assert_eq!(info.model_type, "burn");
-        // Backend can be "dummy", "ndarray", or specific ONNX backend
-        assert!(
-            info.backend == "dummy" || info.backend == "ndarray" || info.backend.contains("onnx")
-        );
+        // Backend should be "dummy" for test model
+        assert_eq!(info.backend, "dummy");
         assert_eq!(info.input_spec.shape, vec![784]);
         assert_eq!(info.output_spec.shape, vec![10]);
     }
@@ -818,44 +755,5 @@ mod tests {
         assert_eq!(updated_stats.inference_count, 1);
         assert!(updated_stats.total_inference_time_ms >= 0.0);
         assert!(updated_stats.last_inference_time.is_some());
-    }
-
-    #[test]
-    fn test_onnx_model_loading() {
-        // Test ONNX file detection with non-existent file
-        let onnx_path = PathBuf::from("nonexistent_model.onnx");
-
-        // Since the ONNX file doesn't exist, this should return an error
-        let result = load_model(&onnx_path);
-        assert!(result.is_err());
-
-        match result.unwrap_err() {
-            crate::error::FurnaceError::Model(ModelError::FileNotFound(_)) => {}
-            _ => panic!("Expected FileNotFound error"),
-        }
-    }
-
-    #[test]
-    #[cfg(feature = "burn-import")]
-    fn test_onnx_model_creation() {
-        // Test direct ONNX model creation (without file)
-        let onnx_model = GeneratedOnnxModel::new("test_onnx".to_string(), vec![784], vec![10]);
-
-        assert_eq!(onnx_model.get_name(), "test_onnx");
-        assert_eq!(onnx_model.get_input_shape(), &[784]);
-        assert_eq!(onnx_model.get_output_shape(), &[10]);
-
-        // Test inference
-        let input_tensor = Tensor::from_data(
-            TensorData::new(vec![0.5; 784], [1, 784]),
-            &Default::default(),
-        );
-        let result = onnx_model.predict(input_tensor);
-        assert!(result.is_ok());
-
-        let output = result.unwrap();
-        let [batch_size, output_size] = output.dims();
-        assert_eq!(batch_size, 1);
-        assert_eq!(output_size, 10);
     }
 }
