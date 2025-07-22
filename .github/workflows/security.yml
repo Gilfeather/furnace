@@ -81,6 +81,14 @@ jobs:
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
 
+    - name: Download ONNX models
+      run: |
+        mkdir -p models
+        # Download ResNet-18 model if it doesn't exist
+        if [ ! -f models/resnet18.onnx ]; then
+          curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
+        fi
+
     - name: Build project
       run: cargo build --all-features
 
