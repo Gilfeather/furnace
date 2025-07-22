@@ -1,6 +1,5 @@
 use clap::{Arg, Command};
 use std::net::IpAddr;
-use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::{error, info, Level};
 use uuid::Uuid;
@@ -361,9 +360,8 @@ async fn main() -> Result<()> {
         enable_autotuning: args.enable_autotuning,
     };
 
-    // Create a dummy path for built-in models
-    let model_path = PathBuf::from(format!("{}.mpk", args.model_name));
-    let model = match model::load_model_with_config(&model_path, model_config) {
+    // Load built-in model by name
+    let model = match model::load_model_by_name_or_path(&args.model_name, model_config) {
         Ok(model) => {
             let model_info = model.get_info();
             info!(

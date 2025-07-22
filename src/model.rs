@@ -8,6 +8,7 @@ use tracing::{error, info, warn};
 
 use crate::burn_model::{create_sample_model, BurnModelContainer};
 use crate::error::{ModelError, Result};
+use crate::models::BuiltInModel;
 // Temporarily define these here until module import is resolved
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TensorSpec {
@@ -756,4 +757,57 @@ mod tests {
         assert!(updated_stats.total_inference_time_ms >= 0.0);
         assert!(updated_stats.last_inference_time.is_some());
     }
+}
+/// Load a built-in model by name
+pub fn load_built_in_model(model_name: &str) -> Result<Model> {
+    info!("Loading built-in model: {}", model_name);
+
+    // Parse the built-in model name
+    let built_in_model = BuiltInModel::from_name(model_name)?;
+
+    // Create the model instance
+    match built_in_model.create_model() {
+        Ok(burn_model) => {
+            info!(
+                "Successfully loaded built-in model: {} with backend: {}",
+                burn_model.get_name(),
+                burn_model.get_backend_info()
+            );
+
+            // Create a dummy path for built-in models
+            let model_path = PathBuf::from(format!("built-in:{model_name}"));
+            let model = Model::new(burn_model, model_path, 0);
+            Ok(model)
+        }
+        Err(e) => {
+            warn!(
+                "Failed to load built-in model '{}' ({}), falling back to dummy model",
+                model_name, e
+            );
+
+            // Create fallback dummy model with appropriate shapes for the built-in model
+            let input_shape = built_in_model.input_shape();
+            let output_shape = built_in_model.output_shape();
+
+            let dummy_model = DummyModel::new(model_name.to_string(), input_shape, output_shape);
+
+            let model_path = PathBuf::from(format!("dummy:{model_name}"));
+            let model = Model::new(Box::new(dummy_model), model_path, 0);
+
+            info!("Dummy model loaded as fallback for: {}", model_name);
+            Ok(model)
+        }
+    }
+}
+
+/// Load model with support for both built-in models and file-based models
+pub fn load_model_by_name_or_path(name_or_path: &str, config: ModelConfig) -> Result<Model> {
+    // First, try to load as a built-in model
+    if let Ok(model) = load_built_in_model(name_or_path) {
+        return Ok(model);
+    }
+
+    // If not a built-in model, try to load as a file path
+    let path = PathBuf::from(name_or_path);
+    load_model_with_config(&path, config)
 }
