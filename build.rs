@@ -47,7 +47,7 @@ fn generate_onnx_models() {
             })
             .collect::<Vec<_>>(),
         Err(e) => {
-            eprintln!("Failed to read models directory: {}", e);
+            eprintln!("Failed to read models directory: {e}");
             return;
         }
     };
@@ -64,7 +64,7 @@ fn generate_onnx_models() {
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
 
-        eprintln!("Generating model: {}", model_name);
+        eprintln!("Generating model: {model_name}");
         println!("cargo:rerun-if-changed={}", onnx_path.display());
 
         // Try to generate the model, but don't fail the entire build if one model fails
@@ -75,14 +75,13 @@ fn generate_onnx_models() {
                 .run_from_script();
         }) {
             Ok(_) => {
-                eprintln!("✅ Model '{}' generated successfully", model_name);
+                eprintln!("✅ Model '{model_name}' generated successfully");
                 // Tell Cargo that this model was successfully generated
                 println!("cargo:rustc-cfg=model_{}", model_name.replace("-", "_"));
             }
             Err(_) => {
                 eprintln!(
-                    "❌ Failed to generate model '{}' - incompatible ONNX format",
-                    model_name
+                    "❌ Failed to generate model '{model_name}' - incompatible ONNX format"
                 );
                 eprintln!("   This model will be skipped. Consider simplifying the ONNX file.");
             }

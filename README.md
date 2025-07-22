@@ -41,23 +41,7 @@ cargo build --release
 
 Expected output: Binary created at `./target/release/furnace` (~4.5MB)
 
-### 2. Download ResNet-18 Model
-
-```bash
-# Download ResNet-18 ONNX model (45MB)
-curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o resnet18.onnx
-```
-
-**Alternative download methods:**
-```bash
-# Using wget
-wget "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -O resnet18.onnx
-
-# Verify download (should be ~45MB)
-ls -lh resnet18.onnx
-```
-
-### 3. Generate Test Data
+### 2. Generate Test Data
 
 ```bash
 # Generate ResNet-18 test samples (creates JSON files locally)
@@ -69,7 +53,7 @@ This creates the following test files:
 - `resnet18_batch_sample.json` - Batch of 3 images test data  
 - `resnet18_full_test.json` - Full-size single image (150,528 values)
 
-### 4. Build with ONNX Support
+### 3. Build with ONNX Support
 
 ```bash
 # Build with burn-import feature for ONNX model generation
@@ -85,7 +69,7 @@ Generating model: resnet18
     Finished release [optimized] target(s)
 ```
 
-### 5. Start the Server
+### 4. Start the Server
 
 ```bash
 # Start server with built-in ResNet-18 model
@@ -106,7 +90,7 @@ Successfully loaded built-in model: resnet18 with backend: burn-resnet18
 ✅ Server running on http://127.0.0.1:3000
 ```
 
-### 6. Test the API
+### 5. Test the API
 
 Open a new terminal and test the endpoints:
 
@@ -541,18 +525,17 @@ Furnace supports ONNX models with automatic shape detection. Currently optimized
 | **GPT-NeoX** | `[1, 512]` | `[50257]` | 1.7MB | ❌ **Incompatible** |
 | **Your Custom Model** | `[?, ?, ?]` | `[?]` | ?MB | 🔄 **Add with guide above** |
 
-### 📥 Download Pre-trained Models
+### 📥 Built-in Pre-trained Models
 
-```bash
-# ResNet-18 (ImageNet classification) - Recommended
-curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o resnet18.onnx
+Furnace includes built-in models that are compiled during build time:
 
-# MobileNet v2 (lightweight, mobile-friendly)
-curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/mobilenet/model/mobilenetv2-12.onnx" -o mobilenetv2.onnx
+| Model | Status |
+|-------|--------|
+| **ResNet-18** | ✅ **Available** (45MB, built-in) |
+| **MobileNet v2** | 🔄 **Add to models/** |
+| **SqueezeNet** | 🔄 **Add to models/** |
 
-# SqueezeNet (very lightweight)
-curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/squeezenet/model/squeezenet1.0-12.onnx" -o squeezenet.onnx
-```
+To add additional models, place ONNX files in the `models/` directory and rebuild with `--features burn-import`.
 
 ### 🔧 Custom Models
 
@@ -591,10 +574,7 @@ torch.onnx.export(model, dummy_input, "my_model.onnx")
 
 **Prerequisites:**
 ```bash
-# 1. Download ResNet-18 model (if not already done)
-curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o resnet18.onnx
-
-# 2. Generate test data (benchmarks use dynamic model detection)
+# Generate test data (benchmarks use built-in model)
 cargo run --example resnet18_sample_data
 ```
 
@@ -755,13 +735,13 @@ Implement the `BurnModel` trait in `src/burn_model.rs` to add support for your o
 
 ### Common Issues
 
-**Model Download Fails:**
+**Model Loading Fails:**
 ```bash
-# Try alternative download method
-wget "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -O resnet18.onnx
+# Check available built-in models
+./target/release/furnace --help
 
-# Or check if file exists and size
-ls -lh resnet18.onnx  # Should be ~45MB
+# Verify model was built
+find target -name "resnet18.rs" -path "*/out/models/*"
 ```
 
 **Server Won't Start:**
@@ -770,7 +750,7 @@ ls -lh resnet18.onnx  # Should be ~45MB
 lsof -i :3000
 
 # Try different port
-./target/release/furnace --model-path resnet18.onnx --port 3001
+./target/release/furnace --model-name resnet18 --port 3001
 ```
 
 **Build Errors:**
