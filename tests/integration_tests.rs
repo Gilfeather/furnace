@@ -41,8 +41,14 @@ async fn test_end_to_end_inference() {
 
     assert_eq!(info_response.status(), 200);
     let info_json: serde_json::Value = info_response.json().await.unwrap();
-    assert_eq!(info_json["input_spec"]["shape"], json!([1, 3, 224, 224]));
-    assert_eq!(info_json["output_spec"]["shape"], json!([1000]));
+    assert_eq!(
+        info_json["model_info"]["input_spec"]["shape"],
+        json!([1, 3, 224, 224])
+    );
+    assert_eq!(
+        info_json["model_info"]["output_spec"]["shape"],
+        json!([1000])
+    );
 
     // Test single prediction (ResNet18 input size: 3 * 224 * 224 = 150,528)
     let predict_payload = json!({
@@ -60,9 +66,8 @@ async fn test_end_to_end_inference() {
     let predict_json: serde_json::Value = predict_response.json().await.unwrap();
     assert_eq!(predict_json["status"], "success");
     assert_eq!(predict_json["batch_size"], 1);
-    assert!(predict_json["outputs"].is_array());
-    assert_eq!(predict_json["outputs"].as_array().unwrap().len(), 1);
-    assert_eq!(predict_json["outputs"][0].as_array().unwrap().len(), 1000);
+    assert!(predict_json["output"].is_array());
+    assert_eq!(predict_json["output"].as_array().unwrap().len(), 1000);
 
     // Test batch prediction (ResNet18 input size: 3 * 224 * 224 = 150,528)
     let batch_payload = json!({
