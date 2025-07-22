@@ -182,9 +182,7 @@ impl BuiltInModel {
                 Err(ModelError::InvalidArgument {
                     arg: "model-name".to_string(),
                     value: name.to_string(),
-                    reason: format!(
-                        "unknown built-in model. Available models: {available_models}"
-                    ),
+                    reason: format!("unknown built-in model. Available models: {available_models}"),
                 }
                 .into())
             }
