@@ -26,10 +26,6 @@ exclude = [
 name = "furnace"
 path = "src/main.rs"
 
-[[bin]]
-name = "create_sample_model"
-path = "src/bin/create_sample_model.rs"
-
 
 
 [features]

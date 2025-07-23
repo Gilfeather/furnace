@@ -37,15 +37,12 @@ COPY src/ src/
 COPY benches/ benches/
 COPY tests/ tests/
 
-# Download ONNX models and create sample model
+# Download ONNX models
 RUN mkdir -p models && \
     curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
 
-# Build the actual application
-RUN touch src/main.rs && cargo build --release
-
-# Create sample model for runtime
-RUN ./target/release/create_sample_model
+# Build the actual application with burn-import feature
+RUN touch src/main.rs && cargo build --release --features burn-import
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -67,9 +64,8 @@ COPY --from=builder /app/target/release/furnace /usr/local/bin/furnace
 COPY --from=builder /app/target/release/benchmark /usr/local/bin/benchmark
 RUN chmod +x /usr/local/bin/furnace /usr/local/bin/benchmark
 
-# Copy models
+# Copy models (needed for build.rs to generate code from ONNX)
 COPY --from=builder /app/models/ /app/models/
-COPY --from=builder /app/sample_model.mpk /app/models/model.mpk
 
 # Switch to non-root user
 USER furnace
@@ -85,4 +81,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 
 # Default command
 ENTRYPOINT ["furnace"]
-CMD ["--model-path", "/app/models/model.mpk", "--host", "0.0.0.0", "--port", "3000"]
+CMD ["--model-name", "resnet18", "--host", "0.0.0.0", "--port", "3000"]
