@@ -71,8 +71,9 @@ fn generate_onnx_models() {
         match std::panic::catch_unwind(|| {
             let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
             let models_out_dir = format!("{}/models", out_dir);
-            std::fs::create_dir_all(&models_out_dir).expect("Failed to create models output directory");
-            
+            std::fs::create_dir_all(&models_out_dir)
+                .expect("Failed to create models output directory");
+
             ModelGen::new()
                 .input(onnx_path.to_str().unwrap())
                 .out_dir(&models_out_dir)
