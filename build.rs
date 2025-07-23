@@ -70,7 +70,7 @@ fn generate_onnx_models() {
         // Try to generate the model, but don't fail the entire build if one model fails
         match std::panic::catch_unwind(|| {
             let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
-            let models_out_dir = format!("{}/models", out_dir);
+            let models_out_dir = format!("{out_dir}/models");
             std::fs::create_dir_all(&models_out_dir)
                 .expect("Failed to create models output directory");
 
