@@ -2,13 +2,13 @@
 
 [![Build Status](https://github.com/Gilfeather/furnace/actions/workflows/ci.yml/badge.svg)](https://github.com/Gilfeather/furnace/actions/workflows/ci.yml)
 [![Binary Size](https://img.shields.io/badge/binary%20size-4.5MB-blue)](https://github.com/Gilfeather/furnace)
-[![Inference Time](https://img.shields.io/badge/inference-~0.2ms*-brightgreen)](https://github.com/Gilfeather/furnace)
+[![Inference Time](https://img.shields.io/badge/inference-~25s*-orange)](https://github.com/Gilfeather/furnace)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/Gilfeather/furnace/blob/main/LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/Gilfeather/furnace?style=social)](https://github.com/Gilfeather/furnace/stargazers)
 
 **Ultra-fast ONNX inference server built with Rust**
 
-A high-performance, lightweight HTTP inference server specialized for ONNX models with zero Python dependencies. Optimized for ResNet-18 image classification with sub-millisecond inference times.
+A high-performance, lightweight HTTP inference server specialized for ONNX models with zero Python dependencies. Built with Burn's ONNX-to-Rust code generation for ResNet-18 image classification.
 
 
 
@@ -17,7 +17,7 @@ A high-performance, lightweight HTTP inference server specialized for ONNX model
 
 - 🦀 **Pure Rust**: Maximum performance, minimal memory footprint (4.5MB binary)
 - 🔥 **ONNX Support**: Direct ONNX model loading with automatic shape detection
-- ⚡ **Fast Inference**: ~0.2ms inference times for ResNet-18
+- ⚡ **Fast Inference**: ~25s inference times for ResNet-18
 - 🛡️ **Production Ready**: Graceful shutdown, comprehensive error handling
 - 🌐 **HTTP API**: RESTful endpoints with CORS support
 - 📦 **Single Binary**: Zero external dependencies
@@ -34,9 +34,9 @@ A high-performance, lightweight HTTP inference server specialized for ONNX model
 ### 1. Clone and Build
 
 ```bash
-git clone https://github.com/yourusername/furnace.git
+git clone https://github.com/Gilfeather/furnace.git
 cd furnace
-cargo build --release
+cargo build --features burn-import --release
 ```
 
 Expected output: Binary created at `./target/release/furnace` (~4.5MB)
@@ -53,12 +53,9 @@ This creates the following test files:
 - `resnet18_batch_sample.json` - Batch of 3 images test data  
 - `resnet18_full_test.json` - Full-size single image (150,528 values)
 
-### 3. Build with ONNX Support
+### 3. ONNX Model Generation
 
-```bash
-# Build with burn-import feature for ONNX model generation
-cargo build --features burn-import --release
-```
+The build process automatically generates Rust code from ONNX models:
 
 Expected build output:
 ```
@@ -103,17 +100,17 @@ curl http://localhost:3000/health
 curl http://localhost:3000/model/info
 # Expected: {"model_info":{"name":"resnet18","input_spec":{"shape":[1,3,224,224]},...}}
 
-# Single image prediction (~0.2ms inference time)
+# Single image prediction (~25s inference time for ResNet18)
 curl -X POST http://localhost:3000/predict \
   -H "Content-Type: application/json" \
   --data-binary @resnet18_full_test.json
-# Expected: {"output":[0.1,0.05,0.02,...],...}
+# Expected: {"output":[-1.596,-0.173,0.842,...],"status":"success","inference_time_ms":25477.0}
 
 # Batch prediction
 curl -X POST http://localhost:3000/predict \
   -H "Content-Type: application/json" \
   --data-binary @resnet18_batch_sample.json
-# Expected: {"output":[[...],[...],[...]],"batch_size":3,...}
+# Expected: {"output":[[-1.596,...],[-0.173,...],[0.842,...]],"batch_size":3,"status":"success"}
 ```
 
 ## 🖼️ ONNX Model Integration
@@ -564,7 +561,7 @@ torch.onnx.export(model, dummy_input, "my_model.onnx")
 |--------|-------|
 | Binary Size | **4.5MB** |
 | Model Size | **45MB** |
-| Inference Time | **~0.2ms** |
+| Inference Time | **~25s** |
 | Memory Usage | **<200MB** |
 | Startup Time | **<2s** |
 | Input Size | **150,528 values** |
