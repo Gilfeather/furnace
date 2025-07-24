@@ -1,3 +1,7 @@
+use axum::http::{
+    header::{X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS, X_XSS_PROTECTION},
+    HeaderValue,
+};
 use axum::{
     extract::State,
     http::StatusCode,
@@ -13,7 +17,6 @@ use tokio::signal;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
-use axum::http::{HeaderValue, header::{X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS, X_XSS_PROTECTION}};
 use tracing::{error, info, warn};
 
 use crate::error::{ApiError, FurnaceError, ModelError, Result};
@@ -134,9 +137,18 @@ pub async fn start_server_with_config(config: ServerConfig, model: Model) -> Res
         .route("/predict", post(predict))
         .route("/model/info", get(model_info))
         .layer(RequestBodyLimitLayer::new(100 * 1024 * 1024)) // 100MB limit
-        .layer(SetResponseHeaderLayer::overriding(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff")))
-        .layer(SetResponseHeaderLayer::overriding(X_FRAME_OPTIONS, HeaderValue::from_static("DENY")))
-        .layer(SetResponseHeaderLayer::overriding(X_XSS_PROTECTION, HeaderValue::from_static("1; mode=block")))
+        .layer(SetResponseHeaderLayer::overriding(
+            X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            X_XSS_PROTECTION,
+            HeaderValue::from_static("1; mode=block"),
+        ))
         .layer(cors)
         .with_state(app_state);
 
@@ -216,7 +228,7 @@ async fn predict(State(state): State<AppState>, Json(payload): Json<PredictReque
         PredictInputData::Single { input } => input.len(),
         PredictInputData::Batch { inputs } => inputs.len(),
     };
-    
+
     // Security: Log prediction requests for monitoring
     info!(
         "Received prediction request with {} inputs, batch_size: {:?}",
@@ -354,7 +366,7 @@ async fn model_info(State(state): State<AppState>) -> Json<ModelInfoResponse> {
 fn validate_input_security(input_data: &PredictInputData) -> std::result::Result<(), String> {
     const MAX_INPUT_SIZE: usize = 10_000_000; // 10M elements max
     const MAX_BATCH_SIZE: usize = 1000; // 1000 items max per batch
-    
+
     match input_data {
         PredictInputData::Single { input } => {
             // Check for excessively large inputs
@@ -365,7 +377,7 @@ fn validate_input_security(input_data: &PredictInputData) -> std::result::Result
                     MAX_INPUT_SIZE
                 ));
             }
-            
+
             // Check for NaN or infinite values that could cause issues
             for (i, &value) in input.iter().enumerate() {
                 if !value.is_finite() {
@@ -385,7 +397,7 @@ fn validate_input_security(input_data: &PredictInputData) -> std::result::Result
                     MAX_BATCH_SIZE
                 ));
             }
-            
+
             // Validate each input in the batch
             for (batch_idx, input) in inputs.iter().enumerate() {
                 if input.len() > MAX_INPUT_SIZE {
@@ -396,7 +408,7 @@ fn validate_input_security(input_data: &PredictInputData) -> std::result::Result
                         MAX_INPUT_SIZE
                     ));
                 }
-                
+
                 // Check for NaN or infinite values
                 for (i, &value) in input.iter().enumerate() {
                     if !value.is_finite() {
@@ -409,7 +421,7 @@ fn validate_input_security(input_data: &PredictInputData) -> std::result::Result
             }
         }
     }
-    
+
     Ok(())
 }
 
