@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] - 2025-01-19
+
+### Fixed
+- Fixed ONNX model generation using proper OUT_DIR environment variable
+- Resolved Docker build issues by removing Docker support
+- Updated CLI examples in README to use --model-name instead of --model-path
+- Corrected API response examples to match actual ResNet18 output format
+- Fixed performance metrics to reflect actual ResNet18 inference times (~25s)
+
+### Changed
+- Simplified CI workflow by removing Docker build job
+- Updated README.md with accurate CLI usage and API documentation
+- Improved build process reliability for ONNX code generation
+
+### Removed
+- Docker support and Dockerfile (focusing on native binary distribution)
+- create_sample_model dependency from benchmarks
+
 ## [0.3.0] - 2025-01-21
 
 ### Added
