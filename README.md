@@ -31,17 +31,37 @@ A high-performance, lightweight HTTP inference server specialized for ONNX model
 - **curl** for downloading models and testing
 - **~50MB disk space** for ResNet-18 model
 
-### 1. Clone and Build
+### 1. Clone and Setup
 
 ```bash
 git clone https://github.com/Gilfeather/furnace.git
 cd furnace
+```
+
+### 2. Download ResNet-18 ONNX Model
+
+```bash
+# Create models directory
+mkdir -p models
+
+# Download ResNet-18 ONNX model from official ONNX model zoo
+curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
+
+# Verify download
+ls -la models/
+# Should show: resnet18.onnx (~45MB)
+```
+
+### 3. Build with ONNX Support
+
+```bash
+# Build with burn-import feature to generate Rust code from ONNX
 cargo build --features burn-import --release
 ```
 
 Expected output: Binary created at `./target/release/furnace` (~4.5MB)
 
-### 2. Generate Test Data
+### 4. Generate Test Data
 
 ```bash
 # Generate ResNet-18 test samples (creates JSON files locally)
@@ -53,20 +73,7 @@ This creates the following test files:
 - `resnet18_batch_sample.json` - Batch of 3 images test data  
 - `resnet18_full_test.json` - Full-size single image (150,528 values)
 
-### 3. ONNX Model Generation
-
-The build process automatically generates Rust code from ONNX models:
-
-Expected build output:
-```
-Generating ONNX models following Burn documentation
-Generating model: resnet18
-✅ Model 'resnet18' generated successfully
-   Compiling furnace v0.3.0
-    Finished release [optimized] target(s)
-```
-
-### 4. Start the Server
+### 5. Start the Server
 
 ```bash
 # Start server with built-in ResNet-18 model
@@ -87,7 +94,7 @@ Successfully loaded built-in model: resnet18 with backend: burn-resnet18
 ✅ Server running on http://127.0.0.1:3000
 ```
 
-### 5. Test the API
+### 6. Test the API
 
 Open a new terminal and test the endpoints:
 
