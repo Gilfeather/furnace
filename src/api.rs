@@ -382,8 +382,7 @@ fn validate_input_security(input_data: &PredictInputData) -> std::result::Result
             for (i, &value) in input.iter().enumerate() {
                 if !value.is_finite() {
                     return Err(format!(
-                        "Invalid value at index {}: {} (NaN or infinite values not allowed)",
-                        i, value
+                        "Invalid value at index {i}: {value} (NaN or infinite values not allowed)"
                     ));
                 }
             }
@@ -413,8 +412,7 @@ fn validate_input_security(input_data: &PredictInputData) -> std::result::Result
                 for (i, &value) in input.iter().enumerate() {
                     if !value.is_finite() {
                         return Err(format!(
-                            "Invalid value in batch item {} at index {}: {} (NaN or infinite values not allowed)",
-                            batch_idx, i, value
+                            "Invalid value in batch item {batch_idx} at index {i}: {value} (NaN or infinite values not allowed)"
                         ));
                     }
                 }
