@@ -1,3 +1,7 @@
+use axum::http::{
+    header::{X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS, X_XSS_PROTECTION},
+    HeaderValue,
+};
 use axum::{
     extract::State,
     http::StatusCode,
@@ -11,6 +15,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::signal;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{error, info, warn};
 
 use crate::error::{ApiError, FurnaceError, ModelError, Result};
@@ -130,6 +136,19 @@ pub async fn start_server_with_config(config: ServerConfig, model: Model) -> Res
         .route("/healthz", get(health_check))
         .route("/predict", post(predict))
         .route("/model/info", get(model_info))
+        .layer(RequestBodyLimitLayer::new(100 * 1024 * 1024)) // 100MB limit
+        .layer(SetResponseHeaderLayer::overriding(
+            X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            X_XSS_PROTECTION,
+            HeaderValue::from_static("1; mode=block"),
+        ))
         .layer(cors)
         .with_state(app_state);
 
@@ -209,7 +228,23 @@ async fn predict(State(state): State<AppState>, Json(payload): Json<PredictReque
         PredictInputData::Single { input } => input.len(),
         PredictInputData::Batch { inputs } => inputs.len(),
     };
-    info!("Received prediction request with {} inputs", input_count);
+
+    // Security: Log prediction requests for monitoring
+    info!(
+        "Received prediction request with {} inputs, batch_size: {:?}",
+        input_count, payload.batch_size
+    );
+
+    // Security: Validate input data for potential attacks
+    if let Err(e) = validate_input_security(&payload.input_data) {
+        warn!("Security validation failed: {}", e);
+        return create_error_response(
+            StatusCode::BAD_REQUEST,
+            "SECURITY_VALIDATION_FAILED",
+            &e,
+            None,
+        );
+    }
 
     // Extract inputs based on request type
     let (inputs, batch_size) = match &payload.input_data {
@@ -325,6 +360,69 @@ async fn model_info(State(state): State<AppState>) -> Json<ModelInfoResponse> {
     };
 
     Json(response)
+}
+
+/// Security validation for input data
+fn validate_input_security(input_data: &PredictInputData) -> std::result::Result<(), String> {
+    const MAX_INPUT_SIZE: usize = 10_000_000; // 10M elements max
+    const MAX_BATCH_SIZE: usize = 1000; // 1000 items max per batch
+
+    match input_data {
+        PredictInputData::Single { input } => {
+            // Check for excessively large inputs
+            if input.len() > MAX_INPUT_SIZE {
+                return Err(format!(
+                    "Input size {} exceeds maximum allowed size {}",
+                    input.len(),
+                    MAX_INPUT_SIZE
+                ));
+            }
+
+            // Check for NaN or infinite values that could cause issues
+            for (i, &value) in input.iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(format!(
+                        "Invalid value at index {}: {} (NaN or infinite values not allowed)",
+                        i, value
+                    ));
+                }
+            }
+        }
+        PredictInputData::Batch { inputs } => {
+            // Check batch size limits
+            if inputs.len() > MAX_BATCH_SIZE {
+                return Err(format!(
+                    "Batch size {} exceeds maximum allowed batch size {}",
+                    inputs.len(),
+                    MAX_BATCH_SIZE
+                ));
+            }
+
+            // Validate each input in the batch
+            for (batch_idx, input) in inputs.iter().enumerate() {
+                if input.len() > MAX_INPUT_SIZE {
+                    return Err(format!(
+                        "Batch item {} size {} exceeds maximum allowed size {}",
+                        batch_idx,
+                        input.len(),
+                        MAX_INPUT_SIZE
+                    ));
+                }
+
+                // Check for NaN or infinite values
+                for (i, &value) in input.iter().enumerate() {
+                    if !value.is_finite() {
+                        return Err(format!(
+                            "Invalid value in batch item {} at index {}: {} (NaN or infinite values not allowed)",
+                            batch_idx, i, value
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn create_error_response(

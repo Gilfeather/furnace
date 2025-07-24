@@ -44,7 +44,7 @@ ndarray = "0.16"
 # Web Framework
 axum = "0.8"
 tower = { version = "0.5", features = ["limit"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "limit", "set-header"] }
 tokio = { version = "1.46", features = ["full"] }
 
 # CLI

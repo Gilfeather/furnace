@@ -286,16 +286,21 @@ fn bench_server_overhead_comparison(c: &mut Criterion) {
     let onnx_model = Arc::new(create_test_model());
     let dummy_model = Arc::new(create_dummy_model());
 
-    let model_info = onnx_model.get_info();
-    let input_size: usize = model_info.input_spec.shape.iter().product();
-    let input = vec![0.5f32; input_size];
+    // Create appropriate input for each model
+    let onnx_model_info = onnx_model.get_info();
+    let onnx_input_size: usize = onnx_model_info.input_spec.shape.iter().product();
+    let onnx_input = vec![0.5f32; onnx_input_size];
+
+    let dummy_model_info = dummy_model.get_info();
+    let dummy_input_size: usize = dummy_model_info.input_spec.shape.iter().product();
+    let dummy_input = vec![0.5f32; dummy_input_size];
 
     let mut group = c.benchmark_group("server_overhead_comparison");
 
     // ONNX model (includes actual inference)
     group.bench_function("onnx_model", |b| {
         b.iter(|| {
-            let result = onnx_model.predict_batch(vec![black_box(input.clone())]);
+            let result = onnx_model.predict_batch(vec![black_box(onnx_input.clone())]);
             black_box(result).unwrap()
         })
     });
@@ -303,7 +308,7 @@ fn bench_server_overhead_comparison(c: &mut Criterion) {
     // Dummy model (server overhead only)
     group.bench_function("dummy_model", |b| {
         b.iter(|| {
-            let result = dummy_model.predict_batch(vec![black_box(input.clone())]);
+            let result = dummy_model.predict_batch(vec![black_box(dummy_input.clone())]);
             black_box(result).unwrap()
         })
     });
