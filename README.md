@@ -100,7 +100,7 @@ Open a new terminal and test the endpoints:
 
 ```bash
 # Health check
-curl http://localhost:3000/health
+curl http://localhost:3000/healthz
 # Expected: {"status":"healthy","model_loaded":true,...}
 
 # Model info  
