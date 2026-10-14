@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Instant;
 
 #[tokio::main]
@@ -95,11 +95,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut max_idx = 0;
             let mut max_val = -f64::INFINITY;
             for (i, val) in output.iter().enumerate() {
-                if let Some(v) = val.as_f64() {
-                    if v > max_val {
-                        max_val = v;
-                        max_idx = i;
-                    }
+                if let Some(v) = val.as_f64()
+                    && v > max_val
+                {
+                    max_val = v;
+                    max_idx = i;
                 }
             }
             println!("   Predicted class: {max_idx} (confidence: {max_val:.4})");

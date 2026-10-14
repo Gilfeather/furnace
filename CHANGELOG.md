@@ -5,7 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.5] - 2025-01-19
+## [0.4.0] - 2026-10-14
+
+Migration to Burn 0.22 and a correctness pass over the server. Performance figures in
+earlier releases were measured against a dummy fallback model and should be disregarded.
+
+### Changed
+- **BREAKING**: Upgraded to Burn 0.22. ONNX import moved from `burn-import` to `burn-onnx`;
+  the CPU backend is now `burn-flex` (replaces `burn-ndarray`)
+- **BREAKING**: Cargo feature `burn-import` renamed to `onnx` (enabled by default)
+- **BREAKING**: File-based models now use Burnpack (`<name>.bpk` + `<name>.json`) instead of
+  MessagePack `.mpk`. Re-export old models with Burn ≤0.21 + `burn-store`, or regenerate them
+- **BREAKING**: Rust edition 2024, MSRV raised to 1.95
+- `--backend` now selects the device at runtime (`cpu`, plus `wgpu`/`metal`/`cuda` when built
+  with the matching feature); only backends compiled into the binary are accepted
+- Built-in model weights are embedded in the binary, so release binaries are self-contained
+  (binary is ~50 MB with ResNet-18)
+- ResNet-18 `input_spec.shape` is now `[3, 224, 224]` (per item, without the batch dimension)
+- `POST /predict` with `inputs` always returns `outputs` (even for a batch of one)
+- Inference runs on a blocking thread pool instead of async runtime workers
+- Models are shared across requests without a global mutex
+- Stats (`/model/info`) are now updated accurately in release builds
+
+### Added
+- `--model-path` for file-based Burnpack models
+- `--max-body-mb` (default 100) and `--request-timeout-ms` (returns 504 on timeout)
+- Backpressure: requests beyond `--max-concurrent-requests` get `503 SERVER_BUSY` immediately
+- `GET /health` alias for `/healthz`; health response includes `backend`
+- Structured `INVALID_REQUEST` errors for malformed JSON
+- End-to-end tests with real ResNet-18 inference, batch consistency and backpressure checks
+- CI: MSRV job, wgpu feature check, cargo-deny
+
+### Fixed
+- Real ResNet-18 requests (~1.5–3 MB JSON) were rejected with `length limit exceeded` by
+  axum's 2 MB default body limit
+- Model load failures silently fell back to a dummy model returning constant `0.5` outputs
+- Benchmarks measured the dummy fallback model instead of ResNet-18
+- Release workflow built binaries without the ResNet-18 model and referenced a removed Dockerfile
+- README referenced a `/health` endpoint that did not exist
+
+### Removed
+- `--enable-kernel-fusion` / `--enable-autotuning` are now hidden no-ops (they never had an
+  effect); Burn configures fusion and autotuning through Cargo features
+- Unused runtime dependencies: bollard, plotters, hdrhistogram, statistical, toml, futures
+- Obsolete examples: `onnx_direct_inference`, `create_small_resnet_sample`,
+  `create_resnet_test_sample`
+
+## [0.3.5] - 2025-07-24
 
 ### Fixed
 - Fixed ONNX model generation using proper OUT_DIR environment variable

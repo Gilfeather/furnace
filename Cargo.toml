@@ -1,8 +1,8 @@
 [package]
 name = "furnace"
-version = "0.3.5"
-edition = "2021"
-rust-version = "1.75"
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.95"
 authors = ["Furnace Contributors"]
 description = "🔥 High-performance Rust ML inference server powered by Burn framework"
 documentation = "https://docs.rs/furnace"
@@ -29,23 +29,23 @@ path = "src/main.rs"
 
 
 [features]
-default = ["burn-import"]
-wgpu = []
-metal = []
-cuda = []
-burn-import = ["dep:burn-import"]
+default = ["onnx"]
+# Generate built-in models from ONNX files in models/ at build time
+onnx = ["dep:burn-onnx"]
+wgpu = ["burn/wgpu"]
+metal = ["burn/metal"]
+cuda = ["burn/cuda"]
 
 [dependencies]
 # ML Framework
-burn = { version = "0.17", features = ["train", "std", "ndarray"] }
-burn-import = { version = "0.17", features = ["onnx"], optional = true }
-ndarray = "0.16"
+burn = { version = "0.22", default-features = false, features = ["std", "flex", "store"] }
+burn-store = { version = "0.22", features = ["std"] }
 
 # Web Framework
 axum = "0.8"
 tower = { version = "0.5", features = ["limit"] }
-tower-http = { version = "0.6", features = ["cors", "limit", "set-header"] }
-tokio = { version = "1.46", features = ["full"] }
+tower-http = { version = "0.7", features = ["cors", "limit", "set-header"] }
+tokio = { version = "1.53", features = ["full"] }
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
@@ -65,36 +65,15 @@ thiserror = "2.0"
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 
-# Benchmarking dependencies
-bollard = "0.17"  # Docker API client
-plotters = "0.3"  # Chart generation
-hdrhistogram = "7.5"  # High-performance histogram for latency metrics
-statistical = "1.0"  # Statistical analysis
-futures-util = "0.3"  # Async utilities
-futures = "0.3"  # Futures executor
-toml = "0.8"  # TOML configuration parsing
-tempfile = "3.12"  # Temporary file handling
-rand = "0.8"  # Random number generation
-reqwest = { version = "0.12", features = ["json"] }  # HTTP client
-
 [build-dependencies]
-burn-import = { version = "0.17", features = ["onnx"], optional = true }
+burn-onnx = { version = "0.22", optional = true }
 
 [dev-dependencies]
-# Testing utilities
 tempfile = "3.12"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 tower = { version = "0.5", features = ["util"] }
-
-# Benchmarking
-criterion = { version = "0.5", features = ["html_reports"] }
-
-# Examples dependencies
-rand = "0.8"
-ureq = "2.10"
-protobuf = "3.4"
-
-
+criterion = { version = "0.8", features = ["html_reports"] }
+rand = "0.10"
 
 [[bench]]
 name = "inference_benchmark"

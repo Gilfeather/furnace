@@ -1,10 +1,10 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Instant;
 
 /// Generate synthetic image data that looks more realistic
 fn generate_synthetic_mnist_data() -> Vec<f32> {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
+    use rand::RngExt;
+    let mut rng = rand::rng();
     let mut data = vec![0.0; 784];
 
     // Create a simple pattern - a rough circle in the center
@@ -17,11 +17,11 @@ fn generate_synthetic_mnist_data() -> Vec<f32> {
 
             // Create a circle with some noise
             if distance < 8.0 {
-                data[idx] = rng.gen_range(0.7..1.0);
+                data[idx] = rng.random_range(0.7..1.0);
             } else if distance < 10.0 {
-                data[idx] = rng.gen_range(0.3..0.7);
+                data[idx] = rng.random_range(0.3..0.7);
             } else {
-                data[idx] = rng.gen_range(0.0..0.2);
+                data[idx] = rng.random_range(0.0..0.2);
             }
         }
     }
@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(_) => {
             println!("❌ Cannot connect to server. Make sure it's running:");
-            println!("   cargo run --bin furnace -- --model-path examples/basic_mnist/model.mpk");
+            println!("   cargo run --bin furnace -- --model-path examples/basic_mnist/model");
             return Ok(());
         }
     }

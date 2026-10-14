@@ -1,38 +1,19 @@
-use burn::backend::ndarray::NdArray;
-use burn::tensor::{Tensor, TensorData};
+use burn::tensor::{Device, Tensor, TensorData};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tracing::{error, info, warn};
+use std::sync::Mutex;
+use std::time::Instant;
+use tracing::{debug, info};
 
-use crate::burn_model::{create_sample_model, BurnModelContainer};
+use crate::backend::BackendKind;
+use crate::burn_model::{BurnModelContainer, create_sample_model};
 use crate::error::{ModelError, Result};
 use crate::models::BuiltInModel;
-// Temporarily define these here until module import is resolved
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TensorSpec {
-    pub shape: Vec<usize>,
-    pub dtype: String,
-    pub min_value: Option<f32>,
-    pub max_value: Option<f32>,
-}
+use crate::types::TensorSpec;
 
-#[derive(Debug, Clone)]
-pub struct ModelConfig {
-    pub backend: Option<String>,
-    pub enable_kernel_fusion: bool,
-    pub enable_autotuning: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct OptimizationInfo {
-    pub kernel_fusion: bool,
-    pub autotuning_cache: bool,
-    pub backend_type: String,
-}
-
-type B = NdArray<f32>;
+/// Hard upper bound on the number of items in one inference batch
+pub const MAX_BATCH_SIZE: usize = 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -54,30 +35,68 @@ pub struct ModelStats {
     pub average_inference_time_ms: f64,
     pub error_count: u64,
     pub success_count: u64,
-    pub memory_usage_bytes: u64,
-    pub min_inference_time_ms: f64,
-    pub max_inference_time_ms: f64,
+    pub min_inference_time_ms: Option<f64>,
+    pub max_inference_time_ms: Option<f64>,
 }
 
+impl ModelStats {
+    fn new() -> Self {
+        Self {
+            inference_count: 0,
+            total_inference_time_ms: 0.0,
+            last_inference_time: None,
+            average_inference_time_ms: 0.0,
+            error_count: 0,
+            success_count: 0,
+            min_inference_time_ms: None,
+            max_inference_time_ms: None,
+        }
+    }
+
+    fn record_success(&mut self, elapsed_ms: f64) {
+        self.inference_count += 1;
+        self.success_count += 1;
+        self.total_inference_time_ms += elapsed_ms;
+        self.average_inference_time_ms = self.total_inference_time_ms / self.success_count as f64;
+        self.min_inference_time_ms = Some(
+            self.min_inference_time_ms
+                .map_or(elapsed_ms, |m| m.min(elapsed_ms)),
+        );
+        self.max_inference_time_ms = Some(
+            self.max_inference_time_ms
+                .map_or(elapsed_ms, |m| m.max(elapsed_ms)),
+        );
+        self.last_inference_time = Some(Utc::now());
+    }
+
+    fn record_error(&mut self) {
+        self.inference_count += 1;
+        self.error_count += 1;
+    }
+}
+
+/// A model that can run inference on flattened `[batch, features]` input.
 pub trait BurnModel: Send + Sync + std::fmt::Debug {
-    fn predict(&self, input: Tensor<B, 2>) -> Result<Tensor<B, 2>>;
+    fn predict(&self, input: Tensor<2>) -> Result<Tensor<2>>;
+    /// Device the model's weights live on; inputs are created here.
+    fn device(&self) -> &Device;
+    /// Per-item input shape (without the batch dimension)
     fn get_input_shape(&self) -> &[usize];
+    /// Per-item output shape (without the batch dimension)
     fn get_output_shape(&self) -> &[usize];
     fn get_name(&self) -> &str;
-    fn get_backend_info(&self) -> String;
-    #[allow(dead_code)]
-    fn get_optimization_info(&self) -> OptimizationInfo;
+    fn backend(&self) -> BackendKind;
 }
 
-/// Wrapper for actual Burn model
+/// File-based MLP model (`.bpk` weights + `.json` metadata)
 #[derive(Debug)]
-pub struct RealBurnModel {
+pub struct MlpModel {
     container: BurnModelContainer,
     input_shape: Vec<usize>,
     output_shape: Vec<usize>,
 }
 
-impl RealBurnModel {
+impl MlpModel {
     pub fn new(container: BurnModelContainer) -> Self {
         let input_shape = container.input_shape();
         let output_shape = container.output_shape();
@@ -89,10 +108,13 @@ impl RealBurnModel {
     }
 }
 
-impl BurnModel for RealBurnModel {
-    fn predict(&self, input: Tensor<B, 2>) -> Result<Tensor<B, 2>> {
-        let output = self.container.predict(input);
-        Ok(output)
+impl BurnModel for MlpModel {
+    fn predict(&self, input: Tensor<2>) -> Result<Tensor<2>> {
+        Ok(self.container.predict(input))
+    }
+
+    fn device(&self) -> &Device {
+        self.container.device()
     }
 
     fn get_input_shape(&self) -> &[usize] {
@@ -107,21 +129,20 @@ impl BurnModel for RealBurnModel {
         &self.container.metadata.name
     }
 
-    fn get_backend_info(&self) -> String {
-        self.container.get_backend_info()
-    }
-
-    fn get_optimization_info(&self) -> OptimizationInfo {
-        self.container.get_optimization_info()
+    fn backend(&self) -> BackendKind {
+        self.container.backend
     }
 }
 
-// Dummy model implementation for now
-#[derive(Debug, Clone)]
+/// Constant-output model for tests and benchmarking server overhead.
+///
+/// Never used as a silent fallback: if a real model fails to load, loading fails.
+#[derive(Debug)]
 pub struct DummyModel {
     name: String,
     input_shape: Vec<usize>,
     output_shape: Vec<usize>,
+    device: Device,
 }
 
 impl DummyModel {
@@ -130,23 +151,26 @@ impl DummyModel {
             name,
             input_shape,
             output_shape,
+            device: BackendKind::Cpu.device(),
         }
     }
 }
 
 impl BurnModel for DummyModel {
-    fn predict(&self, input: Tensor<B, 2>) -> Result<Tensor<B, 2>> {
+    fn predict(&self, input: Tensor<2>) -> Result<Tensor<2>> {
         let [batch_size, _] = input.dims();
         let output_size = self.output_shape.iter().product::<usize>();
+        Ok(Tensor::from_data(
+            TensorData::new(
+                vec![0.5f32; batch_size * output_size],
+                [batch_size, output_size],
+            ),
+            &self.device,
+        ))
+    }
 
-        // Create dummy output tensor
-        let output_data = vec![0.5; batch_size * output_size];
-        let output_tensor = Tensor::from_data(
-            TensorData::new(output_data, [batch_size, output_size]),
-            &Default::default(),
-        );
-
-        Ok(output_tensor)
+    fn device(&self) -> &Device {
+        &self.device
     }
 
     fn get_input_shape(&self) -> &[usize] {
@@ -161,92 +185,82 @@ impl BurnModel for DummyModel {
         &self.name
     }
 
-    fn get_backend_info(&self) -> String {
-        "dummy".to_string()
-    }
-
-    fn get_optimization_info(&self) -> OptimizationInfo {
-        OptimizationInfo {
-            kernel_fusion: false,
-            autotuning_cache: false,
-            backend_type: self.get_backend_info(),
-        }
+    fn backend(&self) -> BackendKind {
+        BackendKind::Cpu
     }
 }
 
+/// A loaded model plus its metadata and runtime statistics
 #[derive(Debug)]
 pub struct Model {
     inner: Box<dyn BurnModel>,
     info: ModelInfo,
-    #[allow(dead_code)]
-    path: PathBuf,
-    stats: Arc<std::sync::Mutex<ModelStats>>,
+    model_type: &'static str,
+    stats: Mutex<ModelStats>,
 }
 
 impl Model {
-    pub fn new(inner: Box<dyn BurnModel>, path: PathBuf, model_size_bytes: u64) -> Self {
-        let input_shape = inner.get_input_shape().to_vec();
-        let output_shape = inner.get_output_shape().to_vec();
-
+    pub fn new(inner: Box<dyn BurnModel>, model_type: &'static str, model_size_bytes: u64) -> Self {
         let info = ModelInfo {
             name: inner.get_name().to_string(),
             version: "1.0.0".to_string(),
             input_spec: TensorSpec {
-                shape: input_shape,
+                shape: inner.get_input_shape().to_vec(),
                 dtype: "float32".to_string(),
                 min_value: None,
                 max_value: None,
             },
             output_spec: TensorSpec {
-                shape: output_shape,
+                shape: inner.get_output_shape().to_vec(),
                 dtype: "float32".to_string(),
                 min_value: None,
                 max_value: None,
             },
-            model_type: "burn".to_string(),
-            backend: inner.get_backend_info(),
+            model_type: model_type.to_string(),
+            backend: inner.backend().to_string(),
             created_at: Utc::now().to_rfc3339(),
             model_size_bytes,
         };
 
-        let stats = Arc::new(std::sync::Mutex::new(ModelStats {
-            inference_count: 0,
-            total_inference_time_ms: 0.0,
-            last_inference_time: None,
-            average_inference_time_ms: 0.0,
-            error_count: 0,
-            success_count: 0,
-            memory_usage_bytes: 0,
-            min_inference_time_ms: f64::MAX,
-            max_inference_time_ms: 0.0,
-        }));
-
         Self {
             inner,
             info,
-            path,
-            stats,
+            model_type,
+            stats: Mutex::new(ModelStats::new()),
         }
     }
 
-    #[allow(dead_code)]
     pub fn predict(&self, input: Vec<f32>) -> Result<Vec<f32>> {
         self.predict_batch(vec![input])
-            .map(|mut batch| batch.pop().unwrap())
+            .map(|mut batch| batch.pop().expect("batch of one yields one output"))
     }
 
+    /// Run inference on a batch of flattened inputs.
+    ///
+    /// This is CPU/GPU-bound and blocking; call it from a blocking context
+    /// (e.g. `tokio::task::spawn_blocking`) inside async code.
     pub fn predict_batch(&self, inputs: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>> {
-        self.predict_batch_with_timeout(inputs, None)
+        let start = Instant::now();
+        let result = self.run_batch(inputs);
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+        match &result {
+            Ok(outputs) => {
+                stats.record_success(elapsed_ms);
+                debug!(
+                    "Batch inference completed in {:.2}ms, batch size: {}, backend: {}",
+                    elapsed_ms,
+                    outputs.len(),
+                    self.info.backend
+                );
+            }
+            Err(_) => stats.record_error(),
+        }
+        result
     }
 
-    pub fn predict_batch_with_timeout(
-        &self,
-        inputs: Vec<Vec<f32>>,
-        timeout_ms: Option<u64>,
-    ) -> Result<Vec<Vec<f32>>> {
-        let start_time = std::time::Instant::now();
-
-        // Input validation
+    fn run_batch(&self, inputs: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>> {
         if inputs.is_empty() {
             return Err(ModelError::InputValidation {
                 expected: vec![1],
@@ -256,10 +270,6 @@ impl Model {
         }
 
         let batch_size = inputs.len();
-        let expected_size: usize = self.info.input_spec.shape.iter().product();
-
-        // Validate batch size limits
-        const MAX_BATCH_SIZE: usize = 1000;
         if batch_size > MAX_BATCH_SIZE {
             return Err(ModelError::InputValidation {
                 expected: vec![MAX_BATCH_SIZE],
@@ -268,190 +278,48 @@ impl Model {
             .into());
         }
 
-        // Pre-allocate flattened input vector for better memory efficiency
-        let mut flattened_input = Vec::with_capacity(batch_size * expected_size);
-
-        // Optimized input validation and preprocessing
+        let input_size: usize = self.info.input_spec.shape.iter().product();
+        let mut flattened = Vec::with_capacity(batch_size * input_size);
         for (i, input) in inputs.into_iter().enumerate() {
-            // Fast size validation
-            if input.len() != expected_size {
-                return Err(ModelError::InputValidation {
-                    expected: self.info.input_spec.shape.clone(),
-                    actual: vec![input.len()],
-                }
+            self.validate_input_shape(&input)?;
+            if let Some(j) = input.iter().position(|x| !x.is_finite()) {
+                return Err(ModelError::InvalidDataType(format!(
+                    "Invalid value at batch[{i}][{j}]: {} (not finite)",
+                    input[j]
+                ))
                 .into());
             }
-
-            // Optimized but secure validation: check for NaN/infinity using SIMD-friendly approach
-            // This is faster than individual checks but still secure
-            let has_invalid = input.iter().any(|&x| !x.is_finite());
-            if has_invalid {
-                // Find the exact location for better error reporting (only when error occurs)
-                for (j, &value) in input.iter().enumerate() {
-                    if !value.is_finite() {
-                        return Err(ModelError::InvalidDataType(format!(
-                            "Invalid value at batch[{i}][{j}]: {value} (not finite)"
-                        ))
-                        .into());
-                    }
-                }
-            }
-
-            // Direct extend without preprocessing for maximum speed
-            if self.info.input_spec.min_value.is_none() && self.info.input_spec.max_value.is_none()
-            {
-                // No preprocessing needed - direct copy
-                flattened_input.extend_from_slice(&input);
-            } else {
-                // Apply preprocessing only when needed
-                let preprocessed_input = self.preprocess_input(input)?;
-                flattened_input.extend(preprocessed_input);
-            }
+            flattened.extend_from_slice(&input);
         }
 
-        // Create input tensor
         let input_tensor = Tensor::from_data(
-            TensorData::new(flattened_input, [batch_size, expected_size]),
-            &Default::default(),
+            TensorData::new(flattened, [batch_size, input_size]),
+            self.inner.device(),
         );
 
-        // Run inference with timeout handling
-        let output_tensor = if let Some(timeout) = timeout_ms {
-            self.predict_with_timeout(input_tensor, timeout)?
-        } else {
-            self.inner.predict(input_tensor).map_err(|e| {
-                // Update error stats
-                if let Ok(mut stats) = self.stats.lock() {
-                    stats.error_count += 1;
-                    stats.inference_count += 1;
-                }
-                ModelError::InferenceFailed(e.to_string())
-            })?
-        };
+        let output = self
+            .inner
+            .predict(input_tensor)
+            .map_err(|e| ModelError::InferenceFailed(e.to_string()))?;
 
-        // Convert output tensor back to Vec<Vec<f32>> with postprocessing
-        let output_data = output_tensor.to_data();
-        let output_flat: Vec<f32> = output_data.to_vec::<f32>().unwrap();
-        let output_size = self.info.output_spec.shape.iter().product::<usize>();
-
-        let mut outputs = Vec::new();
-        for i in 0..batch_size {
-            let start_idx = i * output_size;
-            let end_idx = start_idx + output_size;
-            let raw_output = output_flat[start_idx..end_idx].to_vec();
-
-            // Apply output postprocessing
-            let processed_output = self.postprocess_output(raw_output)?;
-            outputs.push(processed_output);
+        let output_size: usize = self.info.output_spec.shape.iter().product();
+        let [out_batch, out_size] = output.dims();
+        if out_batch != batch_size || out_size != output_size {
+            return Err(ModelError::InferenceFailed(format!(
+                "model returned shape [{out_batch}, {out_size}], expected [{batch_size}, {output_size}]"
+            ))
+            .into());
         }
 
-        // Optimized stats update - skip expensive operations in hot path
-        let inference_time = start_time.elapsed().as_millis() as f64;
+        let flat: Vec<f32> = output
+            .into_data()
+            .try_to_vec::<f32>()
+            .map_err(|e| ModelError::InferenceFailed(format!("{e:?}")))?;
 
-        // Fast path: only update essential counters, skip expensive calculations
-        if let Ok(mut stats) = self.stats.try_lock() {
-            stats.inference_count += 1;
-            stats.success_count += 1;
-            stats.total_inference_time_ms += inference_time;
-
-            // Skip expensive operations for better performance
-            #[cfg(debug_assertions)]
-            {
-                stats.last_inference_time = Some(Utc::now());
-                stats.average_inference_time_ms =
-                    stats.total_inference_time_ms / stats.inference_count as f64;
-                stats.min_inference_time_ms = stats.min_inference_time_ms.min(inference_time);
-                stats.max_inference_time_ms = stats.max_inference_time_ms.max(inference_time);
-
-                // Estimate memory usage (more accurate)
-                let input_memory = batch_size * expected_size * std::mem::size_of::<f32>();
-                let output_memory = batch_size * output_size * std::mem::size_of::<f32>();
-                stats.memory_usage_bytes = (input_memory + output_memory) as u64;
-            }
-        }
-        // If lock fails, skip stats update to avoid blocking
-
-        info!(
-            "Batch inference completed in {:.2}ms, batch size: {}, output size per item: {}, backend: {}",
-            inference_time, batch_size, output_size, self.get_backend_info()
-        );
-
-        Ok(outputs)
-    }
-
-    /// Preprocess input data (normalization, scaling, etc.)
-    fn preprocess_input(&self, input: Vec<f32>) -> Result<Vec<f32>> {
-        // Apply input normalization if specified in model metadata
-        if let (Some(min_val), Some(max_val)) = (
-            self.info.input_spec.min_value,
-            self.info.input_spec.max_value,
-        ) {
-            let normalized: Vec<f32> = input
-                .into_iter()
-                .map(|x| {
-                    // Normalize to [0, 1] range
-                    (x - min_val) / (max_val - min_val)
-                })
-                .collect();
-            Ok(normalized)
-        } else {
-            Ok(input)
-        }
-    }
-
-    /// Postprocess output data (denormalization, softmax, etc.)
-    fn postprocess_output(&self, output: Vec<f32>) -> Result<Vec<f32>> {
-        // Apply output denormalization if specified in model metadata
-        if let (Some(min_val), Some(max_val)) = (
-            self.info.output_spec.min_value,
-            self.info.output_spec.max_value,
-        ) {
-            let denormalized: Vec<f32> = output
-                .into_iter()
-                .map(|x| {
-                    // Denormalize from [0, 1] range
-                    x * (max_val - min_val) + min_val
-                })
-                .collect();
-            Ok(denormalized)
-        } else {
-            Ok(output)
-        }
-    }
-
-    /// Run inference with timeout (simplified implementation)
-    fn predict_with_timeout(
-        &self,
-        input_tensor: Tensor<B, 2>,
-        timeout_ms: u64,
-    ) -> Result<Tensor<B, 2>> {
-        // For now, we'll implement a simple timeout by just running the inference
-        // and checking if it takes too long. In a production system, you'd want
-        // to use async/await or a more sophisticated timeout mechanism.
-
-        let start_time = std::time::Instant::now();
-
-        // Run the inference
-        let result = self.inner.predict(input_tensor).map_err(|e| {
-            // Update error stats
-            if let Ok(mut stats) = self.stats.lock() {
-                stats.error_count += 1;
-                stats.inference_count += 1;
-            }
-            ModelError::InferenceFailed(e.to_string())
-        })?;
-
-        // Check if we exceeded the timeout
-        let elapsed = start_time.elapsed().as_millis() as u64;
-        if elapsed > timeout_ms {
-            warn!(
-                "Inference took {}ms, which exceeds timeout of {}ms",
-                elapsed, timeout_ms
-            );
-            // Note: In a real implementation, we would have cancelled the operation
-        }
-
-        Ok(result)
+        Ok(flat
+            .chunks_exact(output_size)
+            .map(<[f32]>::to_vec)
+            .collect())
     }
 
     pub fn get_info(&self) -> &ModelInfo {
@@ -459,7 +327,7 @@ impl Model {
     }
 
     pub fn get_stats(&self) -> ModelStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn validate_input_shape(&self, input: &[f32]) -> Result<()> {
@@ -475,341 +343,179 @@ impl Model {
     }
 
     pub fn get_backend_info(&self) -> String {
-        self.inner.get_backend_info()
+        self.info.backend.clone()
     }
 
-    #[allow(dead_code)]
-    pub fn get_optimization_info(&self) -> OptimizationInfo {
-        self.inner.get_optimization_info()
+    pub fn model_type(&self) -> &'static str {
+        self.model_type
     }
 }
 
-pub fn load_model(path: &PathBuf) -> Result<Model> {
-    let config = ModelConfig {
-        backend: None,
-        enable_kernel_fusion: true,
-        enable_autotuning: true,
-    };
-    load_model_with_config(path, config)
+/// Load a file-based MLP model from `<path>.bpk` + `<path>.json` on the CPU backend
+pub fn load_model(path: &Path) -> Result<Model> {
+    load_model_with_backend(path, BackendKind::Cpu)
 }
 
-pub fn load_model_with_config(path: &PathBuf, config: ModelConfig) -> Result<Model> {
-    load_model_with_config_detailed(
-        path,
-        config.backend.as_deref(),
-        config.enable_kernel_fusion,
-        config.enable_autotuning,
-    )
-}
-
-fn load_model_with_config_detailed(
-    path: &PathBuf,
-    backend_name: Option<&str>,
-    enable_kernel_fusion: bool,
-    enable_autotuning: bool,
-) -> Result<Model> {
+/// Load a file-based MLP model from `<path>.bpk` + `<path>.json`
+pub fn load_model_with_backend(path: &Path, backend: BackendKind) -> Result<Model> {
     info!("Loading model from: {:?}", path);
-    if let Some(backend) = backend_name {
-        info!("Requested backend: {}", backend);
-    }
-    info!(
-        "Kernel fusion: {}, Autotuning: {}",
-        enable_kernel_fusion, enable_autotuning
-    );
 
-    // Check if model files exist (either .mpk, .json should exist)
-    let mpk_path = path.with_extension("mpk");
-    let json_path = path.with_extension("json");
-
-    if !mpk_path.exists() && !json_path.exists() && !path.exists() {
-        error!(
-            "Model file not found: {:?} (checked .mpk, .json, and exact path)",
-            path
-        );
-        return Err(ModelError::FileNotFound(path.clone()).into());
-    }
-
-    // Get file size (try different extensions)
-    let model_size_bytes = if path.exists() {
-        std::fs::metadata(path)
-            .map_err(|e| ModelError::LoadFailed {
-                path: path.clone(),
-                source: Box::new(e),
-            })?
-            .len()
-    } else if mpk_path.exists() {
-        std::fs::metadata(&mpk_path)
-            .map_err(|e| ModelError::LoadFailed {
-                path: mpk_path.clone(),
-                source: Box::new(e),
-            })?
-            .len()
-    } else if json_path.exists() {
-        std::fs::metadata(&json_path)
-            .map_err(|e| ModelError::LoadFailed {
-                path: json_path.clone(),
-                source: Box::new(e),
-            })?
-            .len()
-    } else {
-        0 // fallback
+    // Accept `model`, `model.bpk` or `model.json`
+    let base: PathBuf = match path.extension().and_then(|e| e.to_str()) {
+        Some("bpk") | Some("json") => path.with_extension(""),
+        _ => path.to_path_buf(),
     };
+    let weights_path = base.with_extension("bpk");
 
-    // Try to load actual Burn model first with advanced configuration
-    match try_load_burn_model_with_backend(
-        path,
+    // A `sample` path without files on disk yields a freshly initialized sample model
+    if !weights_path.exists() {
+        let is_sample = base
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.contains("sample"));
+        if is_sample {
+            info!("Creating sample MLP model");
+            let container = create_sample_model()?;
+            return Ok(Model::new(Box::new(MlpModel::new(container)), "mlp", 0));
+        }
+        return Err(ModelError::FileNotFound(weights_path).into());
+    }
+
+    let model_size_bytes = std::fs::metadata(&weights_path)
+        .map_err(|e| ModelError::LoadFailed {
+            path: weights_path.clone(),
+            source: Box::new(e),
+        })?
+        .len();
+
+    let container = BurnModelContainer::load(&base, backend)?;
+    Ok(Model::new(
+        Box::new(MlpModel::new(container)),
+        "mlp",
         model_size_bytes,
-        backend_name,
-        enable_kernel_fusion,
-        enable_autotuning,
-    ) {
-        Ok(model) => {
-            info!(
-                "Successfully loaded Burn model: {} with backend: {}",
-                model.get_info().name,
-                model.get_backend_info()
-            );
-            Ok(model)
-        }
-        Err(e) => {
-            warn!(
-                "Failed to load Burn model ({}), falling back to dummy model",
-                e
-            );
-            load_dummy_model(path, model_size_bytes)
-        }
-    }
+    ))
 }
 
-#[allow(dead_code)]
-fn try_load_burn_model(path: &PathBuf, model_size_bytes: u64) -> Result<Model> {
-    try_load_burn_model_with_backend(path, model_size_bytes, None, true, true)
-}
-
-fn try_load_burn_model_with_backend(
-    path: &PathBuf,
-    model_size_bytes: u64,
-    backend_name: Option<&str>,
-    enable_kernel_fusion: bool,
-    enable_autotuning: bool,
-) -> Result<Model> {
-    info!("Attempting to load actual Burn model from: {:?}", path);
-
-    // Check if this is a model file with corresponding .json metadata
-    let model_path = if path.extension().and_then(|s| s.to_str()) == Some("mpk") {
-        path.clone()
-    } else {
-        path.with_extension("mpk")
-    };
-
-    let json_path = path.with_extension("json");
-
-    if model_path.exists() && json_path.exists() {
-        // Load the actual Burn model with advanced backend support
-        match BurnModelContainer::load_with_backend(
-            path.with_extension(""),
-            backend_name,
-            enable_kernel_fusion,
-            enable_autotuning,
-        ) {
-            Ok(container) => {
-                info!(
-                    "Loaded Burn model container: {} with backend: {}",
-                    container.metadata.name,
-                    container.get_backend_info()
-                );
-                let real_model = RealBurnModel::new(container);
-                let model = Model::new(Box::new(real_model), path.clone(), model_size_bytes);
-                return Ok(model);
-            }
-            Err(e) => {
-                error!("Failed to load Burn model container: {}", e);
-                return Err(e);
-            }
-        }
-    }
-
-    // If no proper .mpk/.json pair found, try to create a sample model
-    if path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .contains("sample")
-    {
-        info!("Creating sample Burn model");
-        let container = create_sample_model()?;
-        let real_model = RealBurnModel::new(container);
-        let model = Model::new(Box::new(real_model), path.clone(), model_size_bytes);
-        return Ok(model);
-    }
-
-    Err(ModelError::InvalidFormat("Not a valid Burn model file".to_string()).into())
-}
-
-fn load_dummy_model(path: &Path, model_size_bytes: u64) -> Result<Model> {
-    warn!("Loading dummy model as fallback");
-
-    let model_name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-
-    let dummy_model = DummyModel::new(
-        model_name,
-        vec![784], // Example: MNIST input shape (28*28)
-        vec![10],  // Example: 10 classes output
-    );
-
-    let model = Model::new(Box::new(dummy_model), path.to_path_buf(), model_size_bytes);
-
-    info!("Dummy model loaded successfully: {}", model.get_info().name);
-    Ok(model)
-}
-
-/// Load a built-in model by name
+/// Load a built-in (compiled-in) model by name
 pub fn load_built_in_model(model_name: &str) -> Result<Model> {
-    info!("Loading built-in model: {}", model_name);
-
-    // Parse the built-in model name
-    let built_in_model = BuiltInModel::from_name(model_name)?;
-
-    // Create the model instance
-    match built_in_model.create_model() {
-        Ok(burn_model) => {
-            info!(
-                "Successfully loaded built-in model: {} with backend: {}",
-                burn_model.get_name(),
-                burn_model.get_backend_info()
-            );
-
-            // Create a dummy path for built-in models
-            let model_path = PathBuf::from(format!("built-in:{model_name}"));
-            let model = Model::new(burn_model, model_path, 0);
-            Ok(model)
-        }
-        Err(e) => {
-            warn!(
-                "Failed to load built-in model '{}' ({}), falling back to dummy model",
-                model_name, e
-            );
-
-            // Create fallback dummy model with appropriate shapes for the built-in model
-            let input_shape = built_in_model.input_shape();
-            let output_shape = built_in_model.output_shape();
-
-            let dummy_model = DummyModel::new(model_name.to_string(), input_shape, output_shape);
-
-            let model_path = PathBuf::from(format!("dummy:{model_name}"));
-            let model = Model::new(Box::new(dummy_model), model_path, 0);
-
-            info!("Dummy model loaded as fallback for: {}", model_name);
-            Ok(model)
-        }
-    }
+    load_built_in_model_with_backend(model_name, BackendKind::Cpu)
 }
 
-/// Load model with support for both built-in models and file-based models
-pub fn load_model_by_name_or_path(name_or_path: &str, config: ModelConfig) -> Result<Model> {
-    // First, try to load as a built-in model
-    if let Ok(model) = load_built_in_model(name_or_path) {
-        return Ok(model);
-    }
-
-    // If not a built-in model, try to load as a file path
-    let path = PathBuf::from(name_or_path);
-    load_model_with_config(&path, config)
+/// Load a built-in (compiled-in) model by name on the given backend
+pub fn load_built_in_model_with_backend(model_name: &str, backend: BackendKind) -> Result<Model> {
+    info!(
+        "Loading built-in model: {} ({} backend)",
+        model_name, backend
+    );
+    let built_in = BuiltInModel::from_name(model_name)?;
+    let inner = built_in.create_model(backend)?;
+    Ok(Model::new(inner, "onnx", 0))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn get_test_model() -> Model {
-        // Use dummy model for testing
-        let model_path = PathBuf::from("test_model.mpk");
-        let dummy_model = DummyModel::new("test".to_string(), vec![784], vec![10]);
-        Model::new(Box::new(dummy_model), model_path, 0)
-    }
-
-    #[test]
-    fn test_model_loading_success() {
-        let model = get_test_model();
-        let info = model.get_info();
-
-        assert_eq!(info.model_type, "burn");
-        // Backend should be "dummy" for test model
-        assert_eq!(info.backend, "dummy");
-        assert_eq!(info.input_spec.shape, vec![784]);
-        assert_eq!(info.output_spec.shape, vec![10]);
-    }
-
-    #[test]
-    fn test_model_loading_invalid_path() {
-        let path = PathBuf::from("nonexistent_model.mpk");
-        let result = load_model(&path);
-        assert!(result.is_err());
-
-        match result.unwrap_err() {
-            crate::error::FurnaceError::Model(ModelError::FileNotFound(_)) => {}
-            _ => panic!("Expected FileNotFound error"),
-        }
-    }
-
-    #[test]
-    fn test_inference_with_valid_input() {
-        let model = get_test_model();
-
-        let input = vec![0.5; 784]; // Valid input size
-        let result = model.predict(input);
-        assert!(result.is_ok());
-
-        let output = result.unwrap();
-        assert_eq!(output.len(), 10); // Expected output size
-    }
-
-    #[test]
-    fn test_inference_with_invalid_shape() {
-        let model = get_test_model();
-
-        let input = vec![0.5; 100]; // Invalid input size
-        let result = model.predict(input);
-        assert!(result.is_err());
-
-        match result.unwrap_err() {
-            crate::error::FurnaceError::Model(ModelError::InputValidation { .. }) => {}
-            _ => panic!("Expected InputValidation error"),
-        }
+        let dummy = DummyModel::new("test".to_string(), vec![784], vec![10]);
+        Model::new(Box::new(dummy), "dummy", 0)
     }
 
     #[test]
     fn test_model_info() {
         let model = get_test_model();
-
         let info = model.get_info();
+        assert_eq!(info.model_type, "dummy");
+        assert_eq!(info.backend, "cpu");
         assert_eq!(info.input_spec.shape, vec![784]);
         assert_eq!(info.output_spec.shape, vec![10]);
         assert_eq!(info.input_spec.dtype, "float32");
-        assert_eq!(info.output_spec.dtype, "float32");
+    }
+
+    #[test]
+    fn test_model_loading_invalid_path() {
+        let result = load_model(Path::new("nonexistent_model"));
+        assert!(matches!(
+            result,
+            Err(crate::error::FurnaceError::Model(ModelError::FileNotFound(
+                _
+            )))
+        ));
+    }
+
+    #[test]
+    fn test_inference_with_valid_input() {
+        let model = get_test_model();
+        let output = model.predict(vec![0.5; 784]).unwrap();
+        assert_eq!(output.len(), 10);
+    }
+
+    #[test]
+    fn test_batch_inference_splits_outputs() {
+        let model = get_test_model();
+        let outputs = model.predict_batch(vec![vec![0.5; 784]; 3]).unwrap();
+        assert_eq!(outputs.len(), 3);
+        assert!(outputs.iter().all(|o| o.len() == 10));
+    }
+
+    #[test]
+    fn test_inference_with_invalid_shape() {
+        let model = get_test_model();
+        let result = model.predict(vec![0.5; 100]);
+        assert!(matches!(
+            result,
+            Err(crate::error::FurnaceError::Model(
+                ModelError::InputValidation { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_inference_rejects_non_finite() {
+        let model = get_test_model();
+        let mut input = vec![0.5; 784];
+        input[42] = f32::NAN;
+        assert!(matches!(
+            model.predict(input),
+            Err(crate::error::FurnaceError::Model(
+                ModelError::InvalidDataType(_)
+            ))
+        ));
     }
 
     #[test]
     fn test_model_stats() {
         let model = get_test_model();
-
         let stats = model.get_stats();
         assert_eq!(stats.inference_count, 0);
-        assert_eq!(stats.total_inference_time_ms, 0.0);
         assert!(stats.last_inference_time.is_none());
 
-        // Run inference to update stats
-        let input = vec![0.5; 784];
-        let _ = model.predict(input).unwrap();
+        model.predict(vec![0.5; 784]).unwrap();
+        let _ = model.predict(vec![0.5; 1]);
 
-        let updated_stats = model.get_stats();
-        assert_eq!(updated_stats.inference_count, 1);
-        assert!(updated_stats.total_inference_time_ms >= 0.0);
-        assert!(updated_stats.last_inference_time.is_some());
+        let stats = model.get_stats();
+        assert_eq!(stats.inference_count, 2);
+        assert_eq!(stats.success_count, 1);
+        assert_eq!(stats.error_count, 1);
+        assert!(stats.last_inference_time.is_some());
+        assert!(stats.min_inference_time_ms.is_some());
+    }
+
+    #[test]
+    fn test_real_mlp_inference_is_not_constant() {
+        let model = load_model(Path::new("sample_model")).unwrap();
+        let out = model.predict(vec![0.3; 784]).unwrap();
+        assert_eq!(out.len(), 10);
+        assert!(out.iter().any(|&v| v != out[0]));
+    }
+
+    #[cfg(model_resnet18)]
+    #[test]
+    fn test_resnet18_inference() {
+        let model = load_built_in_model("resnet18").unwrap();
+        assert_eq!(model.get_info().input_spec.shape, vec![3, 224, 224]);
+        let out = model.predict(vec![0.5; 3 * 224 * 224]).unwrap();
+        assert_eq!(out.len(), 1000);
+        assert!(out.iter().all(|v| v.is_finite()));
     }
 }

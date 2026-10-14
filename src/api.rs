@@ -1,35 +1,31 @@
 use axum::http::{
-    header::{X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS, X_XSS_PROTECTION},
     HeaderValue,
+    header::{X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS},
 };
 use axum::{
-    extract::State,
+    Router,
+    extract::{DefaultBodyLimit, State, rejection::JsonRejection},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
     routing::{get, post},
-    Router,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 use tokio::signal;
+use tokio::sync::Semaphore;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{error, info, warn};
 
 use crate::error::{ApiError, FurnaceError, ModelError, Result};
-use crate::model::{Model, ModelInfo, ModelStats};
+use crate::model::{MAX_BATCH_SIZE, Model, ModelInfo, ModelStats};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PredictRequest {
     #[serde(flatten)]
     pub input_data: PredictInputData,
-    #[serde(default)]
-    pub batch_size: Option<usize>,
-    #[serde(default)]
-    pub reshape: Option<Vec<usize>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -60,6 +56,7 @@ pub enum PredictOutputData {
 pub struct HealthResponse {
     pub status: String,
     pub model_loaded: bool,
+    pub backend: String,
     pub uptime_seconds: u64,
     pub timestamp: String,
 }
@@ -79,64 +76,66 @@ pub struct ErrorResponse {
     pub timestamp: String,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Serialize)]
-pub struct ApiResponse<T> {
-    pub data: Option<T>,
-    pub status: String,
-    pub message: Option<String>,
-    pub timestamp: String,
-}
-
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
-    pub max_concurrent_requests: Option<usize>,
+    /// Maximum number of inferences running at once; extra requests get 503
+    pub max_concurrent_requests: usize,
+    /// Maximum request body size in bytes
+    pub max_body_bytes: usize,
+    /// Per-request inference timeout; exceeded requests get 504
+    pub request_timeout: Option<Duration>,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 3000,
+            max_concurrent_requests: 100,
+            // A single 224x224 RGB image is ~150k floats, i.e. 1-3 MB of JSON
+            max_body_bytes: 100 * 1024 * 1024,
+            request_timeout: None,
+        }
+    }
 }
 
 type AppState = Arc<ServerState>;
 
 struct ServerState {
-    model: Model,
+    model: Arc<Model>,
     start_time: SystemTime,
+    inference_slots: Arc<Semaphore>,
+    request_timeout: Option<Duration>,
 }
 
 impl ServerState {
-    fn new(model: Model) -> Self {
-        Self {
-            model,
-            start_time: SystemTime::now(),
-        }
-    }
-
     fn uptime_seconds(&self) -> u64 {
         self.start_time.elapsed().unwrap_or_default().as_secs()
     }
 }
 
-pub async fn start_server(host: &str, port: u16, model: Model) -> Result<()> {
-    let config = ServerConfig {
-        host: host.to_string(),
-        port,
-        max_concurrent_requests: None,
-    };
-    start_server_with_config(config, model).await
-}
-
-pub async fn start_server_with_config(config: ServerConfig, model: Model) -> Result<()> {
-    let app_state = Arc::new(ServerState::new(model));
+/// Build the application router with all middleware applied
+pub fn router(model: Model, config: &ServerConfig) -> Router {
+    let state = Arc::new(ServerState {
+        model: Arc::new(model),
+        start_time: SystemTime::now(),
+        inference_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        request_timeout: config.request_timeout,
+    });
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let mut app = Router::new()
+    Router::new()
         .route("/healthz", get(health_check))
+        .route("/health", get(health_check))
         .route("/predict", post(predict))
         .route("/model/info", get(model_info))
-        .layer(RequestBodyLimitLayer::new(100 * 1024 * 1024)) // 100MB limit
+        .layer(DefaultBodyLimit::max(config.max_body_bytes))
         .layer(SetResponseHeaderLayer::overriding(
             X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
@@ -145,19 +144,25 @@ pub async fn start_server_with_config(config: ServerConfig, model: Model) -> Res
             X_FRAME_OPTIONS,
             HeaderValue::from_static("DENY"),
         ))
-        .layer(SetResponseHeaderLayer::overriding(
-            X_XSS_PROTECTION,
-            HeaderValue::from_static("1; mode=block"),
-        ))
         .layer(cors)
-        .with_state(app_state);
+        .with_state(state)
+}
 
-    // Add concurrency limiting if specified
-    if let Some(max_concurrent) = config.max_concurrent_requests {
-        use tower::limit::ConcurrencyLimitLayer;
-        app = app.layer(ConcurrencyLimitLayer::new(max_concurrent));
-        info!("🚦 Concurrency limit set to {} requests", max_concurrent);
-    }
+pub async fn start_server(host: &str, port: u16, model: Model) -> Result<()> {
+    let config = ServerConfig {
+        host: host.to_string(),
+        port,
+        ..ServerConfig::default()
+    };
+    start_server_with_config(config, model).await
+}
+
+pub async fn start_server_with_config(config: ServerConfig, model: Model) -> Result<()> {
+    let app = router(model, &config);
+    info!(
+        "🚦 Concurrency limit set to {} inferences",
+        config.max_concurrent_requests
+    );
 
     let bind_addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&bind_addr)
@@ -166,19 +171,12 @@ pub async fn start_server_with_config(config: ServerConfig, model: Model) -> Res
 
     info!("✅ Server running on http://{}", bind_addr);
 
-    // Set up graceful shutdown
-    let server = axum::serve(listener, app);
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .map_err(|e| ApiError::ServerStartup(format!("Server error: {e}")))?;
 
-    // Handle shutdown signals
-    tokio::select! {
-        result = server => {
-            result.map_err(|e| ApiError::ServerStartup(format!("Server error: {e}")))?;
-        }
-        _ = shutdown_signal() => {
-            info!("🛑 Shutdown signal received, stopping server gracefully");
-        }
-    }
-
+    info!("🛑 Server stopped gracefully");
     Ok(())
 }
 
@@ -201,226 +199,193 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {
-            info!("Received Ctrl+C signal");
-        },
-        _ = terminate => {
-            info!("Received SIGTERM signal");
-        },
+        _ = ctrl_c => info!("Received Ctrl+C signal"),
+        _ = terminate => info!("Received SIGTERM signal"),
     }
 }
 
 async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
-    let response = HealthResponse {
+    Json(HealthResponse {
         status: "healthy".to_string(),
         model_loaded: true,
+        backend: state.model.get_backend_info(),
         uptime_seconds: state.uptime_seconds(),
         timestamp: Utc::now().to_rfc3339(),
-    };
-
-    Json(response)
+    })
 }
 
-async fn predict(State(state): State<AppState>, Json(payload): Json<PredictRequest>) -> Response {
-    let start_time = std::time::Instant::now();
+async fn predict(
+    State(state): State<AppState>,
+    payload: std::result::Result<Json<PredictRequest>, JsonRejection>,
+) -> Response {
+    let start_time = Instant::now();
 
-    let input_count = match &payload.input_data {
-        PredictInputData::Single { input } => input.len(),
-        PredictInputData::Batch { inputs } => inputs.len(),
+    let Json(payload) = match payload {
+        Ok(p) => p,
+        Err(rejection) => {
+            warn!("Rejected request body: {}", rejection.body_text());
+            return create_error_response(
+                rejection.status(),
+                "INVALID_REQUEST",
+                &rejection.body_text(),
+                None,
+            );
+        }
     };
 
-    // Security: Log prediction requests for monitoring
-    info!(
-        "Received prediction request with {} inputs, batch_size: {:?}",
-        input_count, payload.batch_size
-    );
+    let (inputs, single) = match payload.input_data {
+        PredictInputData::Single { input } => (vec![input], true),
+        PredictInputData::Batch { inputs } => (inputs, false),
+    };
 
-    // Security: Validate input data for potential attacks
-    if let Err(e) = validate_input_security(&payload.input_data) {
-        warn!("Security validation failed: {}", e);
-        return create_error_response(
-            StatusCode::BAD_REQUEST,
-            "SECURITY_VALIDATION_FAILED",
-            &e,
-            None,
-        );
+    if let Err(response) = validate_inputs(&state.model, &inputs) {
+        return *response;
     }
+    let batch_size = inputs.len();
 
-    // Extract inputs based on request type
-    let (inputs, batch_size) = match &payload.input_data {
-        PredictInputData::Single { input } => {
-            if input.is_empty() {
-                warn!("Empty input received");
-                return create_error_response(
-                    StatusCode::BAD_REQUEST,
-                    "INVALID_INPUT",
-                    "Input cannot be empty",
-                    None,
-                );
-            }
-
-            // Validate input shape against model requirements
-            if let Err(e) = state.model.validate_input_shape(input) {
-                warn!("Input validation failed: {}", e);
-                return create_error_response(
-                    StatusCode::BAD_REQUEST,
-                    "INPUT_VALIDATION_FAILED",
-                    &e.to_string(),
-                    Some(serde_json::json!({
-                        "expected_shape": state.model.get_info().input_spec.shape,
-                        "received_size": input.len()
-                    })),
-                );
-            }
-
-            (vec![input.clone()], 1)
-        }
-        PredictInputData::Batch { inputs } => {
-            if inputs.is_empty() {
-                warn!("Empty batch received");
-                return create_error_response(
-                    StatusCode::BAD_REQUEST,
-                    "INVALID_INPUT",
-                    "Batch cannot be empty",
-                    None,
-                );
-            }
-
-            // Validate all inputs in the batch
-            for (i, input) in inputs.iter().enumerate() {
-                if let Err(e) = state.model.validate_input_shape(input) {
-                    warn!("Input validation failed for batch item {}: {}", i, e);
-                    return create_error_response(
-                        StatusCode::BAD_REQUEST,
-                        "INPUT_VALIDATION_FAILED",
-                        &format!("Batch item {i} validation failed: {e}"),
-                        Some(serde_json::json!({
-                            "expected_shape": state.model.get_info().input_spec.shape,
-                            "received_size": input.len(),
-                            "batch_item": i
-                        })),
-                    );
-                }
-            }
-
-            (inputs.clone(), inputs.len())
+    // Backpressure: reject immediately instead of queueing when all slots are busy
+    let permit = match state.inference_slots.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            warn!("All inference slots busy, rejecting request");
+            return create_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVER_BUSY",
+                "Too many concurrent requests, retry later",
+                None,
+            );
         }
     };
 
-    // Run inference
-    match state.model.predict_batch(inputs) {
-        Ok(outputs) => {
-            let inference_time = start_time.elapsed().as_millis() as f64;
+    // Inference is CPU/GPU-bound; keep it off the async runtime threads
+    let model = state.model.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        model.predict_batch(inputs)
+    });
 
-            let output_data = if batch_size == 1 {
+    let joined = match state.request_timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, task).await {
+            Ok(joined) => joined,
+            Err(_) => {
+                warn!("Inference exceeded timeout of {:?}", timeout);
+                return create_error_response(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "INFERENCE_TIMEOUT",
+                    &format!("Inference exceeded timeout of {}ms", timeout.as_millis()),
+                    None,
+                );
+            }
+        },
+        None => task.await,
+    };
+
+    let result = match joined {
+        Ok(result) => result,
+        Err(e) => {
+            error!("Inference task failed: {}", e);
+            return create_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INFERENCE_FAILED",
+                "Inference task panicked",
+                None,
+            );
+        }
+    };
+
+    match result {
+        Ok(mut outputs) => {
+            let inference_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+            let output_data = if single {
                 PredictOutputData::Single {
-                    output: outputs[0].clone(),
+                    output: outputs.pop().unwrap_or_default(),
                 }
             } else {
                 PredictOutputData::Batch { outputs }
             };
 
-            let response = PredictResponse {
-                output_data,
-                status: "success".to_string(),
-                inference_time_ms: inference_time,
-                timestamp: Utc::now().to_rfc3339(),
-                batch_size,
-            };
-
             info!(
-                "Prediction completed successfully in {:.2}ms, batch size: {}",
-                inference_time, batch_size
+                "Prediction completed in {:.2}ms, batch size: {}",
+                inference_time_ms, batch_size
             );
-            (StatusCode::OK, Json(response)).into_response()
+            (
+                StatusCode::OK,
+                Json(PredictResponse {
+                    output_data,
+                    status: "success".to_string(),
+                    inference_time_ms,
+                    timestamp: Utc::now().to_rfc3339(),
+                    batch_size,
+                }),
+            )
+                .into_response()
         }
         Err(e) => {
             error!("Prediction error: {}", e);
-
             let (status_code, error_code) = match &e {
                 FurnaceError::Model(ModelError::InputValidation { .. }) => {
-                    (StatusCode::BAD_REQUEST, "INPUT_VALIDATION_ERROR")
+                    (StatusCode::BAD_REQUEST, "INPUT_VALIDATION_FAILED")
+                }
+                FurnaceError::Model(ModelError::InvalidDataType(_)) => {
+                    (StatusCode::BAD_REQUEST, "INVALID_INPUT_VALUE")
                 }
                 FurnaceError::Model(ModelError::InferenceFailed(_)) => {
                     (StatusCode::INTERNAL_SERVER_ERROR, "INFERENCE_FAILED")
                 }
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
             };
-
             create_error_response(status_code, error_code, &e.to_string(), None)
         }
     }
 }
 
-async fn model_info(State(state): State<AppState>) -> Json<ModelInfoResponse> {
-    let response = ModelInfoResponse {
-        model_info: state.model.get_info().clone(),
-        stats: state.model.get_stats(),
-        timestamp: Utc::now().to_rfc3339(),
-    };
+/// Cheap request-level checks done before taking an inference slot
+fn validate_inputs(model: &Model, inputs: &[Vec<f32>]) -> std::result::Result<(), Box<Response>> {
+    if inputs.is_empty() || inputs.iter().any(Vec::is_empty) {
+        return Err(Box::new(create_error_response(
+            StatusCode::BAD_REQUEST,
+            "INVALID_INPUT",
+            "Input cannot be empty",
+            None,
+        )));
+    }
 
-    Json(response)
-}
+    if inputs.len() > MAX_BATCH_SIZE {
+        return Err(Box::new(create_error_response(
+            StatusCode::BAD_REQUEST,
+            "BATCH_TOO_LARGE",
+            &format!(
+                "Batch size {} exceeds maximum allowed batch size {MAX_BATCH_SIZE}",
+                inputs.len()
+            ),
+            None,
+        )));
+    }
 
-/// Security validation for input data
-fn validate_input_security(input_data: &PredictInputData) -> std::result::Result<(), String> {
-    const MAX_INPUT_SIZE: usize = 10_000_000; // 10M elements max
-    const MAX_BATCH_SIZE: usize = 1000; // 1000 items max per batch
-
-    match input_data {
-        PredictInputData::Single { input } => {
-            // Check for excessively large inputs
-            if input.len() > MAX_INPUT_SIZE {
-                return Err(format!(
-                    "Input size {} exceeds maximum allowed size {}",
-                    input.len(),
-                    MAX_INPUT_SIZE
-                ));
-            }
-
-            // Check for NaN or infinite values that could cause issues
-            for (i, &value) in input.iter().enumerate() {
-                if !value.is_finite() {
-                    return Err(format!(
-                        "Invalid value at index {i}: {value} (NaN or infinite values not allowed)"
-                    ));
-                }
-            }
-        }
-        PredictInputData::Batch { inputs } => {
-            // Check batch size limits
-            if inputs.len() > MAX_BATCH_SIZE {
-                return Err(format!(
-                    "Batch size {} exceeds maximum allowed batch size {}",
-                    inputs.len(),
-                    MAX_BATCH_SIZE
-                ));
-            }
-
-            // Validate each input in the batch
-            for (batch_idx, input) in inputs.iter().enumerate() {
-                if input.len() > MAX_INPUT_SIZE {
-                    return Err(format!(
-                        "Batch item {} size {} exceeds maximum allowed size {}",
-                        batch_idx,
-                        input.len(),
-                        MAX_INPUT_SIZE
-                    ));
-                }
-
-                // Check for NaN or infinite values
-                for (i, &value) in input.iter().enumerate() {
-                    if !value.is_finite() {
-                        return Err(format!(
-                            "Invalid value in batch item {batch_idx} at index {i}: {value} (NaN or infinite values not allowed)"
-                        ));
-                    }
-                }
-            }
+    for (i, input) in inputs.iter().enumerate() {
+        if let Err(e) = model.validate_input_shape(input) {
+            return Err(Box::new(create_error_response(
+                StatusCode::BAD_REQUEST,
+                "INPUT_VALIDATION_FAILED",
+                &e.to_string(),
+                Some(serde_json::json!({
+                    "expected_shape": model.get_info().input_spec.shape,
+                    "received_size": input.len(),
+                    "batch_item": i
+                })),
+            )));
         }
     }
 
     Ok(())
+}
+
+async fn model_info(State(state): State<AppState>) -> Json<ModelInfoResponse> {
+    Json(ModelInfoResponse {
+        model_info: state.model.get_info().clone(),
+        stats: state.model.get_stats(),
+        timestamp: Utc::now().to_rfc3339(),
+    })
 }
 
 fn create_error_response(
@@ -442,213 +407,166 @@ fn create_error_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
-    };
-    use std::path::PathBuf;
+    use crate::model::DummyModel;
+    use axum::{body::Body, http::Request};
     use tower::util::ServiceExt;
 
-    /// Ensure a test model is available for testing
-    async fn ensure_test_model() -> PathBuf {
-        let test_model_path = PathBuf::from("test_model.onnx");
-
-        // If model already exists, return it
-        if test_model_path.exists() {
-            return test_model_path;
-        }
-
-        // Try to download a small ONNX model for testing
-        if let Ok(response) = reqwest::get("https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx").await {
-            if response.status().is_success() {
-                if let Ok(bytes) = response.bytes().await {
-                    if std::fs::write(&test_model_path, bytes).is_ok() {
-                        println!("Downloaded test ONNX model for testing");
-                        return test_model_path;
-                    }
-                }
-            }
-        }
-
-        // If download fails, try the mpk from examples
-        let mpk_path = PathBuf::from("test_model.mpk");
-        if tokio::process::Command::new("cargo")
-            .args(["run", "--example", "basic_mnist_create"])
-            .status()
-            .await
-            .is_ok()
-        {
-            let example_model = PathBuf::from("examples/basic_mnist/model.mpk");
-            if example_model.exists() && std::fs::copy(&example_model, &mpk_path).is_ok() {
-                return mpk_path;
-            }
-        }
-
-        // If all else fails, return the ONNX path anyway (will trigger dummy model fallback)
-        test_model_path
+    fn dummy_model() -> Model {
+        let dummy = DummyModel::new("test_model".to_string(), vec![784], vec![10]);
+        Model::new(Box::new(dummy), "dummy", 0)
     }
 
-    async fn create_test_app() -> Router {
-        // Try to use an actual model file for testing, fallback to dummy
-        let model_path = ensure_test_model().await;
-        let model = crate::model::load_model(&model_path).unwrap_or_else(|_| {
-            // Fallback to dummy model if load fails
-            let dummy_model =
-                crate::model::DummyModel::new("test_model".to_string(), vec![784], vec![10]);
-            crate::model::Model::new(Box::new(dummy_model), model_path.clone(), 0)
-        });
-        let state = Arc::new(ServerState::new(model));
-
-        Router::new()
-            .route("/healthz", get(health_check))
-            .route("/predict", post(predict))
-            .route("/model/info", get(model_info))
-            .with_state(state)
+    fn test_app() -> Router {
+        router(dummy_model(), &ServerConfig::default())
     }
 
-    #[tokio::test]
-    async fn test_health_check_endpoint() {
-        let app = create_test_app().await;
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/healthz")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
+    async fn send(app: Router, request: Request<Body>) -> (StatusCode, axum::body::Bytes) {
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let health_response: HealthResponse = serde_json::from_slice(&body).unwrap();
+        (status, body)
+    }
 
-        assert_eq!(health_response.status, "healthy");
-        assert!(health_response.model_loaded);
-        // uptime_seconds is u64, so it's always >= 0
-        assert!(health_response.uptime_seconds < u64::MAX);
+    fn predict_request(body: String) -> Request<Body> {
+        Request::builder()
+            .uri("/predict")
+            .method("POST")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_health_check_endpoints() {
+        for path in ["/healthz", "/health"] {
+            let request = Request::builder().uri(path).body(Body::empty()).unwrap();
+            let (status, body) = send(test_app(), request).await;
+            assert_eq!(status, StatusCode::OK);
+            let health: HealthResponse = serde_json::from_slice(&body).unwrap();
+            assert_eq!(health.status, "healthy");
+            assert!(health.model_loaded);
+            assert_eq!(health.backend, "cpu");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_security_headers_present() {
+        let request = Request::builder()
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap();
+        let response = test_app().oneshot(request).await.unwrap();
+        assert_eq!(response.headers()[X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert_eq!(response.headers()[X_FRAME_OPTIONS], "DENY");
     }
 
     #[tokio::test]
     async fn test_model_info_endpoint() {
-        let app = create_test_app().await;
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/model/info")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
+        let request = Request::builder()
+            .uri("/model/info")
+            .body(Body::empty())
             .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let info_response: ModelInfoResponse = serde_json::from_slice(&body).unwrap();
-
-        assert_eq!(info_response.model_info.input_spec.shape, vec![784]);
-        assert_eq!(info_response.model_info.output_spec.shape, vec![10]);
-        assert_eq!(info_response.model_info.model_type, "burn");
+        let (status, body) = send(test_app(), request).await;
+        assert_eq!(status, StatusCode::OK);
+        let info: ModelInfoResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(info.model_info.input_spec.shape, vec![784]);
+        assert_eq!(info.model_info.output_spec.shape, vec![10]);
+        assert_eq!(info.model_info.model_type, "dummy");
     }
 
     #[tokio::test]
-    async fn test_predict_endpoint_success() {
-        let app = create_test_app().await;
-
-        let predict_request = PredictRequest {
-            input_data: PredictInputData::Single {
-                input: vec![0.5; 784],
-            },
-            batch_size: None,
-            reshape: None,
-        };
-
-        let request = Request::builder()
-            .uri("/predict")
-            .method("POST")
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&predict_request).unwrap()))
-            .unwrap();
-
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let predict_response: PredictResponse = serde_json::from_slice(&body).unwrap();
-
-        assert_eq!(predict_response.status, "success");
-        match predict_response.output_data {
+    async fn test_predict_single() {
+        let body = serde_json::json!({ "input": vec![0.5; 784] }).to_string();
+        let (status, body) = send(test_app(), predict_request(body)).await;
+        assert_eq!(status, StatusCode::OK);
+        let response: PredictResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response.status, "success");
+        assert_eq!(response.batch_size, 1);
+        match response.output_data {
             PredictOutputData::Single { output } => assert_eq!(output.len(), 10),
             _ => panic!("Expected single output"),
         }
-        assert!(predict_response.inference_time_ms >= 0.0);
     }
 
     #[tokio::test]
-    async fn test_predict_endpoint_invalid_input() {
-        let app = create_test_app().await;
-
-        let predict_request = PredictRequest {
-            input_data: PredictInputData::Single {
-                input: vec![0.5; 100],
-            }, // Invalid size
-            batch_size: None,
-            reshape: None,
-        };
-
-        let request = Request::builder()
-            .uri("/predict")
-            .method("POST")
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&predict_request).unwrap()))
-            .unwrap();
-
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let error_response: ErrorResponse = serde_json::from_slice(&body).unwrap();
-
-        assert_eq!(error_response.code, "INPUT_VALIDATION_FAILED");
+    async fn test_predict_batch() {
+        let body = serde_json::json!({ "inputs": vec![vec![0.5; 784]; 3] }).to_string();
+        let (status, body) = send(test_app(), predict_request(body)).await;
+        assert_eq!(status, StatusCode::OK);
+        let response: PredictResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response.batch_size, 3);
+        match response.output_data {
+            PredictOutputData::Batch { outputs } => assert_eq!(outputs.len(), 3),
+            _ => panic!("Expected batch output"),
+        }
     }
 
     #[tokio::test]
-    async fn test_predict_endpoint_empty_input() {
-        let app = create_test_app().await;
+    async fn test_predict_accepts_body_larger_than_axum_default() {
+        // ResNet-sized payloads exceed axum's 2 MB default body limit
+        let dummy = DummyModel::new("big".to_string(), vec![3, 224, 224], vec![1000]);
+        let app = router(
+            Model::new(Box::new(dummy), "dummy", 0),
+            &ServerConfig::default(),
+        );
+        let body =
+            serde_json::json!({ "inputs": vec![vec![0.123_456_7f32; 150_528]; 2] }).to_string();
+        assert!(body.len() > 2 * 1024 * 1024);
+        let (status, _) = send(app, predict_request(body)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
 
-        let predict_request = PredictRequest {
-            input_data: PredictInputData::Single { input: vec![] }, // Empty input
-            batch_size: None,
-            reshape: None,
+    #[tokio::test]
+    async fn test_predict_body_limit_enforced() {
+        let config = ServerConfig {
+            max_body_bytes: 1024,
+            ..ServerConfig::default()
         };
+        let app = router(dummy_model(), &config);
+        let body = serde_json::json!({ "input": vec![0.5; 784] }).to_string();
+        let (status, _) = send(app, predict_request(body)).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
 
-        let request = Request::builder()
-            .uri("/predict")
-            .method("POST")
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&predict_request).unwrap()))
-            .unwrap();
+    #[tokio::test]
+    async fn test_predict_invalid_shape() {
+        let body = serde_json::json!({ "input": vec![0.5; 100] }).to_string();
+        let (status, body) = send(test_app(), predict_request(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.code, "INPUT_VALIDATION_FAILED");
+    }
 
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    #[tokio::test]
+    async fn test_predict_empty_input() {
+        let body = serde_json::json!({ "input": [] }).to_string();
+        let (status, body) = send(test_app(), predict_request(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.code, "INVALID_INPUT");
+    }
 
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let error_response: ErrorResponse = serde_json::from_slice(&body).unwrap();
+    #[tokio::test]
+    async fn test_predict_malformed_json() {
+        let (status, body) = send(test_app(), predict_request("{not json".to_string())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.code, "INVALID_REQUEST");
+    }
 
-        assert_eq!(error_response.code, "INVALID_INPUT");
+    #[tokio::test]
+    async fn test_predict_rejects_when_saturated() {
+        let config = ServerConfig {
+            max_concurrent_requests: 0,
+            ..ServerConfig::default()
+        };
+        let app = router(dummy_model(), &config);
+        let body = serde_json::json!({ "input": vec![0.5; 784] }).to_string();
+        let (status, body) = send(app, predict_request(body)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.code, "SERVER_BUSY");
     }
 }

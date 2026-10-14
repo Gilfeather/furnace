@@ -25,7 +25,7 @@ We use a feature branch workflow to maintain code quality and enable collaborati
 2. **Make your changes**
    ```bash
    # Make changes
-   cargo test  # Ensure tests pass
+   cargo test --release  # Ensure tests pass
    cargo clippy  # Check for lints
    cargo fmt  # Format code
    ```
@@ -72,10 +72,10 @@ Before submitting a PR, ensure:
 
 ```bash
 # All tests pass
-cargo test
+cargo test --release
 
 # No clippy warnings
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 
 # Code is formatted
 cargo fmt --check
@@ -108,7 +108,7 @@ To protect the main branch:
 git clone https://github.com/Gilfeather/furnace.git
 cd furnace
 cargo build
-cargo test
+cargo test --release
 ```
 
 ### Running the Server
@@ -123,10 +123,10 @@ cargo run --bin furnace -- --model-path ./sample_model --port 3000
 ### Testing
 ```bash
 # Unit tests
-cargo test
+cargo test --release
 
 # Integration tests
-cargo test --test integration_tests
+cargo test --release --test integration_tests
 
 # Benchmarks
 cargo bench

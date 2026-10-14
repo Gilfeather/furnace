@@ -42,14 +42,18 @@ This project and everyone participating in it is governed by our Code of Conduct
 git clone https://github.com/YOUR_USERNAME/furnace.git
 cd furnace
 
-# Build the project
-cargo build
+# Download the ResNet-18 ONNX model (compiled in at build time)
+mkdir -p models
+curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
 
-# Run tests
-cargo test
+# Build the project
+cargo build --release
+
+# Run tests (release: ResNet-18 inference is slow in debug builds)
+cargo test --release
 
 # Run the development server
-cargo run -- --model-path ./test_model.mpk --port 3000
+cargo run --release -- --model-name resnet18 --port 3000
 ```
 
 ### Development Tools
@@ -125,10 +129,13 @@ We welcome feature suggestions! Please:
 src/
 ├── main.rs          # CLI entry point
 ├── lib.rs           # Library exports
-├── api.rs           # HTTP API handlers
-├── model.rs         # Model management
-├── error.rs         # Error types
-└── burn_model.rs    # Burn framework integration
+├── api.rs           # HTTP API handlers, limits, backpressure
+├── model.rs         # Model wrapper: validation, batching, stats
+├── backend.rs       # Runtime backend selection (Burn Device)
+├── burn_model.rs    # File-based MLP (Burnpack weights)
+├── models/mod.rs    # Built-in models generated from ONNX
+├── types.rs         # Shared types
+└── error.rs         # Error types
 ```
 
 ### Error Handling
