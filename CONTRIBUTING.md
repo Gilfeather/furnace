@@ -45,6 +45,8 @@ cd furnace
 # Download the ResNet-18 ONNX model (compiled in at build time)
 mkdir -p models
 curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
+# Second built-in model used by the end-to-end tests
+curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx" -o models/mnist.onnx
 
 # Build the project
 cargo build --release

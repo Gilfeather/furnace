@@ -10,6 +10,8 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   RESNET18_URL: https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx
+  # Second built-in model for the end-to-end tests: different shapes, 26 KB
+  MNIST_URL: https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx
 
 jobs:
   test:
@@ -44,13 +46,14 @@ jobs:
       uses: actions/cache@v4
       with:
         path: models
-        key: onnx-models-resnet18-v1-7
+        key: onnx-models-resnet18-v1-7-mnist-8
 
-    - name: Download ResNet-18 ONNX model
+    - name: Download ONNX models
       shell: bash
       run: |
         mkdir -p models
         [ -f models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o models/resnet18.onnx
+        [ -f models/mnist.onnx ] || curl -fsSL "$MNIST_URL" -o models/mnist.onnx
 
     - name: Check formatting
       if: matrix.rust == 'stable'
@@ -103,12 +106,13 @@ jobs:
       uses: actions/cache@v4
       with:
         path: models
-        key: onnx-models-resnet18-v1-7
+        key: onnx-models-resnet18-v1-7-mnist-8
 
-    - name: Download ResNet-18 ONNX model
+    - name: Download ONNX models
       run: |
         mkdir -p models
         [ -f models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o models/resnet18.onnx
+        [ -f models/mnist.onnx ] || curl -fsSL "$MNIST_URL" -o models/mnist.onnx
 
     - name: Generate code coverage
       run: cargo llvm-cov --release --workspace --lcov --output-path lcov.info
@@ -139,12 +143,13 @@ jobs:
       uses: actions/cache@v4
       with:
         path: models
-        key: onnx-models-resnet18-v1-7
+        key: onnx-models-resnet18-v1-7-mnist-8
 
-    - name: Download ResNet-18 ONNX model
+    - name: Download ONNX models
       run: |
         mkdir -p models
         [ -f models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o models/resnet18.onnx
+        [ -f models/mnist.onnx ] || curl -fsSL "$MNIST_URL" -o models/mnist.onnx
 
     - name: Run benchmarks
       run: cargo bench --bench inference_benchmark

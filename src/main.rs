@@ -42,7 +42,10 @@ fn build_cli() -> Command {
                 .long("model-name")
                 .short('m')
                 .value_name("NAME")
-                .help("Built-in model compiled into the binary (default: resnet18)"),
+                .help(format!(
+                    "Built-in model compiled into the binary from models/<NAME>.onnx                      (default: the only one, if there is just one). {}",
+                    BuiltInModel::describe_available()
+                )),
         )
         .arg(
             Arg::new("model-path")
@@ -194,18 +197,29 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
 
     let model_path = matches.get_one::<PathBuf>("model-path").cloned();
     let model_name = match (matches.get_one::<String>("model-name"), &model_path) {
-        (Some(name), _) => Some(name.clone()),
-        // Default to resnet18 when neither a name nor a path was given
-        (None, None) => Some("resnet18".to_string()),
+        (Some(name), _) => Some(
+            BuiltInModel::from_name(name)
+                .map_err(|e| CliError::InvalidArgument {
+                    arg: "model-name".to_string(),
+                    value: name.clone(),
+                    reason: e.to_string(),
+                })?
+                .name()
+                .to_string(),
+        ),
+        // Neither a name nor a path: serve the built-in model if there is exactly one
+        (None, None) => Some(
+            BuiltInModel::default_model()
+                .map_err(|e| CliError::InvalidArgument {
+                    arg: "model-name".to_string(),
+                    value: String::new(),
+                    reason: e.to_string(),
+                })?
+                .name()
+                .to_string(),
+        ),
         (None, Some(_)) => None,
     };
-    if let Some(name) = &model_name {
-        BuiltInModel::from_name(name).map_err(|e| CliError::InvalidArgument {
-            arg: "model-name".to_string(),
-            value: name.clone(),
-            reason: e.to_string(),
-        })?;
-    }
 
     Ok((
         CliArgs {

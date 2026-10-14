@@ -8,11 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Any ONNX model in `models/` is servable with no hand-written Rust: `models/foo.onnx` +
+  `cargo build --release`, then `furnace --model-name foo`. `build.rs` reads each graph's
+  input and output shapes (via `onnx-ir`) and generates a model registry. Supported: one
+  `float32` input and one `float32` output, batch dimension first, other dimensions static;
+  other graphs are skipped with a `cargo:warning` that says why. Graphs exported with a
+  static batch size (e.g. 1) still accept batches, run in chunks of that size
+- `furnace --help` and unknown `--model-name` errors list the models in the build;
+  names match ignoring case, `-`, `_` and `.`
+- MNIST (ONNX Model Zoo `mnist-8`) as a second built-in model in CI and the end-to-end tests
 - `benches/compare`: ResNet-18 comparison against tract and ONNX Runtime (latency, memory,
   startup, binary size, top-1 check on a real image). Its own Cargo workspace, so `ort` and
   `tract` never become furnace dependencies
 
 ### Changed
+- `BuiltInModel` is a handle into the generated registry instead of an enum
+  (`from_name`, `name`, `available_models` and `create_model` keep their signatures).
+  The hand-written `models::ResNet18` wrapper is replaced by the generated
+  `models::resnet18::Served`
+- Without `--model-name` or `--model-path`, Furnace serves the built-in model if the build
+  has exactly one (release builds: ResNet-18, as before) and otherwise asks for `--model-name`
 - The CPU backend is multithreaded and uses SIMD: `burn` is now built with its `rayon` and
   `simd` features, which `default-features = false` had turned off. ResNet-18 goes from
   ~79 ms to ~50 ms per image (batch 4: ~267 ms to ~94 ms). Peak private memory rises from

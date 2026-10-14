@@ -31,7 +31,7 @@ path = "src/main.rs"
 [features]
 default = ["onnx"]
 # Generate built-in models from ONNX files in models/ at build time
-onnx = ["dep:burn-onnx"]
+onnx = ["dep:burn-onnx", "dep:onnx-ir"]
 # Compile built-in model weights into the binary (single-file deploys).
 # Default: weights stay in a separate <name>.bpk file loaded at startup.
 embed-weights = ["onnx"]
@@ -75,6 +75,8 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [build-dependencies]
 burn-onnx = { version = "0.22", optional = true }
+# Reads model input/output shapes for the built-in model registry (already a burn-onnx dependency)
+onnx-ir = { version = "0.22", optional = true }
 
 [dev-dependencies]
 tempfile = "3.12"
