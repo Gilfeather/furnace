@@ -1,21 +1,31 @@
-//! End-to-end tests against a real HTTP server running the built-in ResNet-18.
+//! End-to-end tests against a real HTTP server running the built-in models.
 //!
-//! Requires `models/resnet18.onnx` at build time (see README).
+//! Requires `models/resnet18.onnx` and `models/mnist.onnx` at build time (see README).
 
 use furnace::api::{ServerConfig, router};
 use furnace::model::load_built_in_model;
 use reqwest::Client;
 use serde_json::{Value, json};
+use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 const RESNET_INPUT: usize = 3 * 224 * 224;
+const MNIST_INPUT: usize = 28 * 28;
 
-/// Start a server on an ephemeral port and return its base URL
+/// Start a ResNet-18 server on an ephemeral port and return its base URL
 async fn spawn_server(config: ServerConfig) -> String {
-    let model = tokio::task::spawn_blocking(|| load_built_in_model("resnet18"))
+    spawn_model_server("resnet18", config).await
+}
+
+/// Start a server for built-in model `name` on an ephemeral port and return its base URL
+async fn spawn_model_server(name: &'static str, config: ServerConfig) -> String {
+    let model = tokio::task::spawn_blocking(move || load_built_in_model(name))
         .await
         .unwrap()
-        .expect("resnet18 must be compiled in (place models/resnet18.onnx before building)");
+        .unwrap_or_else(|e| {
+            panic!("{name} must be compiled in (place models/{name}.onnx before building): {e}")
+        });
     let app = router(model, &config);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -279,4 +289,151 @@ async fn test_backpressure_returns_503() {
     assert!(statuses.contains(&200), "statuses: {statuses:?}");
     assert!(statuses.contains(&503), "statuses: {statuses:?}");
     assert!(statuses.iter().all(|s| *s == 200 || *s == 503));
+}
+
+/// A second built-in model with different shapes, generated from models/mnist.onnx with no
+/// model-specific code
+#[tokio::test]
+async fn test_end_to_end_second_model() {
+    let base_url = spawn_model_server("mnist", ServerConfig::default()).await;
+
+    let info: Value = client()
+        .get(format!("{base_url}/model/info"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info["model_info"]["name"], "mnist");
+    assert_eq!(
+        info["model_info"]["input_spec"]["shape"],
+        json!([1, 28, 28])
+    );
+    assert_eq!(info["model_info"]["output_spec"]["shape"], json!([10]));
+
+    // A vertical bar and a horizontal bar should not look alike to the classifier
+    let vertical: Vec<f32> = (0..MNIST_INPUT)
+        .map(|i| {
+            if (12..16).contains(&(i % 28)) {
+                255.0
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let horizontal: Vec<f32> = (0..MNIST_INPUT)
+        .map(|i| {
+            if (12..16).contains(&(i / 28)) {
+                255.0
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .json(&json!({ "inputs": [vertical, horizontal] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let batch: Value = response.json().await.unwrap();
+    let outputs = batch["outputs"].as_array().unwrap();
+    assert_eq!(outputs.len(), 2);
+    let (a, b) = (json_floats(&outputs[0]), json_floats(&outputs[1]));
+    assert_eq!(a.len(), 10);
+    assert!(a.iter().chain(&b).all(|v| v.is_finite()));
+    assert_ne!(a, b);
+
+    // Binary in, binary out uses the model's own output shape
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .header("content-type", "application/octet-stream")
+        .header("accept", "application/octet-stream")
+        .body(le_bytes(&vertical))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["x-output-shape"], "10");
+    let bytes = response.bytes().await.unwrap();
+    assert_eq!(bytes.len(), 10 * 4);
+
+    // A ResNet-sized input is rejected
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .json(&json!({ "input": image(0.5) }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+}
+
+/// Kills the server process when the test ends, even on panic
+struct ServerProcess(Child);
+
+impl Drop for ServerProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn furnace() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_furnace"))
+}
+
+/// `furnace --model-name mnist` serves the model, through the real binary and CLI
+#[tokio::test]
+async fn test_cli_serves_model_by_name() {
+    // Grab a free port, then hand it to the server
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let _server = ServerProcess(
+        furnace()
+            .args(["--model-name", "MNIST", "--port", &port.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let base_url = format!("http://127.0.0.1:{port}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let info: Value = loop {
+        if let Ok(response) = client().get(format!("{base_url}/model/info")).send().await {
+            break response.json().await.unwrap();
+        }
+        assert!(Instant::now() < deadline, "server did not start");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(info["model_info"]["name"], "mnist");
+
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .json(&json!({ "input": vec![0.0; MNIST_INPUT] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+}
+
+#[test]
+fn test_cli_lists_available_models() {
+    let help = furnace().arg("--help").output().unwrap();
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("Available models: mnist, resnet18"), "{help}");
+
+    let unknown = furnace()
+        .args(["--model-name", "no-such-model"])
+        .output()
+        .unwrap();
+    assert!(!unknown.status.success());
+    let stderr = String::from_utf8(unknown.stderr).unwrap();
+    assert!(stderr.contains("unknown built-in model"), "{stderr}");
+    assert!(stderr.contains("mnist, resnet18"), "{stderr}");
 }

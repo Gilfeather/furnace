@@ -18,7 +18,9 @@ CPU/GPU backend.
 - 🪶 **Lightweight**: ~5 MB server binary; model weights live in a separate `.bpk` file
   (swap in fine-tuned weights without rebuilding, or embed them with `--features embed-weights`)
 - 🔀 **Runtime backend selection**: `--backend cpu|wgpu|metal|cuda` (Burn 0.22 `Device` API)
-- 🖼️ **Built-in ResNet-18**: ImageNet classifier, ~75–90 ms per image on a laptop CPU
+- 📦 **Bring your own ONNX model**: drop `foo.onnx` in `models/`, rebuild, run
+  `furnace --model-name foo`. No hand-written Rust
+- 🖼️ **ResNet-18 out of the box**: ImageNet classifier, ~75–90 ms per image on a laptop CPU
 - ⚡ **Binary I/O**: send raw `float32` (`application/octet-stream`) instead of JSON; ~1 ms of
   request overhead per ResNet-18 image
 - 🚦 **Backpressure**: bounded concurrency with immediate `503` instead of unbounded queues
@@ -48,7 +50,8 @@ curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification
 cargo build --release
 ```
 
-`build.rs` converts every `models/*.onnx` into Rust code plus a Burnpack weight file. The
+`build.rs` converts every `models/*.onnx` into Rust code plus a Burnpack weight file and
+registers it as a built-in model (see [Built-in models](#built-in-models-from-onnx)). The
 server binary is `target/release/furnace` (~5 MB). When run from the build machine it finds
 the generated `resnet18.bpk` automatically.
 
@@ -88,7 +91,7 @@ curl -X POST http://localhost:3000/predict \
 
 | Option | Default | Description |
 |---|---|---|
-| `-m, --model-name <NAME>` | `resnet18` | Built-in model compiled into the binary |
+| `-m, --model-name <NAME>` | the only built-in model | Built-in model compiled from `models/<NAME>.onnx`; `--help` lists them. Required when the build has more than one |
 | `-w, --weights <PATH>` | see below | Weight file (`.bpk`) for the built-in model |
 | `--model-path <PATH>` | | File-based Burn model: `<PATH>.bpk` + `<PATH>.json` (conflicts with `--model-name`) |
 | `-b, --backend <BACKEND>` | `cpu` | Compute backend; only backends compiled into the binary are accepted |
@@ -272,28 +275,36 @@ Errors share one shape:
 
 ### Built-in models (from ONNX)
 
-Any `models/<name>.onnx` is converted at build time; the conversion is skipped with a
-build warning if `burn-onnx` doesn't support the graph. ResNet-18 is wired up out of the box.
+Drop the `.onnx` file in `models/` and rebuild:
 
-To serve another ONNX model:
+```bash
+curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx" -o models/mnist.onnx
+cargo build --release
+./target/release/furnace --model-name mnist
+```
 
-1. Put it in `models/`, e.g. `models/mobilenetv2.onnx`, and run `cargo build --release`.
-   Look for `cargo:warning` lines if generation fails.
-2. In `build.rs`, declare its cfg: `println!("cargo:rustc-check-cfg=cfg(model_mobilenetv2)");`
-3. In `src/models/mod.rs`, include the generated module and add a `BurnModel` wrapper,
-   following the `ResNet18` implementation:
+At build time every `models/<name>.onnx` is converted to Rust code plus `<name>.bpk` weights,
+and its input and output shapes are read from the graph. `--model-name` is the file stem
+(matched ignoring case, `-`, `_` and `.`), and `furnace --help` lists the models in the build.
+Weights are found the same way as ResNet-18's (`--weights`, or `<name>.bpk` next to the
+binary or in `models/`).
 
-   ```rust
-   #[cfg(model_mobilenetv2)]
-   pub mod mobilenetv2 {
-       include!(concat!(env!("OUT_DIR"), "/models/mobilenetv2.rs"));
-   }
-   ```
+A model is supported when it has:
 
-   The generated `Model` exposes `new(&Device)` (load weights with `weights::load_burnpack`) and
-   `forward(...)`.
-4. Add a variant to `BuiltInModel` and handle it in `from_name`, `available_models` and
-   `create_model`.
+- exactly one input and one output,
+- both `float32` tensors,
+- a batch dimension first, with every other dimension static (e.g. `[N, 3, 224, 224]`).
+
+Requests send each item flattened, like ResNet-18 (`1 × 28 × 28 = 784` floats for MNIST);
+`GET /model/info` reports the shapes. If the graph was exported with a fixed batch size
+(MNIST's input is `[1, 1, 28, 28]`), batches still work: Furnace runs them through the model
+in chunks of that size. A graph that declares a dynamic batch but hard-codes it internally
+(e.g. a constant `Reshape` to `[1, …]`) fails on batches larger than 1; re-export it with a
+fixed batch dimension. Models that don't fit, or that `burn-onnx` can't
+convert, are skipped with a `cargo:warning` that says why, and the rest of the build carries
+on. CI builds and tests ResNet-18 and
+[MNIST](https://github.com/onnx/models/tree/main/validated/vision/classification/mnist)
+from the ONNX Model Zoo.
 
 Tips:
 
@@ -478,10 +489,15 @@ validation and tensor conversion alone.
 ```bash
 cargo fmt --all
 cargo clippy --all-targets -- -D warnings
-cargo test --release            # unit + end-to-end tests (needs models/resnet18.onnx)
+cargo test --release            # unit + end-to-end tests (needs resnet18.onnx and mnist.onnx)
 ```
 
-Tests run in `--release` because ResNet-18 inference in a debug build is slow.
+Tests run in `--release` because ResNet-18 inference in a debug build is slow. The
+end-to-end tests also serve MNIST as a second built-in model:
+
+```bash
+curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx" -o models/mnist.onnx
+```
 
 ### Layout
 
@@ -492,15 +508,19 @@ src/
 ├── model.rs         # Model wrapper: validation, batching, stats
 ├── backend.rs       # Runtime backend -> Burn Device
 ├── burn_model.rs    # File-based MLP (Burnpack)
-└── models/mod.rs    # Built-in models generated from ONNX
-build.rs             # models/*.onnx -> Rust code + .bpk weights
+└── models/mod.rs    # Built-in model registry and BurnModel wrapper
+build.rs             # models/*.onnx -> Rust code + .bpk weights + registry
+build/registry.rs    # Which graphs are servable; registry source generation
 ```
 
 ## 🔧 Troubleshooting
 
-**`unknown built-in model` / resnet18 missing**: `models/resnet18.onnx` wasn't present at
-build time. Download it (Quick Start step 1), then `cargo build --release`.
+**`unknown built-in model` / model missing**: `models/<name>.onnx` wasn't present at
+build time, or it was skipped: look for `skipping model '<name>'` warnings in the build
+output. Download it (Quick Start step 1), then `cargo build --release`.
 `touch build.rs` forces regeneration.
+
+**`no model selected`**: the build has several built-in models; pick one with `--model-name`.
 
 **`length limit exceeded` / 413**: raise `--max-body-mb`. A ResNet-18 image is 1.5–3 MB of JSON.
 
@@ -523,4 +543,4 @@ MIT. See [LICENSE](LICENSE).
 ## 🙏 Acknowledgments
 
 - [Burn](https://github.com/tracel-ai/burn) and [burn-onnx](https://github.com/tracel-ai/burn-onnx)
-- [ONNX Model Zoo](https://github.com/onnx/models) for ResNet-18
+- [ONNX Model Zoo](https://github.com/onnx/models) for ResNet-18 and MNIST

@@ -600,6 +600,7 @@ mod tests {
         assert!(out.iter().any(|&v| v != out[0]));
     }
 
+    #[cfg(model_resnet18)]
     #[test]
     fn test_built_in_model_missing_weights_file() {
         let result = load_built_in_model_with_backend(
@@ -644,5 +645,18 @@ mod tests {
         let out = model.predict(vec![0.5; 3 * 224 * 224]).unwrap();
         assert_eq!(out.len(), 1000);
         assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    #[cfg(model_mnist)]
+    #[test]
+    fn test_mnist_inference() {
+        let model = load_built_in_model("mnist").unwrap();
+        assert_eq!(model.get_info().input_spec.shape, vec![1, 28, 28]);
+        assert_eq!(model.get_info().output_spec.shape, vec![10]);
+        let outputs = model
+            .predict_batch(vec![vec![0.0; 28 * 28], vec![255.0; 28 * 28]])
+            .unwrap();
+        assert!(outputs.iter().all(|o| o.len() == 10));
+        assert_ne!(outputs[0], outputs[1]);
     }
 }
