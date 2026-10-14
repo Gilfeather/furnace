@@ -5,35 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-Request I/O for `POST /predict`. Over HTTP on localhost, I/O overhead for one ResNet-18 image
-drops from ~14 ms to ~6 ms with JSON and ~1 ms with binary input (batch of 4: ~44 ms to ~21 ms
-JSON, ~3 ms binary). See README Performance.
-
-### Added
-- Binary input: `Content-Type: application/octet-stream` with raw little-endian `float32`
-  values, optional `X-Batch-Size: N` header for batches
-- Binary output: `Accept: application/octet-stream` returns raw little-endian `float32`
-  outputs with `X-Batch-Size`, `X-Output-Shape` and `X-Inference-Time-Ms` headers (also
-  exposed to browsers through CORS)
-- `Model::predict_flat` runs a batch stored in one contiguous buffer, without per-item copies
-- `request_decode/*` Criterion benchmarks and `benches/http_bench.py` for HTTP latency
-
-### Changed
-- JSON request bodies are parsed in one pass. The derived `flatten` + `untagged` deserializer
-  buffered the whole document into an intermediate tree first, roughly doubling parse time
-- Requests whose `Content-Type` is neither JSON nor `application/octet-stream` get
-  `415 INVALID_REQUEST` (JSON-only before, same status)
-- A JSON body with both `input` and `inputs` is now rejected with 422 instead of silently
-  using `input`
-- `INVALID_REQUEST` messages for JSON type errors no longer include the element path
-  (e.g. `input[3]`); they still include line and column
-
 ## [0.4.0] - 2026-10-14
 
 Migration to Burn 0.22 and a correctness pass over the server. Performance figures in
 earlier releases were measured against a dummy fallback model and should be disregarded.
+
+Highlights: ~5 MB server binary with weights in a separate memory-mapped `.bpk` file
+(~4 MB private memory with ResNet-18 loaded), and binary request I/O (~1 ms overhead per
+ResNet-18 image vs ~6 ms for JSON).
 
 ### Changed
 - **BREAKING**: Upgraded to Burn 0.22. ONNX import moved from `burn-import` to `burn-onnx`;
@@ -53,6 +32,13 @@ earlier releases were measured against a dummy fallback model and should be disr
 - Inference runs on a blocking thread pool instead of async runtime workers
 - Models are shared across requests without a global mutex
 - Stats (`/model/info`) are now updated accurately in release builds
+- JSON request bodies are parsed in one pass. The derived `flatten` + `untagged` deserializer
+  buffered the whole document into an intermediate tree first, roughly doubling parse time
+- Requests whose `Content-Type` is neither JSON nor `application/octet-stream` get
+  `415 INVALID_REQUEST`
+- A JSON body with both `input` and `inputs` is rejected with 422
+- Weight files are memory-mapped and used zero-copy by the CPU backend: private memory
+  with ResNet-18 loaded drops from ~49 MB to ~4 MB
 
 ### Added
 - `--weights <PATH>` to load built-in model weights from any `.bpk` file (e.g. fine-tuned)
@@ -67,6 +53,13 @@ earlier releases were measured against a dummy fallback model and should be disr
 - Structured `INVALID_REQUEST` errors for malformed JSON
 - End-to-end tests with real ResNet-18 inference, batch consistency and backpressure checks
 - CI: MSRV job, wgpu feature check, cargo-deny
+- Binary input: `Content-Type: application/octet-stream` with raw little-endian `float32`
+  values, optional `X-Batch-Size: N` header for batches
+- Binary output: `Accept: application/octet-stream` returns raw little-endian `float32`
+  outputs with `X-Batch-Size`, `X-Output-Shape` and `X-Inference-Time-Ms` headers (also
+  exposed to browsers through CORS)
+- `Model::predict_flat` runs a batch stored in one contiguous buffer, without per-item copies
+- `request_decode/*` Criterion benchmarks and `benches/http_bench.py` for HTTP latency
 
 ### Fixed
 - Real ResNet-18 requests (~1.5–3 MB JSON) were rejected with `length limit exceeded` by
