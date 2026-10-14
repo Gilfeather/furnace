@@ -2937,6 +2937,7 @@ dependencies = [
  "chrono",
  "clap",
  "criterion",
+ "image",
  "memmap2",
  "onnx-ir",
  "rand 0.10.3",

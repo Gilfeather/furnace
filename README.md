@@ -23,6 +23,8 @@ CPU/GPU backend.
 - 🖼️ **ResNet-18 out of the box**: ImageNet classifier, ~75–90 ms per image on a laptop CPU
 - ⚡ **Binary I/O**: send raw `float32` (`application/octet-stream`) instead of JSON; ~1 ms of
   request overhead per ResNet-18 image
+- 📷 **Image input** (opt-in `--features image`): POST a JPEG or PNG and the server does the
+  ImageNet resize, crop and normalization, so clients need no Python or NumPy
 - 🚦 **Backpressure**: bounded concurrency with immediate `503` instead of unbounded queues
 - 🛡️ **Hardened API**: body size limit, input validation, timeouts, security headers,
   graceful shutdown
@@ -249,6 +251,39 @@ curl -X POST http://localhost:3000/predict \
   --data-binary @image.f32
 ```
 
+#### Image input
+
+Build with `--features image` and POST a JPEG or PNG directly, one image per request:
+
+```bash
+cargo build --release --features image
+
+curl -O https://github.com/pytorch/hub/raw/master/images/dog.jpg
+curl -X POST http://localhost:3000/predict \
+  -H "Content-Type: image/jpeg" \
+  --data-binary @dog.jpg
+# argmax of "output" is 258 (Samoyed)
+```
+
+| Request header | Meaning |
+|---|---|
+| `Content-Type: image/jpeg` or `image/png` | Body is one encoded image. The response uses `output`, as with `input`; `Accept: application/octet-stream` works too |
+
+The server applies standard ImageNet (torchvision) preprocessing: convert to RGB, resize the
+shorter side to 256 with a bilinear filter (longer side truncated), crop the centre 224 × 224,
+scale to `[0, 1]`, normalize with mean `(0.485, 0.456, 0.406)` and std `(0.229, 0.224, 0.225)`,
+and lay out as CHW `float32`. For a model with input shape `[3, H, W]` the crop is `H × W`
+and the shorter side becomes `min(H, W) × 256 / 224`. Models with any other input shape
+reject images with 415.
+
+Images count against `--max-body-mb` like any other body. Decoding is limited to 16,384
+pixels per side and 128 MB of decoded pixels, and it runs off the async runtime, sharing the
+`--max-concurrent-requests` slots with inference. `inference_time_ms` excludes decoding.
+
+Without the feature, `image/*` requests get 415. The feature adds the
+[`image`](https://crates.io/crates/image) crate with only its JPEG and PNG decoders,
+about +0.4 MB to the release binary (5.5 MB to 5.9 MB on Windows x86-64).
+
 ### Errors
 
 Errors share one shape:
@@ -261,7 +296,8 @@ Errors share one shape:
 |---|---|---|
 | 400 | `INVALID_REQUEST` | Malformed JSON, or `X-Batch-Size` not an integer |
 | 422 | `INVALID_REQUEST` | Valid JSON without exactly one of `input`/`inputs`, or non-numeric values |
-| 415 | `INVALID_REQUEST` | `Content-Type` is neither `application/json` nor `application/octet-stream` |
+| 415 | `INVALID_REQUEST` | `Content-Type` is not `application/json`, `application/octet-stream` or (with `--features image`) `image/jpeg` / `image/png`; or an image sent to a model whose input isn't `[3, H, W]` |
+| 400 | `INVALID_IMAGE` | Image body that fails to decode, or exceeds the decoding limits |
 | 400 | `INVALID_INPUT` | Empty input |
 | 400 | `INPUT_VALIDATION_FAILED` | Wrong number of values (or bytes, for binary input) for the model |
 | 400 | `INVALID_INPUT_VALUE` | NaN or infinite value |
@@ -438,11 +474,15 @@ Criterion, in-process `Model::predict_batch` (median):
 | MLP 784→128→10 (`mlp/*`) | 9.5 µs | 80 µs (×32) | ~400k items/s batched |
 
 End to end over HTTP on localhost, ResNet-18, release binary, keep-alive client
-(`benches/http_bench.py`, median of 30 requests). *I/O overhead* is end-to-end time minus
+(`examples/http_bench.rs`, median of 30 requests). *I/O overhead* is end-to-end time minus
 the server's `inference_time_ms`: sending, receiving and decoding the request and response.
 Inference alone varies by ±10 ms between runs, so compare the overhead column. These rows were
 measured before the CPU backend became multithreaded, so their end-to-end times are about
 40 ms (batch 1) to 200 ms (batch 4) too high today; the overhead column still applies.
+They also come from an earlier Python version of this benchmark, whose JSON has a space
+after every comma; the Rust one sends 1.5 / 6.1 MB JSON bodies with the same overheads.
+Sending `dog.jpg` (1546 × 1213 JPEG, 0.66 MB) as `image/jpeg` adds ~30 ms (28–40 ms
+measured) of decoding and resizing on top of inference.
 
 | Request | Body | End to end | I/O overhead |
 |---|---|---|---|
@@ -477,8 +517,10 @@ cargo bench --bench inference_benchmark
 ```
 
 ```bash
-# With a release server running on port 3000 (stdlib-only Python)
-python benches/http_bench.py 3000 json1 json4 bin1 bin4
+# With a release server running on port 3000
+cargo run --release --example http_bench -- 3000 json1 json4 bin1 bin4
+# Image input (server built with --features image)
+cargo run --release --example http_bench -- 3000 image=dog.jpg
 ```
 
 The `overhead/*` group runs a constant-output model with ResNet-sized I/O, so it measures
@@ -490,6 +532,7 @@ validation and tensor conversion alone.
 cargo fmt --all
 cargo clippy --all-targets -- -D warnings
 cargo test --release            # unit + end-to-end tests (needs resnet18.onnx and mnist.onnx)
+cargo test --release --features image   # also image input tests
 ```
 
 Tests run in `--release` because ResNet-18 inference in a debug build is slow. The
@@ -505,6 +548,7 @@ curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification
 src/
 ├── main.rs          # CLI and startup
 ├── api.rs           # HTTP routes, limits, backpressure
+├── preprocess.rs    # JPEG/PNG -> ImageNet-normalized CHW floats (`image` feature)
 ├── model.rs         # Model wrapper: validation, batching, stats
 ├── backend.rs       # Runtime backend -> Burn Device
 ├── burn_model.rs    # File-based MLP (Burnpack)
