@@ -61,6 +61,8 @@ earlier releases were measured against a dummy fallback model and should be disr
 - `--model-path` for file-based Burnpack models
 - `--max-body-mb` (default 100) and `--request-timeout-ms` (returns 504 on timeout)
 - Backpressure: requests beyond `--max-concurrent-requests` get `503 SERVER_BUSY` immediately
+- `GET /metrics` with request, error, busy-rejection and in-flight counters. Based on #32
+  by @tamish560, adapted to the new API layer
 - `GET /health` alias for `/healthz`; health response includes `backend`
 - Structured `INVALID_REQUEST` errors for malformed JSON
 - End-to-end tests with real ResNet-18 inference, batch consistency and backpressure checks

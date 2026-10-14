@@ -144,6 +144,24 @@ cargo build --release --features cuda    # NVIDIA CUDA
 { "status": "healthy", "model_loaded": true, "backend": "cpu", "uptime_seconds": 42, "timestamp": "2026-10-14T03:34:47Z" }
 ```
 
+### `GET /metrics`
+
+Server counters for monitoring:
+
+```json
+{
+  "uptime_seconds": 3600,
+  "total_requests": 1520, "total_errors": 12, "rejected_busy": 9,
+  "in_flight_inferences": 2, "max_concurrent_inferences": 100,
+  "total_inferences": 1508, "average_inference_time_ms": 84.2,
+  "last_inference_at": "2026-10-14T05:01:12Z",
+  "timestamp": "2026-10-14T05:01:13Z"
+}
+```
+
+`total_requests` and `total_errors` count every `/predict` request, including those rejected
+before inference (400, 413, 503). `rejected_busy` is the 503 subset.
+
 ### `GET /model/info`
 
 ```json

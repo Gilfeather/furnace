@@ -7,6 +7,7 @@ use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, FromRequest, Request, State},
     http::StatusCode,
+    middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
@@ -15,6 +16,7 @@ use serde::de::{self, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::signal;
 use tokio::sync::Semaphore;
@@ -131,6 +133,27 @@ pub enum PredictOutputData {
     Batch { outputs: Vec<Vec<f32>> },
 }
 
+/// `GET /metrics`: server-level counters for monitoring (originally contributed in #32)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MetricsResponse {
+    pub uptime_seconds: u64,
+    /// `/predict` requests received, including ones rejected before inference
+    pub total_requests: u64,
+    /// `/predict` requests answered with a 4xx/5xx status
+    pub total_errors: u64,
+    /// Requests rejected with `503 SERVER_BUSY`
+    pub rejected_busy: u64,
+    /// Inferences currently running
+    pub in_flight_inferences: usize,
+    pub max_concurrent_inferences: usize,
+    /// Batches that reached the model (successful or failed)
+    pub total_inferences: u64,
+    pub average_inference_time_ms: f64,
+    /// When the last successful inference finished
+    pub last_inference_at: Option<String>,
+    pub timestamp: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: String,
@@ -186,7 +209,11 @@ struct ServerState {
     model: Arc<Model>,
     start_time: SystemTime,
     inference_slots: Arc<Semaphore>,
+    max_concurrent: usize,
     request_timeout: Option<Duration>,
+    total_requests: AtomicU64,
+    total_errors: AtomicU64,
+    rejected_busy: AtomicU64,
 }
 
 impl ServerState {
@@ -201,7 +228,11 @@ pub fn router(model: Model, config: &ServerConfig) -> Router {
         model: Arc::new(model),
         start_time: SystemTime::now(),
         inference_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        max_concurrent: config.max_concurrent_requests,
         request_timeout: config.request_timeout,
+        total_requests: AtomicU64::new(0),
+        total_errors: AtomicU64::new(0),
+        rejected_busy: AtomicU64::new(0),
     });
 
     let cors = CorsLayer::new()
@@ -217,8 +248,15 @@ pub fn router(model: Model, config: &ServerConfig) -> Router {
     Router::new()
         .route("/healthz", get(health_check))
         .route("/health", get(health_check))
-        .route("/predict", post(predict))
+        .route(
+            "/predict",
+            post(predict).layer(middleware::from_fn_with_state(
+                state.clone(),
+                count_requests,
+            )),
+        )
         .route("/model/info", get(model_info))
+        .route("/metrics", get(metrics))
         .layer(DefaultBodyLimit::max(config.max_body_bytes))
         .layer(SetResponseHeaderLayer::overriding(
             X_CONTENT_TYPE_OPTIONS,
@@ -674,6 +712,38 @@ fn validate_inputs(model: &Model, inputs: &[Vec<f32>]) -> std::result::Result<()
     Ok(())
 }
 
+/// Count every `/predict` request and its outcome, including rejections by the body limit
+async fn count_requests(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    state.total_requests.fetch_add(1, Ordering::Relaxed);
+    let response = next.run(request).await;
+    let status = response.status();
+    if status.is_client_error() || status.is_server_error() {
+        state.total_errors.fetch_add(1, Ordering::Relaxed);
+    }
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        state.rejected_busy.fetch_add(1, Ordering::Relaxed);
+    }
+    response
+}
+
+async fn metrics(State(state): State<AppState>) -> Json<MetricsResponse> {
+    let stats = state.model.get_stats();
+    Json(MetricsResponse {
+        uptime_seconds: state.uptime_seconds(),
+        total_requests: state.total_requests.load(Ordering::Relaxed),
+        total_errors: state.total_errors.load(Ordering::Relaxed),
+        rejected_busy: state.rejected_busy.load(Ordering::Relaxed),
+        in_flight_inferences: state
+            .max_concurrent
+            .saturating_sub(state.inference_slots.available_permits()),
+        max_concurrent_inferences: state.max_concurrent,
+        total_inferences: stats.inference_count,
+        average_inference_time_ms: stats.average_inference_time_ms,
+        last_inference_at: stats.last_inference_time.map(|t| t.to_rfc3339()),
+        timestamp: Utc::now().to_rfc3339(),
+    })
+}
+
 async fn model_info(State(state): State<AppState>) -> Json<ModelInfoResponse> {
     Json(ModelInfoResponse {
         model_info: state.model.get_info().clone(),
@@ -730,6 +800,61 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body))
             .unwrap()
+    }
+
+    async fn get_metrics(app: Router) -> MetricsResponse {
+        let request = Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = send(app, request).await;
+        assert_eq!(status, StatusCode::OK);
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_metrics_counts_requests_and_errors() {
+        let app = test_app();
+        let initial = get_metrics(app.clone()).await;
+        assert_eq!(initial.total_requests, 0);
+        assert_eq!(initial.max_concurrent_inferences, 100);
+        assert!(initial.last_inference_at.is_none());
+
+        let ok = serde_json::json!({ "input": vec![0.5; 784] }).to_string();
+        let (status, _) = send(app.clone(), predict_request(ok)).await;
+        assert_eq!(status, StatusCode::OK);
+        let bad = serde_json::json!({ "input": vec![0.5; 3] }).to_string();
+        let (status, _) = send(app.clone(), predict_request(bad)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let m = get_metrics(app).await;
+        assert_eq!(m.total_requests, 2);
+        assert_eq!(m.total_errors, 1);
+        assert_eq!(m.rejected_busy, 0);
+        assert_eq!(m.total_inferences, 1);
+        assert_eq!(m.in_flight_inferences, 0);
+        assert!(m.last_inference_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_metrics_counts_busy_and_body_limit_rejections() {
+        let config = ServerConfig {
+            max_concurrent_requests: 0,
+            max_body_bytes: 64,
+            ..ServerConfig::default()
+        };
+        let app = router(dummy_model(), &config);
+        let small = serde_json::json!({ "input": [0.5] }).to_string();
+        let (status, _) = send(app.clone(), predict_request(small)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let big = serde_json::json!({ "input": vec![0.5; 784] }).to_string();
+        let (status, _) = send(app.clone(), predict_request(big)).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+        let m = get_metrics(app).await;
+        assert_eq!(m.total_requests, 2);
+        assert_eq!(m.total_errors, 2);
+        assert_eq!(m.total_inferences, 0);
     }
 
     #[tokio::test]
