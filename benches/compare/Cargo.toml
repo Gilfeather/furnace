@@ -1,0 +1,45 @@
+# Engine comparison harness. Deliberately its own workspace (own Cargo.lock and target/)
+# so `ort` and `tract` never enter furnace's dependency graph.
+[package]
+name = "furnace-compare"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+description = "Compare furnace against tract and ONNX Runtime on ResNet-18"
+license = "MIT"
+
+[workspace]
+
+[[bin]]
+name = "compare"
+path = "src/main.rs"
+
+[features]
+default = []
+# Also benchmark furnace on its wgpu backend (Vulkan / DX12 / Metal)
+wgpu = ["furnace/wgpu"]
+
+[dependencies]
+furnace = { path = "../.." }
+# No `transformers` feature: ResNet-18 does not need it and it doubles the binary
+tract-onnx = { version = "0.23.8", default-features = false }
+ort = "=2.0.0-rc.14"
+# Only to switch on tract's multithreaded matrix products for the `--threads N` run
+tract-linalg = { version = "0.23.8", features = ["multithread-mm"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+ureq = { version = "3.4", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+# Same settings as furnace's release profile, so binary sizes and speed are comparable
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false

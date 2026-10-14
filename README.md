@@ -316,20 +316,122 @@ the older Burn version and export with `burn-store`'s `BurnpackStore`.
 
 ## 📊 Performance
 
-Measured on an AMD Ryzen 9 7940HS (8C/16T), Windows 11, Rust 1.99, `--release`, CPU backend.
+### Compared with other engines (ResNet-18)
+
+The same `models/resnet18.onnx` (resnet18-v1-7 from the ONNX Model Zoo) on furnace,
+[tract](https://github.com/sonos/tract) and [ONNX Runtime](https://onnxruntime.ai) (through the
+[`ort`](https://crates.io/crates/ort) crate). The input is PyTorch Hub's
+[`dog.jpg`](https://github.com/pytorch/hub/raw/master/images/dog.jpg), decoded and preprocessed in
+Rust (resize to 256, center crop 224, ImageNet normalization). Every engine returns top-1 class
+258 (Samoyed) with the same logit, 12.42.
+
+Setup: AMD Ryzen 9 7940HS (8 cores / 16 threads, Radeon 780M iGPU), 30 GB RAM, Windows 11 Pro
+(build 26200), Rust 1.99.0, release builds with fat LTO. Versions: furnace 0.4.0 on Burn 0.22
+(burn-flex CPU backend), tract-onnx 0.23.8, `ort` 2.0.0-rc.14 with ONNX Runtime 1.31 (the
+prebuilt binaries `ort` downloads). Each engine runs in its own process: 10 warm-up runs,
+then 50 timed runs per batch size, one request at a time. Batch 4 is the same image four times.
+
+| Engine | Threads | Batch 1 median / p95 | Batch 4 median / p95 | img/s (batch 1 / 4) |
+|---|---|---|---|---|
+| **furnace**, CPU | all (rayon) | 49.9 / 56.4 ms | 93.5 / 97.2 ms | 20.0 / 42.8 |
+| **furnace** server, HTTP binary I/O | all (rayon) | 49.4 / 58.3 ms | 95.4 / 107.1 ms | 20.2 / 41.9 |
+| furnace 0.4.0 before this change, CPU | 1 | 79.2 / 93.9 ms | 266.7 / 284.6 ms | 12.6 / 15.0 |
+| **furnace**, wgpu (Radeon 780M iGPU) | GPU | 41.4 / 46.5 ms | 137.9 / 149.2 ms | 24.2 / 29.0 |
+| tract | 1 | 47.9 / 52.5 ms | 341.3 / 376.8 ms | 20.9 / 11.7 |
+| tract | 16 | 21.9 / 25.4 ms | 214.4 / 233.9 ms | 45.6 / 18.7 |
+| ONNX Runtime | default (per physical core) | **7.3 / 8.4 ms** | **26.1 / 27.8 ms** | **136.4 / 153.2** |
+| ONNX Runtime | 1 | 27.3 / 29.5 ms | 108.1 / 115.1 ms | 36.6 / 37.0 |
+
+| Engine | Load | First inference | Peak working set | Peak private | Binary | Pure Rust |
+|---|---|---|---|---|---|---|
+| **furnace**, CPU | **1 ms** | 64 ms | **102 MB** | **68 MB** | **3.6 MB** + 46 MB `.bpk` | yes |
+| **furnace** server | 36 ms to healthy | 65 ms | 105 MB | 72 MB | 5.4 MB + 46 MB `.bpk` | yes |
+| **furnace**, wgpu | 505 ms | 234 ms | 384 MB | 373 MB | 41.1 MB + 46 MB `.bpk` | yes |
+| tract | 185 ms | 52 ms | 164 MB | 191 MB | 18.7 MB + 47 MB `.onnx` | yes |
+| ONNX Runtime | 131 ms | 8 ms | 153 MB | 139 MB | 41.7 MB + 47 MB `.onnx` | no (C++) |
+
+*Load* is reading the model until it is ready to run; for the server it is the time from
+spawning the process to the first successful `/healthz`. *Peak private* is the peak commit
+charge, i.e. memory that belongs to this process alone. furnace memory-maps its weights, so the
+46 MB of weights count towards the working set but not towards private memory. *Binary* is a
+minimal benchmark executable that links only that engine, built with the same profile. ONNX
+Runtime is linked statically, but on Windows `ort` ships the DirectML build, which loads an
+18.5 MB `DirectML.dll` even on the CPU path. That DLL is included in the 41.7 MB.
+
+**ONNX Runtime is 6.8× faster than furnace at batch 1 and 3.6× faster at batch 4.** On a single
+thread it still beats furnace on all 16 threads at batch 1, though not at batch 4. tract on one
+thread is about as fast as furnace at batch 1 and faster with 16 threads, but at batch 4 furnace
+is 2.3× faster than the best tract result.
+furnace wins on footprint: it loads in about a millisecond, has the smallest binary, and uses
+the least memory. Over HTTP with binary bodies it adds only 1 to 3 ms to in-process inference.
+
+Why furnace is slower:
+
+- **Kernels.** burn-flex lowers every convolution to im2col plus a general matrix multiply
+  (the [`gemm`](https://crates.io/crates/gemm) crate), converting each layer's input from NCHW
+  to NHWC first. ONNX Runtime's MLAS has hand-written AVX2/AVX-512 convolution kernels on a
+  blocked NCHWc layout, so it skips both the im2col copy and the per-layer layout change.
+- **No graph optimization.** burn-onnx emits the ONNX graph op by op: each Conv, BatchNorm,
+  ReLU and Add is a separate pass over memory with its own output tensor. ONNX Runtime folds
+  BatchNorm into the convolution weights at load time and fuses Conv+ReLU (and Conv+Add+ReLU),
+  so ResNet-18 runs 20 fused convolutions instead of about 65 separate ops.
+- **Parallelism at batch 1.** burn-flex parallelizes over images and output tiles. With one
+  image the small late layers (7×7 and 14×14 maps) don't split well across 16 threads, which
+  is why going from batch 1 to batch 4 only doubles furnace's time.
+- **Up to this change, one thread and no SIMD.** furnace depended on `burn` with
+  `default-features = false`, which also turned off burn-flex's `rayon` and `simd` features.
+  Turning them back on made furnace 1.6× faster at batch 1 and 2.9× faster at batch 4
+  (the "0.4.0 before this change" row). The binary grows by 0.7 MB. Peak private memory goes
+  from 33 MB to 68 MB because each thread has its own im2col buffers.
+
+Ideas for closing the gap, roughly in order of payoff per effort:
+
+1. Fold BatchNorm into the preceding Conv weights when the `.bpk` is generated (a build-time
+   transform in `build.rs`), and fuse ReLU and the residual Add into the convolution epilogue.
+   This removes about two thirds of the passes over activations.
+2. Add a direct (non-im2col) or Winograd path for 3×3 stride-1 convolutions in burn-flex, the
+   bulk of ResNet's FLOPs, and keep activations in NHWC between layers instead of converting
+   per layer.
+3. Give single-image requests more parallelism: split output channels as well as spatial tiles.
+   The server can also gather concurrent requests into one batch, since batch 4 costs only
+   about twice as much as batch 1.
+4. For GPU hosts, the wgpu backend already beats the CPU backend at batch 1 on an integrated
+   GPU. A discrete GPU or the CUDA backend should widen that lead.
+5. An optional ONNX Runtime backend (behind a Cargo feature) would give MLAS speed for users
+   who accept a C++ dependency, while the default build stays pure Rust.
+
+Reproduce (the harness is its own Cargo workspace, so `ort` and `tract` never become furnace
+dependencies):
+
+```bash
+curl -L https://github.com/pytorch/hub/raw/master/images/dog.jpg -o benches/compare/dog.jpg
+cargo build --release            # the server binary for the HTTP row
+cd benches/compare
+cargo run --release              # all engines; add --features wgpu for the GPU row
+```
+
+`cargo run --release -- --only ort,tract --iters 100 --json results.json` selects engines and
+writes the raw reports. Each engine is also its own binary, for example
+`target/release/cmp-ort --threads 1`. See [`benches/compare/src/main.rs`](benches/compare/src/main.rs).
+
+### Furnace micro-benchmarks
+
+Measured on the same machine, `--release`, CPU backend.
 
 Criterion, in-process `Model::predict_batch` (median):
 
 | Benchmark | Batch 1 | Batch 4 / 32 | Throughput |
 |---|---|---|---|
-| ResNet-18 (`resnet18/*`) | 91 ms | 294 ms (×4) | ~11 img/s single, ~14 img/s batched |
+| ResNet-18 (`resnet18/*`) | 44 ms | 88 ms (×4) | ~23 img/s single, ~46 img/s batched |
 | Server overhead only (`overhead/*`, ResNet-sized I/O) | 0.31 ms | 1.18 ms (×4) | |
-| MLP 784→128→10 (`mlp/*`) | 14 µs | 109 µs (×32) | ~290k items/s batched |
+| MLP 784→128→10 (`mlp/*`) | 9.5 µs | 80 µs (×32) | ~400k items/s batched |
 
 End to end over HTTP on localhost, ResNet-18, release binary, keep-alive client
 (`benches/http_bench.py`, median of 30 requests). *I/O overhead* is end-to-end time minus
 the server's `inference_time_ms`: sending, receiving and decoding the request and response.
-Inference alone varies by ±10 ms between runs, so compare the overhead column.
+Inference alone varies by ±10 ms between runs, so compare the overhead column. These rows were
+measured before the CPU backend became multithreaded, so their end-to-end times are about
+40 ms (batch 1) to 200 ms (batch 4) too high today; the overhead column still applies.
 
 | Request | Body | End to end | I/O overhead |
 |---|---|---|---|
@@ -346,13 +448,16 @@ send binary.
 
 Other numbers:
 
-- **Startup**: ~0.45 s to healthy, including loading the 46 MB weight file
-- **Binary size**: ~5 MB (+ 46 MB `resnet18.bpk`)
-- **Memory**: ~52 MB working set but only ~4 MB private memory after inference. The weight
-  file is memory-mapped and tensors use its pages directly, so the 46 MB of ResNet-18 weights
-  are shared, file-backed pages that the OS can drop and reload under pressure and that
-  multiple server processes share. Reading the weights into the heap instead used ~49 MB
-  private (measured with `Process.PrivateMemorySize64` after 3 `/predict` calls).
+- **Startup**: ~40 ms from launch to a healthy `/healthz`, including mapping the 46 MB weight
+  file. On Windows, a client that polls the port before the server listens can see ~0.5 s
+  instead: a connect to a closed port retries for about that long before it fails.
+- **Binary size**: ~5.4 MB (+ 46 MB `resnet18.bpk`)
+- **Memory**: ~59 MB working set and ~21 MB private memory after 3 `/predict` calls (single
+  threaded before this release: ~52 MB and ~4 MB; the difference is per-thread buffers). The
+  weight file is memory-mapped and tensors use its pages directly, so the 46 MB of ResNet-18
+  weights are shared, file-backed pages that the OS can drop and reload under pressure and
+  that multiple server processes share. In the single-threaded build, reading the weights into
+  the heap instead used ~49 MB private (measured with `Process.PrivateMemorySize64`).
 
 Reproduce:
 

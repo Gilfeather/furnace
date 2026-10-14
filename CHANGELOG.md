@@ -19,8 +19,15 @@ JSON, ~3 ms binary). See README Performance.
   exposed to browsers through CORS)
 - `Model::predict_flat` runs a batch stored in one contiguous buffer, without per-item copies
 - `request_decode/*` Criterion benchmarks and `benches/http_bench.py` for HTTP latency
+- `benches/compare`: ResNet-18 comparison against tract and ONNX Runtime (latency, memory,
+  startup, binary size, top-1 check on a real image). Its own Cargo workspace, so `ort` and
+  `tract` never become furnace dependencies
 
 ### Changed
+- The CPU backend is multithreaded and uses SIMD: `burn` is now built with its `rayon` and
+  `simd` features, which `default-features = false` had turned off. ResNet-18 goes from
+  ~79 ms to ~50 ms per image (batch 4: ~267 ms to ~94 ms). Peak private memory rises from
+  ~33 MB to ~68 MB (per-thread buffers), and the binary grows by ~0.7 MB
 - JSON request bodies are parsed in one pass. The derived `flatten` + `untagged` deserializer
   buffered the whole document into an intermediate tree first, roughly doubling parse time
 - Requests whose `Content-Type` is neither JSON nor `application/octet-stream` get
