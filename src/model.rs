@@ -240,19 +240,43 @@ impl Model {
     /// This is CPU/GPU-bound and blocking; call it from a blocking context
     /// (e.g. `tokio::task::spawn_blocking`) inside async code.
     pub fn predict_batch(&self, inputs: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>> {
+        let batch_size = inputs.len();
+        let flattened = match self.flatten_batch(inputs) {
+            Ok(flattened) => flattened,
+            Err(e) => {
+                self.stats
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .record_error();
+                return Err(e);
+            }
+        };
+
+        let output_size: usize = self.info.output_spec.shape.iter().product();
+        Ok(self
+            .predict_flat(flattened, batch_size)?
+            .chunks_exact(output_size)
+            .map(<[f32]>::to_vec)
+            .collect())
+    }
+
+    /// Run inference on `batch_size` items stored back to back in one row-major buffer.
+    ///
+    /// Returns the outputs the same way: `batch_size * output_size` values. This avoids
+    /// per-item allocations and copies, so it is the fastest entry point for large inputs.
+    /// Blocking, like [`Model::predict_batch`].
+    pub fn predict_flat(&self, input: Vec<f32>, batch_size: usize) -> Result<Vec<f32>> {
         let start = Instant::now();
-        let result = self.run_batch(inputs);
+        let result = self.run_flat(input, batch_size);
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
         match &result {
-            Ok(outputs) => {
+            Ok(_) => {
                 stats.record_success(elapsed_ms);
                 debug!(
                     "Batch inference completed in {:.2}ms, batch size: {}, backend: {}",
-                    elapsed_ms,
-                    outputs.len(),
-                    self.info.backend
+                    elapsed_ms, batch_size, self.info.backend
                 );
             }
             Err(_) => stats.record_error(),
@@ -260,16 +284,14 @@ impl Model {
         result
     }
 
-    fn run_batch(&self, inputs: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>> {
-        if inputs.is_empty() {
+    fn check_batch_size(batch_size: usize) -> Result<()> {
+        if batch_size == 0 {
             return Err(ModelError::InputValidation {
                 expected: vec![1],
                 actual: vec![0],
             }
             .into());
         }
-
-        let batch_size = inputs.len();
         if batch_size > MAX_BATCH_SIZE {
             return Err(ModelError::InputValidation {
                 expected: vec![MAX_BATCH_SIZE],
@@ -277,23 +299,45 @@ impl Model {
             }
             .into());
         }
+        Ok(())
+    }
+
+    fn flatten_batch(&self, inputs: Vec<Vec<f32>>) -> Result<Vec<f32>> {
+        Self::check_batch_size(inputs.len())?;
+        let input_size: usize = self.info.input_spec.shape.iter().product();
+        let mut flattened = Vec::with_capacity(inputs.len() * input_size);
+        for input in inputs {
+            self.validate_input_shape(&input)?;
+            flattened.extend_from_slice(&input);
+        }
+        Ok(flattened)
+    }
+
+    fn run_flat(&self, input: Vec<f32>, batch_size: usize) -> Result<Vec<f32>> {
+        Self::check_batch_size(batch_size)?;
 
         let input_size: usize = self.info.input_spec.shape.iter().product();
-        let mut flattened = Vec::with_capacity(batch_size * input_size);
-        for (i, input) in inputs.into_iter().enumerate() {
-            self.validate_input_shape(&input)?;
-            if let Some(j) = input.iter().position(|x| !x.is_finite()) {
-                return Err(ModelError::InvalidDataType(format!(
-                    "Invalid value at batch[{i}][{j}]: {} (not finite)",
-                    input[j]
-                ))
-                .into());
+        if input.len() != batch_size * input_size {
+            let mut expected = vec![batch_size];
+            expected.extend_from_slice(&self.info.input_spec.shape);
+            return Err(ModelError::InputValidation {
+                expected,
+                actual: vec![input.len()],
             }
-            flattened.extend_from_slice(&input);
+            .into());
+        }
+        if let Some(pos) = input.iter().position(|x| !x.is_finite()) {
+            return Err(ModelError::InvalidDataType(format!(
+                "Invalid value at batch[{}][{}]: {} (not finite)",
+                pos / input_size,
+                pos % input_size,
+                input[pos]
+            ))
+            .into());
         }
 
         let input_tensor = Tensor::from_data(
-            TensorData::new(flattened, [batch_size, input_size]),
+            TensorData::new(input, [batch_size, input_size]),
             self.inner.device(),
         );
 
@@ -311,15 +355,10 @@ impl Model {
             .into());
         }
 
-        let flat: Vec<f32> = output
+        output
             .into_data()
-            .try_to_vec::<f32>()
-            .map_err(|e| ModelError::InferenceFailed(format!("{e:?}")))?;
-
-        Ok(flat
-            .chunks_exact(output_size)
-            .map(<[f32]>::to_vec)
-            .collect())
+            .try_into_vec::<f32>()
+            .map_err(|e| ModelError::InferenceFailed(format!("{e:?}")).into())
     }
 
     pub fn get_info(&self) -> &ModelInfo {
@@ -474,6 +513,40 @@ mod tests {
         let outputs = model.predict_batch(vec![vec![0.5; 784]; 3]).unwrap();
         assert_eq!(outputs.len(), 3);
         assert!(outputs.iter().all(|o| o.len() == 10));
+    }
+
+    #[test]
+    fn test_predict_flat_matches_batch() {
+        let model = get_test_model();
+        let flat = model.predict_flat(vec![0.5; 784 * 3], 3).unwrap();
+        let batch = model.predict_batch(vec![vec![0.5; 784]; 3]).unwrap();
+        assert_eq!(flat, batch.concat());
+        assert_eq!(model.get_stats().success_count, 2);
+    }
+
+    #[test]
+    fn test_predict_flat_rejects_bad_input() {
+        let model = get_test_model();
+        // Length not a multiple of the batch
+        assert!(matches!(
+            model.predict_flat(vec![0.5; 784 * 2 + 1], 2),
+            Err(crate::error::FurnaceError::Model(
+                ModelError::InputValidation { .. }
+            ))
+        ));
+        assert!(model.predict_flat(vec![], 0).is_err());
+        assert!(
+            model
+                .predict_flat(vec![0.5; 784], MAX_BATCH_SIZE + 1)
+                .is_err()
+        );
+
+        // Non-finite values report the batch item and index
+        let mut input = vec![0.5; 784 * 2];
+        input[784 + 5] = f32::NAN;
+        let err = model.predict_flat(input, 2).unwrap_err().to_string();
+        assert!(err.contains("batch[1][5]"), "{err}");
+        assert_eq!(model.get_stats().error_count, 4);
     }
 
     #[test]

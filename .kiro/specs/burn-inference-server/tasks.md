@@ -123,6 +123,11 @@
     - _Requirements: 11.3, 11.4_
 
 - [ ] 8. Add SIMD JSON processing and I/O optimizations
+  - Done so far (measured first, see README Performance): one-pass JSON parsing without
+    serde's `untagged`/`flatten` buffering (~2× faster), a binary `application/octet-stream`
+    input/output path that skips parsing, and `Model::predict_flat` to avoid per-item copies.
+    simd-json and streaming parsing were not adopted: after these changes, JSON I/O is ~6 ms
+    per ResNet-18 image against ~85 ms of inference, and binary input is ~1 ms
   - [ ] 8.1 Implement SIMD-optimized JSON parsing
     - Replace standard serde_json with simd-json for request parsing
     - Implement zero-copy JSON deserialization where possible

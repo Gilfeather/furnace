@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Request I/O for `POST /predict`. Over HTTP on localhost, I/O overhead for one ResNet-18 image
+drops from ~14 ms to ~6 ms with JSON and ~1 ms with binary input (batch of 4: ~44 ms to ~21 ms
+JSON, ~3 ms binary). See README Performance.
+
+### Added
+- Binary input: `Content-Type: application/octet-stream` with raw little-endian `float32`
+  values, optional `X-Batch-Size: N` header for batches
+- Binary output: `Accept: application/octet-stream` returns raw little-endian `float32`
+  outputs with `X-Batch-Size`, `X-Output-Shape` and `X-Inference-Time-Ms` headers (also
+  exposed to browsers through CORS)
+- `Model::predict_flat` runs a batch stored in one contiguous buffer, without per-item copies
+- `request_decode/*` Criterion benchmarks and `benches/http_bench.py` for HTTP latency
+
+### Changed
+- JSON request bodies are parsed in one pass. The derived `flatten` + `untagged` deserializer
+  buffered the whole document into an intermediate tree first, roughly doubling parse time
+- Requests whose `Content-Type` is neither JSON nor `application/octet-stream` get
+  `415 INVALID_REQUEST` (JSON-only before, same status)
+- A JSON body with both `input` and `inputs` is now rejected with 422 instead of silently
+  using `input`
+- `INVALID_REQUEST` messages for JSON type errors no longer include the element path
+  (e.g. `input[3]`); they still include line and column
+
 ## [0.4.0] - 2026-10-14
 
 Migration to Burn 0.22 and a correctness pass over the server. Performance figures in

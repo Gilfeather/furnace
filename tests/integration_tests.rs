@@ -123,6 +123,99 @@ async fn test_end_to_end_inference() {
     assert_eq!(invalid["code"], "INPUT_VALIDATION_FAILED");
 }
 
+fn le_bytes(values: &[f32]) -> Vec<u8> {
+    values.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
+fn json_floats(value: &Value) -> Vec<f32> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap() as f32)
+        .collect()
+}
+
+fn assert_close(a: &[f32], b: &[f32]) {
+    assert_eq!(a.len(), b.len());
+    assert!(a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3));
+}
+
+#[tokio::test]
+async fn test_end_to_end_binary_input() {
+    let base_url = spawn_server(ServerConfig::default()).await;
+    // A non-constant image so a mis-ordered decode would change the result
+    let ramp: Vec<f32> = (0..RESNET_INPUT)
+        .map(|i| (i % 224) as f32 / 112.0 - 1.0)
+        .collect();
+
+    // Reference: the same image through the JSON API
+    let reference: Value = client()
+        .post(format!("{base_url}/predict"))
+        .json(&json!({ "input": ramp }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let reference = json_floats(&reference["output"]);
+
+    // Binary in, JSON out: same response shape as `{"input": ...}`
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .header("content-type", "application/octet-stream")
+        .body(le_bytes(&ramp))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let single: Value = response.json().await.unwrap();
+    assert_eq!(single["batch_size"], 1);
+    assert_close(&json_floats(&single["output"]), &reference);
+
+    // Binary in, binary out, batch of 2
+    let mut body = le_bytes(&image(0.5));
+    body.extend(le_bytes(&ramp));
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .header("content-type", "application/octet-stream")
+        .header("accept", "application/octet-stream")
+        .header("x-batch-size", "2")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/octet-stream"
+    );
+    assert_eq!(response.headers()["x-batch-size"], "2");
+    assert_eq!(response.headers()["x-output-shape"], "1000");
+    let bytes = response.bytes().await.unwrap();
+    let (chunks, rest) = bytes.as_chunks::<4>();
+    assert!(rest.is_empty());
+    let outputs: Vec<f32> = chunks.iter().copied().map(f32::from_le_bytes).collect();
+    assert_eq!(outputs.len(), 2 * 1000);
+    assert_ne!(outputs[..1000], outputs[1000..]);
+    assert_close(&outputs[1000..], &reference);
+
+    // Size mismatch against X-Batch-Size
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .header("content-type", "application/octet-stream")
+        .header("x-batch-size", "2")
+        .body(le_bytes(&ramp))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let invalid: Value = response.json().await.unwrap();
+    assert_eq!(invalid["code"], "INPUT_VALIDATION_FAILED");
+    assert_eq!(invalid["details"]["received_bytes"], RESNET_INPUT * 4);
+}
+
 #[tokio::test]
 async fn test_invalid_model_name() {
     assert!(load_built_in_model("nonexistent_model").is_err());
