@@ -41,7 +41,9 @@ cuda = ["burn/cuda"]
 
 [dependencies]
 # ML Framework
-burn = { version = "0.22", default-features = false, features = ["std", "flex", "store"] }
+# `rayon` and `simd` are burn-flex defaults that `default-features = false` would drop:
+# without them the CPU backend runs single-threaded on scalar kernels
+burn = { version = "0.22", default-features = false, features = ["std", "flex", "store", "rayon", "simd"] }
 burn-store = { version = "0.22", features = ["std"] }
 # Zero-copy weight loading: .bpk files are memory-mapped and shared with tensors
 bytes = "1.9"
