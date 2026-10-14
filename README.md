@@ -435,10 +435,10 @@ measured before the CPU backend became multithreaded, so their end-to-end times 
 
 | Request | Body | End to end | I/O overhead |
 |---|---|---|---|
-| JSON, 1 image (0.4.0 before this change) | 1.7 MB | 102 ms | 14 ms |
+| JSON, 1 image (two-pass parser, pre-release) | 1.7 MB | 102 ms | 14 ms |
 | JSON, 1 image | 1.7 MB | 91–96 ms | 6 ms |
 | Binary (`application/octet-stream`), 1 image | 0.6 MB | 79–80 ms | 1 ms |
-| JSON, batch 4 (0.4.0 before this change) | 6.7 MB | 334 ms | 44 ms |
+| JSON, batch 4 (two-pass parser, pre-release) | 6.7 MB | 334 ms | 44 ms |
 | JSON, batch 4 | 6.7 MB | 299–323 ms | 21 ms |
 | Binary, batch 4 | 2.4 MB | 285–297 ms | 3 ms |
 
