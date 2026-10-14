@@ -140,13 +140,7 @@ impl BurnModelContainer {
         if !weights_path.exists() {
             return Err(ModelError::FileNotFound(weights_path).into());
         }
-        let mut store = BurnpackStore::from_file(&weights_path);
-        model
-            .load_from(&mut store)
-            .map_err(|e| ModelError::LoadFailed {
-                path: weights_path.clone(),
-                source: Box::new(e),
-            })?;
+        crate::weights::load_burnpack(&mut model, &weights_path)?;
 
         info!(
             "Loaded MLP model '{}' from {:?} on {} backend",
