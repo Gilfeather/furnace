@@ -1,93 +1,78 @@
-#[cfg(feature = "burn-import")]
-use burn_import::onnx::ModelGen;
+#[cfg(feature = "onnx")]
+use burn_onnx::{LoadStrategy, ModelGen};
+#[cfg(feature = "onnx")]
 use std::fs;
+#[cfg(feature = "onnx")]
 use std::path::Path;
 
 fn main() {
-    // Generate Rust code from ONNX models following Burn documentation
-    #[cfg(feature = "burn-import")]
-    {
-        generate_onnx_models();
-    }
-
-    #[cfg(not(feature = "burn-import"))]
-    {
-        eprintln!("burn-import feature not enabled, skipping ONNX model generation");
-    }
-
     // Rerun if any ONNX files change
     println!("cargo:rerun-if-changed=models/");
 
     // Declare possible cfg flags
     println!("cargo:rustc-check-cfg=cfg(model_resnet18)");
-    println!("cargo:rustc-check-cfg=cfg(model_gptneox_opset18)");
+
+    // Generate Rust code from ONNX models following the burn-onnx documentation
+    #[cfg(feature = "onnx")]
+    generate_onnx_models();
+
+    #[cfg(not(feature = "onnx"))]
+    println!("cargo:warning=onnx feature not enabled, skipping ONNX model generation");
 }
 
-#[cfg(feature = "burn-import")]
+#[cfg(feature = "onnx")]
 fn generate_onnx_models() {
-    eprintln!("Generating ONNX models following Burn documentation");
-
     let models_dir = Path::new("models");
-    if !models_dir.exists() {
-        eprintln!("Models directory not found, skipping ONNX generation");
-        return;
-    }
-
-    // Find all ONNX files in the models directory
     let onnx_files = match fs::read_dir(models_dir) {
         Ok(entries) => entries
             .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let path = entry.path();
-                if path.extension()?.to_str()? == "onnx" {
-                    Some(path)
-                } else {
-                    None
-                }
+                let path = entry.ok()?.path();
+                (path.extension()?.to_str()? == "onnx").then_some(path)
             })
             .collect::<Vec<_>>(),
-        Err(e) => {
-            eprintln!("Failed to read models directory: {e}");
+        Err(_) => {
+            println!(
+                "cargo:warning=models/ directory not found, no built-in models will be available"
+            );
             return;
         }
     };
 
-    if onnx_files.is_empty() {
-        eprintln!("No ONNX files found in models directory");
-        return;
-    }
+    // Keep weights out of the binary unless explicitly requested
+    let embed = std::env::var_os("CARGO_FEATURE_EMBED_WEIGHTS").is_some();
 
-    // Generate Rust code for each ONNX model
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
+    let models_out_dir = format!("{out_dir}/models");
+    fs::create_dir_all(&models_out_dir).expect("Failed to create models output directory");
+
     for onnx_path in onnx_files {
         let model_name = onnx_path
             .file_stem()
             .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-
-        eprintln!("Generating model: {model_name}");
+            .unwrap_or("unknown")
+            .to_string();
         println!("cargo:rerun-if-changed={}", onnx_path.display());
 
-        // Try to generate the model, but don't fail the entire build if one model fails
-        match std::panic::catch_unwind(|| {
-            let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
-            let models_out_dir = format!("{out_dir}/models");
-            std::fs::create_dir_all(&models_out_dir)
-                .expect("Failed to create models output directory");
-
+        // Don't fail the entire build if one model can't be converted
+        let input = onnx_path.to_str().unwrap().to_string();
+        let out = models_out_dir.clone();
+        let result = std::panic::catch_unwind(move || {
             ModelGen::new()
-                .input(onnx_path.to_str().unwrap())
-                .out_dir(&models_out_dir)
+                .input(&input)
+                .out_dir(&out)
+                .load_strategy(if embed {
+                    LoadStrategy::Embedded
+                } else {
+                    LoadStrategy::File
+                })
                 .run_from_script();
-        }) {
-            Ok(_) => {
-                eprintln!("✅ Model '{model_name}' generated successfully");
-                // Tell Cargo that this model was successfully generated
-                println!("cargo:rustc-cfg=model_{}", model_name.replace("-", "_"));
-            }
-            Err(_) => {
-                eprintln!("❌ Failed to generate model '{model_name}' - incompatible ONNX format");
-                eprintln!("   This model will be skipped. Consider simplifying the ONNX file.");
-            }
+        });
+
+        match result {
+            Ok(()) => println!("cargo:rustc-cfg=model_{}", model_name.replace('-', "_")),
+            Err(_) => println!(
+                "cargo:warning=Failed to generate model '{model_name}' (unsupported ONNX graph), skipping"
+            ),
         }
     }
 }

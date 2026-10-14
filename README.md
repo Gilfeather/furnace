@@ -1,858 +1,421 @@
 # 🔥 Furnace
 
 [![Build Status](https://github.com/Gilfeather/furnace/actions/workflows/ci.yml/badge.svg)](https://github.com/Gilfeather/furnace/actions/workflows/ci.yml)
-[![Binary Size](https://img.shields.io/badge/binary%20size-4.5MB-blue)](https://github.com/Gilfeather/furnace)
-[![Inference Time](https://img.shields.io/badge/inference-~25s*-orange)](https://github.com/Gilfeather/furnace)
+[![Burn](https://img.shields.io/badge/burn-0.22-orange)](https://github.com/tracel-ai/burn)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/Gilfeather/furnace/blob/main/LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/Gilfeather/furnace?style=social)](https://github.com/Gilfeather/furnace/stargazers)
 
-**Ultra-fast ONNX inference server built with Rust**
+**A Rust HTTP inference server for ONNX and Burn models, with zero Python dependencies.**
 
-A high-performance, lightweight HTTP inference server specialized for ONNX models with zero Python dependencies. Built with Burn's ONNX-to-Rust code generation for ResNet-18 image classification.
-
-
-
+Furnace compiles ONNX models into native Rust code at build time with
+[`burn-onnx`](https://github.com/tracel-ai/burn-onnx) and serves them over a small JSON API.
+The model is yours to choose; the server stays a ~5 MB binary with a runtime-selectable
+CPU/GPU backend.
 
 ## ✨ Features
 
-- 🦀 **Pure Rust**: Maximum performance, minimal memory footprint (4.5MB binary)
-- 🔥 **ONNX Support**: Direct ONNX model loading with automatic shape detection
-- ⚡ **Fast Inference**: ~25s inference times for ResNet-18
-- 🛡️ **Production Ready**: Graceful shutdown, comprehensive error handling
-- 🌐 **HTTP API**: RESTful endpoints with CORS support
-- 📦 **Single Binary**: Zero external dependencies
-- 🖼️ **Image Classification**: Optimized for computer vision models
+- 🦀 **Pure Rust**: ONNX graphs become Rust code at build time; no ONNX runtime, no Python
+- 🪶 **Lightweight**: ~5 MB server binary; model weights live in a separate `.bpk` file
+  (swap in fine-tuned weights without rebuilding, or embed them with `--features embed-weights`)
+- 🔀 **Runtime backend selection**: `--backend cpu|wgpu|metal|cuda` (Burn 0.22 `Device` API)
+- 🖼️ **Built-in ResNet-18**: ImageNet classifier, ~75–90 ms per image on a laptop CPU
+- ⚡ **Binary I/O**: send raw `float32` (`application/octet-stream`) instead of JSON; ~1 ms of
+  request overhead per ResNet-18 image
+- 🚦 **Backpressure**: bounded concurrency with immediate `503` instead of unbounded queues
+- 🛡️ **Hardened API**: body size limit, input validation, timeouts, security headers,
+  graceful shutdown
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 
-- **Rust 1.75+** and Cargo
-- **curl** for downloading models and testing
-- **~50MB disk space** for ResNet-18 model
+- **Rust 1.95+** (`rustup update stable`)
+- On Windows: Visual Studio C++ Build Tools (the MSVC linker)
+- ~50 MB disk space for the ResNet-18 ONNX model
 
-### 1. Clone and Setup
+### 1. Clone and download the model
 
 ```bash
 git clone https://github.com/Gilfeather/furnace.git
 cd furnace
-```
-
-### 2. Download ResNet-18 ONNX Model
-
-```bash
-# Create models directory
 mkdir -p models
-
-# Download ResNet-18 ONNX model from official ONNX model zoo
 curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
-
-# Verify download
-ls -la models/
-# Should show: resnet18.onnx (~45MB)
 ```
 
-### 3. Build with ONNX Support
+### 2. Build
 
 ```bash
-# Build with burn-import feature to generate Rust code from ONNX
-cargo build --features burn-import --release
+cargo build --release
 ```
 
-Expected output: Binary created at `./target/release/furnace` (~4.5MB)
+`build.rs` converts every `models/*.onnx` into Rust code plus a Burnpack weight file. The
+server binary is `target/release/furnace` (~5 MB). When run from the build machine it finds
+the generated `resnet18.bpk` automatically.
 
-### 4. Generate Test Data
+### 3. Run
 
 ```bash
-# Generate ResNet-18 test samples (creates JSON files locally)
+./target/release/furnace --model-name resnet18 --port 3000
+```
+
+```
+INFO 🔥 Starting furnace inference server version="0.4.0"
+INFO 📦 Loading model model_name=Some("resnet18") backend=cpu
+INFO ✅ Model loaded successfully model_name=resnet18 input_shape=[3, 224, 224] output_shape=[1000] backend=cpu model_type=onnx
+INFO 🚦 Concurrency limit set to 100 inferences
+INFO ✅ Server running on http://127.0.0.1:3000
+```
+
+### 4. Call the API
+
+```bash
+# Generate sample request bodies (resnet18_single_sample.json, resnet18_batch_sample.json)
 cargo run --example resnet18_sample_data
-```
 
-This creates the following test files:
-- `resnet18_single_sample.json` - Single image test data
-- `resnet18_batch_sample.json` - Batch of 3 images test data  
-- `resnet18_full_test.json` - Full-size single image (150,528 values)
-
-### 5. Start the Server
-
-```bash
-# Start server with built-in ResNet-18 model
-./target/release/furnace --model-name resnet18 --host 127.0.0.1 --port 3000
-```
-
-Expected output:
-```
-🔧 Logging initialized log_level=INFO is_production=false
-🔥 Starting furnace inference server session_id=...
-📋 Server configuration model_name=resnet18 server_host=127.0.0.1 server_port=3000
-📦 Loading model model_name=resnet18
-Loading built-in model: resnet18
-Successfully loaded built-in model: resnet18 with backend: burn-resnet18
-✅ Model loaded successfully input_shape=[1, 3, 224, 224] output_shape=[1000]
-🚀 Starting HTTP server
-🚦 Concurrency limit set to 100 requests  
-✅ Server running on http://127.0.0.1:3000
-```
-
-### 6. Test the API
-
-Open a new terminal and test the endpoints:
-
-```bash
-# Health check
-curl http://localhost:3000/health
-# Expected: {"status":"healthy","model_loaded":true,...}
-
-# Model info  
+curl http://localhost:3000/healthz
 curl http://localhost:3000/model/info
-# Expected: {"model_info":{"name":"resnet18","input_spec":{"shape":[1,3,224,224]},...}}
 
-# Single image prediction (~25s inference time for ResNet18)
 curl -X POST http://localhost:3000/predict \
   -H "Content-Type: application/json" \
-  --data-binary @resnet18_full_test.json
-# Expected: {"output":[-1.596,-0.173,0.842,...],"status":"success","inference_time_ms":25477.0}
+  --data-binary @resnet18_single_sample.json
 
-# Batch prediction
 curl -X POST http://localhost:3000/predict \
   -H "Content-Type: application/json" \
   --data-binary @resnet18_batch_sample.json
-# Expected: {"output":[[-1.596,...],[-0.173,...],[0.842,...]],"batch_size":3,"status":"success"}
 ```
 
-## 🖼️ ONNX Model Integration
+## ⚙️ CLI Options
 
-Furnace uses Burn's native ONNX import system to generate Rust code from ONNX models at build time. This provides maximum performance and eliminates runtime dependencies.
+| Option | Default | Description |
+|---|---|---|
+| `-m, --model-name <NAME>` | `resnet18` | Built-in model compiled into the binary |
+| `-w, --weights <PATH>` | see below | Weight file (`.bpk`) for the built-in model |
+| `--model-path <PATH>` | | File-based Burn model: `<PATH>.bpk` + `<PATH>.json` (conflicts with `--model-name`) |
+| `-b, --backend <BACKEND>` | `cpu` | Compute backend; only backends compiled into the binary are accepted |
+| `--host <HOST>` | `127.0.0.1` | Bind address (`0.0.0.0` for all interfaces) |
+| `-p, --port <PORT>` | `3000` | Port (1024–65535) |
+| `--max-concurrent-requests <N>` | `100` | Concurrent inferences; extra requests get `503 SERVER_BUSY` |
+| `--max-body-mb <MB>` | `100` | Maximum request body size |
+| `--request-timeout-ms <MS>` | none | Inference timeout; exceeded requests get `504 INFERENCE_TIMEOUT` |
+| `-l, --log-level <LEVEL>` | `info` | `error`, `warn`, `info`, `debug`, `trace` |
 
-### 🔧 How ONNX Integration Works
+Without `--weights`, Furnace looks for `<name>.bpk` next to the executable, then in
+`models/`, then in the build output directory. A release install is therefore just two
+files side by side: `furnace` and `resnet18.bpk`.
 
-1. **Build-time Code Generation**: ONNX models are converted to native Rust code during compilation
-2. **Zero Runtime Dependencies**: No ONNX runtime required - everything is compiled into the binary
-3. **Native Performance**: Generated code is optimized by the Rust compiler
-4. **Type Safety**: Full Rust type checking for model inputs and outputs
+Set `FURNACE_ENV=production` for JSON-structured logs. `RUST_LOG` overrides the log filter.
 
-### 📁 Project Structure for ONNX Models
-
-```
-furnace/
-├── models/                    # Place your ONNX files here
-│   ├── resnet18.onnx         # ResNet-18 model (auto-detected)
-│   └── your_model.onnx       # Your custom ONNX models
-├── build.rs                  # Generates Rust code from ONNX files
-├── src/
-│   ├── onnx_models.rs        # Generated model integration
-│   └── ...
-└── target/debug/build/.../out/models/
-    ├── resnet18.rs           # Generated Rust code for ResNet-18
-    └── your_model.rs         # Generated code for your models
-```
-
-### 🚀 Adding Custom ONNX Models
-
-**Furnace automatically detects and integrates ONNX models!** Just place them in the `models/` directory and rebuild.
-
-#### Step 1: Add Your ONNX File
-```bash
-# Place your ONNX model in the models/ directory
-cp your_model.onnx models/
-
-# Verify file placement
-ls -la models/
-# Should show: resnet18.onnx, your_model.onnx, etc.
-```
-
-#### Step 2: Automatic Build Process
-```bash
-# Build with burn-import feature for ONNX processing
-cargo build --features burn-import
-```
-
-**What happens during build:**
-- 🔍 Auto-detects all `.onnx` files in `models/` directory
-- 🦀 Converts each ONNX model to native Rust code
-- ✅ Successfully generated models become available
-- ❌ Failed models are skipped (with helpful error messages)
-
-**Build Output Example:**
-```
-Generating ONNX models following Burn documentation
-Generating model: resnet18
-✅ Model 'resnet18' generated successfully
-Generating model: your_model
-❌ Failed to generate model 'your_model' - incompatible ONNX format
-   This model will be skipped. Consider simplifying the ONNX file.
-```
-
-#### Step 3: Add Model to Code (Manual Integration)
-
-For successfully generated models, add them to `src/models/mod.rs`:
-
-**3a. Add Module Declaration:**
-```rust
-// Add your model module
-#[cfg(all(feature = "burn-import", model_your_model))]
-pub mod your_model {
-    include!(concat!(env!("OUT_DIR"), "/models/your_model.rs"));
-}
-
-// Re-export the model
-#[cfg(all(feature = "burn-import", model_your_model))]
-pub use your_model::Model as YourModel;
-```
-
-**3b. Add to BuiltInModel enum:**
-```rust
-pub enum BuiltInModel {
-    ResNet18,
-    #[cfg(model_your_model)]
-    YourModel,  // Add your model here
-}
-```
-
-**3c. Add Model Loading Logic:**
-```rust
-impl BuiltInModel {
-    pub fn from_name(name: &str) -> Result<Self> {
-        match name.to_lowercase().as_str() {
-            "resnet18" => Ok(Self::ResNet18),
-            #[cfg(model_your_model)]
-            "yourmodel" => Ok(Self::YourModel),  // Add your model
-            // ...
-        }
-    }
-
-    pub fn create_model(&self) -> Result<Box<dyn BurnModel>> {
-        match self {
-            // ... existing models ...
-            #[cfg(model_your_model)]
-            Self::YourModel => {
-                let model = YourModel::<Backend>::default();
-                Ok(Box::new(SimpleYourModelWrapper {
-                    model: Arc::new(Mutex::new(model)),
-                    name: "yourmodel".to_string(),
-                    input_shape: vec![1, 3, 224, 224],  // Adjust for your model
-                    output_shape: vec![1000],            // Adjust for your model
-                }))
-            }
-        }
-    }
-}
-```
-
-**3d. Create Model Wrapper:**
-```rust
-// Add wrapper struct for your model
-#[cfg(all(feature = "burn-import", model_your_model))]
-#[derive(Debug)]
-pub struct SimpleYourModelWrapper {
-    model: Arc<Mutex<YourModel<Backend>>>,
-    name: String,
-    input_shape: Vec<usize>,
-    output_shape: Vec<usize>,
-}
-
-// Implement BurnModel trait
-#[cfg(all(feature = "burn-import", model_your_model))]
-impl BurnModel for SimpleYourModelWrapper {
-    fn predict(&self, input: Tensor<Backend, 2>) -> Result<Tensor<Backend, 2>> {
-        // Validate input and reshape as needed for your model
-        let model = self.model.lock().unwrap();
-        let output = model.forward(input);  // Adjust based on your model's requirements
-        Ok(output)
-    }
-    
-    // Implement other required methods...
-    fn get_name(&self) -> &str { &self.name }
-    fn get_input_shape(&self) -> &[usize] { &self.input_shape }
-    fn get_output_shape(&self) -> &[usize] { &self.output_shape }
-    fn get_backend_info(&self) -> String { "burn-yourmodel".to_string() }
-    // ...
-}
-```
-
-#### Step 4: Build and Test
-```bash
-# Rebuild with your new model integration
-cargo build --features burn-import
-
-# List available models
-cargo run --bin furnace --features burn-import -- --help
-
-# Start server with your model
-cargo run --bin furnace --features burn-import -- --model-name yourmodel --port 3000
-
-# Test inference
-curl -X POST http://localhost:3000/predict \
-  -H "Content-Type: application/json" \
-  -d '{"input": [/* your test data */]}'
-```
-
-### 🎯 Complete Example: Adding MobileNet
-
-**Step-by-step example of adding MobileNet v2:**
+## 📦 Deploying
 
 ```bash
-# 1. Download MobileNet ONNX model
-curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/mobilenet/model/mobilenetv2-12.onnx" -o models/mobilenetv2.onnx
-
-# 2. Build (automatic generation)
-cargo build --features burn-import
-# Expected output: ✅ Model 'mobilenetv2' generated successfully
-
-# 3. Add cfg declaration to build.rs (if not already present)
-# Add to build.rs: println!("cargo:rustc-check-cfg=cfg(model_mobilenetv2)");
+cargo build --release
+mkdir -p dist
+cp target/release/furnace dist/
+cp target/release/build/furnace-*/out/models/resnet18.bpk dist/
+./dist/furnace --model-name resnet18
 ```
 
-**Add to src/models/mod.rs:**
-```rust
-// Module declaration
-#[cfg(all(feature = "burn-import", model_mobilenetv2))]
-pub mod mobilenetv2 {
-    include!(concat!(env!("OUT_DIR"), "/models/mobilenetv2.rs"));
-}
+If you'd rather ship a single file, build with `--features embed-weights`. The weights are
+then compiled into the binary, so it grows by the size of the model.
 
-// Re-export
-#[cfg(all(feature = "burn-import", model_mobilenetv2))]
-pub use mobilenetv2::Model as MobileNetV2Model;
+The weight file is memory-mapped, not copied into the heap, so don't edit it in place
+while the server runs. On Linux and macOS, write the new file elsewhere and rename it over
+the old one; the running process keeps the old weights until it restarts. Windows locks the
+file while it is mapped, so stop the server first or point `--weights` at a new file.
 
-// Add to BuiltInModel enum
-pub enum BuiltInModel {
-    ResNet18,
-    #[cfg(model_mobilenetv2)]
-    MobileNetV2,
-}
+## 🔀 Backends
 
-// Wrapper struct
-#[cfg(all(feature = "burn-import", model_mobilenetv2))]
-#[derive(Debug)]
-pub struct SimpleMobileNetV2ModelWrapper {
-    model: Arc<Mutex<MobileNetV2Model<Backend>>>,
-    name: String,
-    input_shape: Vec<usize>,
-    output_shape: Vec<usize>,
-}
+The CPU backend ([burn-flex](https://github.com/tracel-ai/burn), pure Rust) is always
+available. GPU backends are opt-in Cargo features:
 
-// Add to from_name, create_model, etc...
-```
-
-**Test the new model:**
 ```bash
-# Build and test
-cargo build --features burn-import
-cargo run --bin furnace --features burn-import -- --model-name mobilenetv2
+cargo build --release --features wgpu    # Vulkan / DX12 / Metal via WebGPU
+cargo build --release --features metal   # Apple Metal (native MSL)
+cargo build --release --features cuda    # NVIDIA CUDA
+
+./target/release/furnace --model-name resnet18 --backend wgpu
 ```
 
-### 📋 Best Practices for Custom Models
+## 🌐 API
 
-**✅ Recommended Workflow:**
-1. **Test with smaller models first** (SqueezeNet, MobileNet)
-2. **Verify ONNX compatibility** before integration
-3. **Use descriptive model names** (lowercase, no spaces)
-4. **Add comprehensive error handling** in your wrapper
-5. **Test thoroughly** with your specific input data
+### `GET /healthz` (alias `GET /health`)
 
-**⚠️ Common Pitfalls:**
-- Don't forget the `#[cfg(...)]` attributes
-- Match model names exactly (case-sensitive in file paths)
-- Ensure input/output shapes match your actual model
-- Add cfg check declarations to build.rs for new models
-- Test with both single and batch predictions
-
-**📋 Model Integration Checklist:**
-- [ ] ONNX file placed in `models/` directory
-- [ ] Build succeeds with "✅ Model generated successfully"
-- [ ] Added module declaration with proper cfg attributes
-- [ ] Added to BuiltInModel enum
-- [ ] Added to from_name() method
-- [ ] Added to create_model() method
-- [ ] Added wrapper struct and BurnModel implementation
-- [ ] Added cfg check to build.rs
-- [ ] Tested server startup
-- [ ] Tested inference API
-
-### 🔍 Debugging Model Integration
-
-**Check if model was generated:**
-```bash
-# Look for generated Rust files
-find target -name "*.rs" -path "*/out/models/*"
-
-# Check build output for your model
-cargo build --features burn-import 2>&1 | grep -i "your_model"
+```json
+{ "status": "healthy", "model_loaded": true, "backend": "cpu", "uptime_seconds": 42, "timestamp": "2026-10-14T03:34:47Z" }
 ```
 
-**Verify conditional compilation:**
-```bash
-# Check which models are enabled
-cargo build --features burn-import -v 2>&1 | grep "model_"
-```
+### `GET /metrics`
 
-**Test model loading:**
-```bash
-# Try to start server (will show available models if yours isn't found)
-cargo run --bin furnace --features burn-import -- --model-name nonexistent
-# Error message will list available models
-```
+Server counters for monitoring:
 
-### 🔍 Generated Code Structure
-
-When you build with an ONNX model, Burn generates a complete Rust implementation:
-
-```rust
-// Example: Generated ResNet-18 code structure
-#[derive(Module, Debug)]
-pub struct Model<B: Backend> {
-    conv2d1: Conv2d<B>,
-    batchnormalization1: BatchNorm<B, 2>,
-    maxpool2d1: MaxPool2d,
-    // ... all layers defined
-}
-
-impl<B: Backend> Model<B> {
-    pub fn forward(&self, input: Tensor<B, 4>) -> Tensor<B, 2> {
-        // Complete forward pass implementation
-        let x = self.conv2d1.forward(input);
-        let x = self.batchnormalization1.forward(x);
-        // ... full computation graph
-    }
-}
-```
-
-### ⚠️ ONNX Compatibility Notes
-
-**Supported ONNX Features:**
-- ✅ Opset 16+ (required)
-- ✅ Standard CNN operations (Conv2d, BatchNorm, ReLU, etc.)
-- ✅ Image classification models
-- ✅ Most PyTorch-exported models
-
-**Known Limitations:**
-- ❌ Some complex models may have unsupported operations
-- ❌ Dynamic shapes require manual handling  
-- ❌ Some models may need ONNX version upgrade
-- ❌ Models with broadcasting dimension conflicts
-- ❌ Extremely large models (>2GB) may cause memory issues
-
-**Troubleshooting Failed Model Generation:**
-
-*1. ONNX Version Issues:*
-```python
-# Check ONNX opset version
-import onnx
-model = onnx.load('models/your_model.onnx')
-print(f'ONNX opset version: {model.opset_import[0].version}')
-
-# Upgrade to supported version (16+)
-from onnx import version_converter
-upgraded = version_converter.convert_version(model, 16)
-onnx.save(upgraded, 'models/your_model_v16.onnx')
-```
-
-*2. Model Simplification:*
-```bash
-# Install ONNX simplifier
-pip install onnx-simplifier
-
-# Simplify complex models
-python -c "
-import onnx
-from onnxsim import simplify
-model = onnx.load('models/complex_model.onnx')
-simplified, check = simplify(model)
-onnx.save(simplified, 'models/simple_model.onnx')
-"
-```
-
-*3. Shape Broadcasting Issues:*
-```bash
-# If you see "Invalid shape for broadcasting" errors:
-# - Try model simplification first
-# - Check if model has dynamic shapes
-# - Consider using a different model architecture
-# - Report issue with model details for potential fix
-```
-
-*4. Memory Issues:*
-```bash
-# For very large models:
-export RUST_MIN_STACK=8388608  # Increase stack size
-cargo build --features burn-import
-```
-
-### 🧪 Testing Generated Models
-
-**Quick validation workflow:**
-```bash
-# 1. Build with burn-import feature
-cargo build --features burn-import
-
-# 2. Check generated code
-find target -name "*.rs" -path "*/out/models/*"
-# Should show: resnet18.rs, your_model.rs, etc.
-
-# 3. Test available models
-cargo run --bin furnace --features burn-import -- --help
-# Will show available model names in help text
-
-# 4. Test server startup
-cargo run --bin furnace --features burn-import -- --model-name yourmodel --port 3000
-
-# 5. Test model info endpoint
-curl http://localhost:3000/model/info
-
-# 6. Test inference
-curl -X POST http://localhost:3000/predict \
-  -H "Content-Type: application/json" \
-  -d '{"input": [/* your test data matching model input shape */]}'
-```
-
-**Performance testing:**
-```bash
-# Generate test data for your model
-cargo run --example create_test_data -- --model yourmodel
-
-# Run benchmarks
-cargo bench --features burn-import
-```
-
-## 🖼️ Supported Models
-
-Furnace supports ONNX models with automatic shape detection. Currently optimized for image classification models.
-
-### 🎯 Tested Models
-
-| Model | Input Shape | Output Shape | Size | Status |
-|-------|-------------|--------------|------|---------|
-| **ResNet-18** | `[3, 224, 224]` | `[1000]` | 45MB | ✅ **Supported** |
-| **MobileNet v2** | `[3, 224, 224]` | `[1000]` | 14MB | 🧪 **Compatible** |
-| **SqueezeNet** | `[3, 224, 224]` | `[1000]` | 5MB | 🧪 **Compatible** |
-| **GPT-NeoX** | `[1, 512]` | `[50257]` | 1.7MB | ❌ **Incompatible** |
-| **Your Custom Model** | `[?, ?, ?]` | `[?]` | ?MB | 🔄 **Add with guide above** |
-
-### 📥 Built-in Pre-trained Models
-
-Furnace includes built-in models that are compiled during build time:
-
-| Model | Status |
-|-------|--------|
-| **ResNet-18** | ✅ **Available** (45MB, built-in) |
-| **MobileNet v2** | 🔄 **Add to models/** |
-| **SqueezeNet** | 🔄 **Add to models/** |
-
-To add additional models, place ONNX files in the `models/` directory and rebuild with `--features burn-import`.
-
-### 🔧 Custom Models
-
-To use your own ONNX models:
-
-1. **Export your model to ONNX format**
-2. **Ensure input shape compatibility** (currently optimized for image classification)
-3. **Test with Furnace** using the same API endpoints
-
-```python
-# Example: Export PyTorch model to ONNX
-import torch
-import torchvision.models as models
-
-model = models.resnet18(pretrained=True)
-model.eval()
-
-dummy_input = torch.randn(1, 3, 224, 224)
-torch.onnx.export(model, dummy_input, "my_model.onnx")
-```
-
-## 📊 Performance
-
-### ResNet-18 Benchmarks
-| Metric | Value |
-|--------|-------|
-| Binary Size | **4.5MB** |
-| Model Size | **45MB** |
-| Inference Time | **~25s** |
-| Memory Usage | **<200MB** |
-| Startup Time | **<2s** |
-| Input Size | **150,528 values** |
-| Output Size | **1,000 classes** |
-
-### 🚀 Benchmark Results
-
-**Prerequisites:**
-```bash
-# Generate test data (benchmarks use built-in model)
-cargo run --example resnet18_sample_data
-```
-
-**Run benchmarks:**
-```bash
-# Run all benchmarks
-cargo bench
-
-# Run specific benchmark
-cargo bench single_inference
-cargo bench batch_inference
-cargo bench latency_measurement
-```
-
-### 📈 Performance Characteristics
-
-- **Single Inference**: ~0.2ms per image (ResNet-18)
-- **Batch Processing**: Optimized for batches of 1-8 images
-- **Concurrent Requests**: Handles multiple simultaneous requests
-- **Memory Efficiency**: Minimal memory allocation per request
-- **Throughput**: Scales with available CPU cores
-
-### 🎯 Actual Benchmark Results
-
-Based on Criterion benchmarks on **Intel MacBook Pro 2020**:
-
-| Benchmark | Time | Throughput |
-|-----------|------|------------|
-| Single Inference | **152µs** | ~6,600 req/s |
-| Batch Size 2 | **305µs** | ~6,600 req/s |
-| Batch Size 4 | **664µs** | ~6,000 req/s |
-| Batch Size 8 | **1.53ms** | ~5,200 req/s |
-| Concurrent (4 threads) | **372µs** | ~10,800 req/s |
-| Concurrent (8 threads) | **561µs** | ~14,300 req/s |
-
-**Latency Percentiles:**
-- P50: ~149µs
-- P95: ~255µs  
-- P99: ~340µs
-
-**Performance Breakdown:**
-- **ONNX Inference**: ~14µs (pure model execution)
-- **Server Overhead**: ~157µs (optimized data processing, validation, tensor conversion)
-- **Total Time**: ~171µs (end-to-end processing)
-
-**Optimization Details:**
-- 50% performance improvement while maintaining full security
-- SIMD-optimized input validation for NaN/infinity detection
-- Non-blocking statistics updates to prevent deadlocks
-- Memory-efficient tensor operations
-
-**Test Environment:**
-- Hardware: Intel MacBook Pro 2020
-- Compiler: Rust 1.75+ (release mode with full optimizations)
-- Model: ResNet-18 ONNX (45MB, 150,528 input values → 1,000 output classes)
-
-## 🌐 API Endpoints
-
-### `GET /healthz`
-Health check endpoint
 ```json
 {
-  "status": "healthy",
-  "model_loaded": true,
   "uptime_seconds": 3600,
-  "timestamp": "2024-01-01T12:00:00Z"
+  "total_requests": 1520, "total_errors": 12, "rejected_busy": 9,
+  "in_flight_inferences": 2, "max_concurrent_inferences": 100,
+  "total_inferences": 1508, "average_inference_time_ms": 84.2,
+  "last_inference_at": "2026-10-14T05:01:12Z",
+  "timestamp": "2026-10-14T05:01:13Z"
 }
 ```
 
+`total_requests` and `total_errors` count every `/predict` request, including those rejected
+before inference (400, 413, 503). `rejected_busy` is the 503 subset.
+
 ### `GET /model/info`
-Model metadata and statistics
+
 ```json
 {
   "model_info": {
     "name": "resnet18",
-    "input_spec": {"shape": [3, 224, 224], "dtype": "float32"},
-    "output_spec": {"shape": [1000], "dtype": "float32"},
-    "model_type": "burn",
-    "backend": "onnx"
+    "version": "1.0.0",
+    "input_spec":  { "shape": [3, 224, 224], "dtype": "float32", "min_value": null, "max_value": null },
+    "output_spec": { "shape": [1000], "dtype": "float32", "min_value": null, "max_value": null },
+    "model_type": "onnx",
+    "backend": "cpu",
+    "created_at": "2026-10-14T03:34:41Z",
+    "model_size_bytes": 0
   },
   "stats": {
-    "inference_count": 42,
-    "total_inference_time_ms": 168.0,
-    "average_inference_time_ms": 4.0
-  }
+    "inference_count": 7, "success_count": 7, "error_count": 0,
+    "total_inference_time_ms": 1130.9, "average_inference_time_ms": 161.6,
+    "min_inference_time_ms": 73.3, "max_inference_time_ms": 386.9,
+    "last_inference_time": "2026-10-14T03:34:47Z"
+  },
+  "timestamp": "2026-10-14T03:34:48Z"
 }
 ```
 
 ### `POST /predict`
-Run inference on input data
 
-**Single Image:**
-```bash
-curl -X POST http://localhost:3000/predict \
-  -H "Content-Type: application/json" \
-  --data-binary @resnet18_full_test.json
-```
+Inputs are flattened per item. For ResNet-18 that is `3 × 224 × 224 = 150,528` floats in CHW
+order, normalized with the usual ImageNet mean/std.
 
-**Batch Images:**
-```bash
-curl -X POST http://localhost:3000/predict \
-  -H "Content-Type: application/json" \
-  --data-binary @resnet18_batch_sample.json
-```
+Single item:
 
-**Response:**
 ```json
-{
-  "output": [0.1, 0.05, 0.02, ...], // 1000 ImageNet class probabilities
-  "status": "success",
-  "inference_time_ms": 0.2,
-  "timestamp": "2024-01-01T12:00:00Z",
-  "batch_size": 1
-}
+// request
+{ "input": [0.12, -0.53, ...] }
+// response
+{ "output": [-1.59, -0.17, ...], "status": "success", "inference_time_ms": 74.8, "timestamp": "...", "batch_size": 1 }
 ```
 
-### 📝 Input Format
+Batch (up to 1000 items):
 
-ResNet-18 expects normalized RGB image data:
-- **Shape**: `[3, 224, 224]` (150,528 values)
-- **Format**: Flattened array of float32 values
-- **Range**: Typically 0.0 to 1.0 (normalized pixel values)
-- **Order**: Channel-first (RGB channels, then height, then width)
+```json
+// request
+{ "inputs": [[...], [...], [...]] }
+// response
+{ "outputs": [[...], [...], [...]], "status": "success", "inference_time_ms": 260.3, "timestamp": "...", "batch_size": 3 }
+```
+
+Outputs are raw logits; apply softmax client-side for probabilities.
+
+#### Binary input and output
+
+For large inputs, skip JSON and send raw little-endian `float32` values with
+`Content-Type: application/octet-stream`. The body is the flattened items back to back
+(`batch × 150,528 × 4` bytes for ResNet-18). This avoids formatting and parsing ~10 bytes
+of text per value, and the body is ~2.5× smaller.
+
+| Request header | Meaning |
+|---|---|
+| `Content-Type: application/octet-stream` | Body is raw `float32` (little-endian) |
+| `X-Batch-Size: N` | Optional. Body holds `N` items and the JSON response uses `outputs`. Without it the body is one item and the response uses `output`, as with `input` |
+| `Accept: application/octet-stream` | Optional, works with JSON requests too. Respond with raw little-endian `float32` outputs (`batch × output_size`) instead of JSON |
+
+A binary response carries its metadata in headers: `X-Batch-Size`, `X-Output-Shape` (per item,
+comma separated, e.g. `1000`) and `X-Inference-Time-Ms`. Errors are always JSON.
+
+```python
+import numpy as np, requests
+
+batch = np.random.randn(4, 3, 224, 224).astype("<f4")   # little-endian float32
+r = requests.post("http://localhost:3000/predict", data=batch.tobytes(), headers={
+    "Content-Type": "application/octet-stream",
+    "X-Batch-Size": "4",
+    "Accept": "application/octet-stream",
+})
+logits = np.frombuffer(r.content, dtype="<f4").reshape(4, 1000)
+```
+
+```bash
+# Raw float32 file with one 3x224x224 image
+curl -X POST http://localhost:3000/predict \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @image.f32
+```
+
+### Errors
+
+Errors share one shape:
+
+```json
+{ "error": "Input validation failed: expected shape [3, 224, 224], got [100]", "code": "INPUT_VALIDATION_FAILED", "details": { "expected_shape": [3, 224, 224], "received_size": 100, "batch_item": 0 }, "timestamp": "..." }
+```
+
+| Status | `code` | Cause |
+|---|---|---|
+| 400 | `INVALID_REQUEST` | Malformed JSON, or `X-Batch-Size` not an integer |
+| 422 | `INVALID_REQUEST` | Valid JSON without exactly one of `input`/`inputs`, or non-numeric values |
+| 415 | `INVALID_REQUEST` | `Content-Type` is neither `application/json` nor `application/octet-stream` |
+| 400 | `INVALID_INPUT` | Empty input |
+| 400 | `INPUT_VALIDATION_FAILED` | Wrong number of values (or bytes, for binary input) for the model |
+| 400 | `INVALID_INPUT_VALUE` | NaN or infinite value |
+| 400 | `BATCH_TOO_LARGE` | More than 1000 items |
+| 413 | `INVALID_REQUEST` | Body larger than `--max-body-mb` |
+| 503 | `SERVER_BUSY` | All `--max-concurrent-requests` slots in use; retry later |
+| 504 | `INFERENCE_TIMEOUT` | Exceeded `--request-timeout-ms` |
+| 500 | `INFERENCE_FAILED` | Model error |
+
+## 🖼️ Models
+
+### Built-in models (from ONNX)
+
+Any `models/<name>.onnx` is converted at build time; the conversion is skipped with a
+build warning if `burn-onnx` doesn't support the graph. ResNet-18 is wired up out of the box.
+
+To serve another ONNX model:
+
+1. Put it in `models/`, e.g. `models/mobilenetv2.onnx`, and run `cargo build --release`.
+   Look for `cargo:warning` lines if generation fails.
+2. In `build.rs`, declare its cfg: `println!("cargo:rustc-check-cfg=cfg(model_mobilenetv2)");`
+3. In `src/models/mod.rs`, include the generated module and add a `BurnModel` wrapper,
+   following the `ResNet18` implementation:
+
+   ```rust
+   #[cfg(model_mobilenetv2)]
+   pub mod mobilenetv2 {
+       include!(concat!(env!("OUT_DIR"), "/models/mobilenetv2.rs"));
+   }
+   ```
+
+   The generated `Model` exposes `new(&Device)` (load weights with `weights::load_burnpack`) and
+   `forward(...)`.
+4. Add a variant to `BuiltInModel` and handle it in `from_name`, `available_models` and
+   `create_model`.
+
+Tips:
+
+- `burn-onnx` supports ONNX opsets 1–24. If conversion fails, try
+  [onnx-simplifier](https://github.com/daquexian/onnx-simplifier) first.
+- Inspect generated code in `target/release/build/furnace-*/out/models/`.
+
+### File-based Burn models
+
+`--model-path` loads an MLP stored as Burnpack weights plus JSON metadata:
+
+```bash
+cargo run --example basic_mnist_create      # writes examples/basic_mnist/model.{bpk,json}
+./target/release/furnace --model-path examples/basic_mnist/model
+cargo run --example basic_mnist_test
+```
+
+Models saved with Burn ≤0.21 recorders (`.mpk`) can't be read by Burn 0.22. Load them with
+the older Burn version and export with `burn-store`'s `BurnpackStore`.
+
+## 📊 Performance
+
+Measured on an AMD Ryzen 9 7940HS (8C/16T), Windows 11, Rust 1.99, `--release`, CPU backend.
+
+Criterion, in-process `Model::predict_batch` (median):
+
+| Benchmark | Batch 1 | Batch 4 / 32 | Throughput |
+|---|---|---|---|
+| ResNet-18 (`resnet18/*`) | 91 ms | 294 ms (×4) | ~11 img/s single, ~14 img/s batched |
+| Server overhead only (`overhead/*`, ResNet-sized I/O) | 0.31 ms | 1.18 ms (×4) | |
+| MLP 784→128→10 (`mlp/*`) | 14 µs | 109 µs (×32) | ~290k items/s batched |
+
+End to end over HTTP on localhost, ResNet-18, release binary, keep-alive client
+(`benches/http_bench.py`, median of 30 requests). *I/O overhead* is end-to-end time minus
+the server's `inference_time_ms`: sending, receiving and decoding the request and response.
+Inference alone varies by ±10 ms between runs, so compare the overhead column.
+
+| Request | Body | End to end | I/O overhead |
+|---|---|---|---|
+| JSON, 1 image (0.4.0 before this change) | 1.7 MB | 102 ms | 14 ms |
+| JSON, 1 image | 1.7 MB | 91–96 ms | 6 ms |
+| Binary (`application/octet-stream`), 1 image | 0.6 MB | 79–80 ms | 1 ms |
+| JSON, batch 4 (0.4.0 before this change) | 6.7 MB | 334 ms | 44 ms |
+| JSON, batch 4 | 6.7 MB | 299–323 ms | 21 ms |
+| Binary, batch 4 | 2.4 MB | 285–297 ms | 3 ms |
+
+In process (`request_decode/*`), turning one ResNet-18 body into floats takes 4.0 ms for
+JSON (about half the time of the previous derived deserializer) and 27 µs for binary. For latency-sensitive clients,
+send binary.
+
+Other numbers:
+
+- **Startup**: ~0.45 s to healthy, including loading the 46 MB weight file
+- **Binary size**: ~5 MB (+ 46 MB `resnet18.bpk`)
+- **Memory**: ~52 MB working set but only ~4 MB private memory after inference. The weight
+  file is memory-mapped and tensors use its pages directly, so the 46 MB of ResNet-18 weights
+  are shared, file-backed pages that the OS can drop and reload under pressure and that
+  multiple server processes share. Reading the weights into the heap instead used ~49 MB
+  private (measured with `Process.PrivateMemorySize64` after 3 `/predict` calls).
+
+Reproduce:
+
+```bash
+cargo bench --bench inference_benchmark
+```
+
+```bash
+# With a release server running on port 3000 (stdlib-only Python)
+python benches/http_bench.py 3000 json1 json4 bin1 bin4
+```
+
+The `overhead/*` group runs a constant-output model with ResNet-sized I/O, so it measures
+validation and tensor conversion alone.
 
 ## 🛠️ Development
 
-### Prerequisites
-- Rust 1.75+ 
-- Cargo
-
-### Build
 ```bash
-cargo build --release
+cargo fmt --all
+cargo clippy --all-targets -- -D warnings
+cargo test --release            # unit + end-to-end tests (needs models/resnet18.onnx)
 ```
 
-### Test
-```bash
-cargo test
-```
+Tests run in `--release` because ResNet-18 inference in a debug build is slow.
 
-### Create Custom Models
-Implement the `BurnModel` trait in `src/burn_model.rs` to add support for your own model architectures.
-
-## 🏗️ Architecture
+### Layout
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   CLI Layer     │───▶│  Model Layer    │───▶│   API Layer     │
-│                 │    │                 │    │                 │
-│ - Argument      │    │ - Model Loading │    │ - HTTP Routes   │
-│   Parsing       │    │ - Inference     │    │ - Request       │
-│ - Validation    │    │ - Metadata      │    │   Handling      │
-│ - Logging Setup │    │ - Error Handling│    │ - CORS          │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
+src/
+├── main.rs          # CLI and startup
+├── api.rs           # HTTP routes, limits, backpressure
+├── model.rs         # Model wrapper: validation, batching, stats
+├── backend.rs       # Runtime backend -> Burn Device
+├── burn_model.rs    # File-based MLP (Burnpack)
+└── models/mod.rs    # Built-in models generated from ONNX
+build.rs             # models/*.onnx -> Rust code + .bpk weights
 ```
 
 ## 🔧 Troubleshooting
 
-### Common Issues
+**`unknown built-in model` / resnet18 missing**: `models/resnet18.onnx` wasn't present at
+build time. Download it (Quick Start step 1), then `cargo build --release`.
+`touch build.rs` forces regeneration.
 
-**Model Loading Fails:**
-```bash
-# Check available built-in models
-./target/release/furnace --help
+**`length limit exceeded` / 413**: raise `--max-body-mb`. A ResNet-18 image is 1.5–3 MB of JSON.
 
-# Verify model was built
-find target -name "resnet18.rs" -path "*/out/models/*"
-```
+**Lots of `503 SERVER_BUSY`**: increase `--max-concurrent-requests`, or batch on the client.
 
-**Server Won't Start:**
-```bash
-# Check if port is already in use
-lsof -i :3000
+**`backend not available in this build`**: rebuild with the matching feature,
+e.g. `--features wgpu`.
 
-# Try different port
-./target/release/furnace --model-name resnet18 --port 3001
-```
-
-**Build Errors:**
-```bash
-# Update Rust toolchain
-rustup update
-
-# Clean and rebuild
-cargo clean
-cargo build --release
-```
-
-**Test Data Generation Fails:**
-```bash
-# Ensure you're in the project root
-pwd  # Should end with /furnace
-
-# Run with verbose output
-cargo run --example resnet18_sample_data --verbose
-```
-
-**ONNX Model Integration Issues:**
-
-*Generated Code Not Found:*
-```bash
-# Check if ONNX models are in the right place
-ls -la models/
-
-# Verify code generation during build
-cargo build --release 2>&1 | grep -i onnx
-
-# Check generated files
-find target -name "*.rs" -path "*/out/models/*"
-```
-
-*Model Loading Fails:*
-```bash
-# Check ONNX model compatibility
-# Ensure your model uses ONNX opset 16+
-python3 -c "
-import onnx
-model = onnx.load('models/your_model.onnx')
-print(f'ONNX version: {model.opset_import[0].version}')
-"
-
-# If version < 16, upgrade the model:
-python3 -c "
-import onnx
-from onnx import version_converter
-model = onnx.load('models/your_model.onnx')
-upgraded = version_converter.convert_version(model, 16)
-onnx.save(upgraded, 'models/your_model_v16.onnx')
-"
-```
-
-*Build Fails with ONNX Errors:*
-```bash
-# Some models may have compatibility issues
-# Check build warnings for specific ONNX operations
-cargo build 2>&1 | grep -A5 -B5 "ONNX\|onnx"
-
-# Try building without problematic models
-mv models/problematic_model.onnx models/problematic_model.onnx.bak
-cargo build --release
-```
-
-*Runtime Errors with Generated Models:*
-```bash
-# Check tensor shape mismatches
-# Ensure your input data matches the expected format
-curl -X POST http://localhost:3000/model/info  # Check expected shapes
-
-# Test with correct input format
-# For ResNet-18: [batch_size, 3*224*224] = [1, 150528] values
-```
-
-### Performance Issues
-
-If you're seeing slower inference times:
-- Ensure you're using the release build (`cargo build --release`)
-- Check system resources (CPU, memory)
-- Try reducing batch size for concurrent requests
-- Monitor with `cargo bench` for baseline performance
+**Windows: `link.exe` not found**: install Visual Studio Build Tools with the
+"Desktop development with C++" workload.
 
 ## 🤝 Contributing
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT. See [LICENSE](LICENSE).
 
 ## 🙏 Acknowledgments
 
-- [Burn](https://github.com/tracel-ai/burn) - The native Rust ML framework
-- [Axum](https://github.com/tokio-rs/axum) - Web framework for Rust
-- [Tokio](https://github.com/tokio-rs/tokio) - Async runtime for Rust
+- [Burn](https://github.com/tracel-ai/burn) and [burn-onnx](https://github.com/tracel-ai/burn-onnx)
+- [ONNX Model Zoo](https://github.com/onnx/models) for ResNet-18

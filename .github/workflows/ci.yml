@@ -9,30 +9,27 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  RESNET18_URL: https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx
 
 jobs:
   test:
     name: Test Suite
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        rust: [stable, beta]
-        exclude:
-          - os: windows-latest
+        rust: [stable]
+        include:
+          - os: ubuntu-latest
             rust: beta
-          - os: macos-latest
-            rust: beta
+          # MSRV (keep in sync with rust-version in Cargo.toml)
+          - os: ubuntu-latest
+            rust: "1.95"
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-
-    - name: Install system dependencies (Ubuntu)
-      if: matrix.os == 'ubuntu-latest'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@master
@@ -40,49 +37,49 @@ jobs:
         toolchain: ${{ matrix.rust }}
         components: rustfmt, clippy
 
-    - name: Cache cargo registry
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+
+    - name: Cache ONNX models
       uses: actions/cache@v4
       with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-
+        path: models
+        key: onnx-models-resnet18-v1-7
 
-    - name: Download ONNX models (Unix)
-      if: runner.os != 'Windows'
+    - name: Download ResNet-18 ONNX model
+      shell: bash
       run: |
         mkdir -p models
-        # Download ResNet-18 model if it doesn't exist
-        if [ ! -f models/resnet18.onnx ]; then
-          curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
-        fi
-
-    - name: Download ONNX models (Windows)
-      if: runner.os == 'Windows'
-      run: |
-        if (!(Test-Path "models")) { New-Item -ItemType Directory -Path "models" }
-        if (!(Test-Path "models/resnet18.onnx")) {
-          Invoke-WebRequest -Uri "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -OutFile "models/resnet18.onnx"
-        }
-      shell: pwsh
+        [ -f models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o models/resnet18.onnx
 
     - name: Check formatting
+      if: matrix.rust == 'stable'
       run: cargo fmt --all -- --check
 
     - name: Run clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
-
-    - name: Build
-      run: cargo build --verbose --all-features --features burn-import
+      if: matrix.rust == 'stable'
+      run: cargo clippy --all-targets -- -D warnings
 
     - name: Run tests
-      run: cargo test --verbose --all-features --features burn-import
+      run: cargo test --release --all-targets
 
-    - name: Run integration tests
-      run: cargo test --test integration_tests --verbose --features burn-import
+  gpu-features:
+    name: Check GPU backend features
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+
+    - name: Clippy with wgpu backend
+      run: cargo clippy --no-default-features --features wgpu -- -D warnings
 
   coverage:
     name: Code Coverage
@@ -90,11 +87,6 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -104,28 +96,22 @@ jobs:
     - name: Install cargo-llvm-cov
       uses: taiki-e/install-action@cargo-llvm-cov
 
-    - name: Download ONNX models
-      run: |
-        mkdir -p models
-        # Download ResNet-18 model if it doesn't exist
-        if [ ! -f models/resnet18.onnx ]; then
-          curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
-        fi
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
 
-    - name: Cache cargo registry
+    - name: Cache ONNX models
       uses: actions/cache@v4
       with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        path: models
+        key: onnx-models-resnet18-v1-7
 
-    - name: Build first to generate ONNX models
-      run: cargo build --all-features
+    - name: Download ResNet-18 ONNX model
+      run: |
+        mkdir -p models
+        [ -f models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o models/resnet18.onnx
 
     - name: Generate code coverage
-      run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+      run: cargo llvm-cov --release --workspace --lcov --output-path lcov.info
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
@@ -133,28 +119,6 @@ jobs:
         files: lcov.info
         fail_ci_if_error: false
         token: ${{ secrets.CODECOV_TOKEN }}
-      continue-on-error: true
-
-  security:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Cache cargo registry
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-        key: ${{ runner.os }}-cargo-audit-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Install cargo-audit
-      run: cargo install cargo-audit
-
-    - name: Run security audit
-      run: cargo audit --ignore RUSTSEC-2020-0071 --ignore RUSTSEC-2023-0044
       continue-on-error: true
 
   benchmarks:
@@ -165,73 +129,22 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
-
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
 
-    - name: Download ONNX models
-      run: |
-        mkdir -p models
-        # Download ResNet-18 model if it doesn't exist
-        if [ ! -f models/resnet18.onnx ]; then
-          curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
-        fi
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
 
-    - name: Cache cargo registry
+    - name: Cache ONNX models
       uses: actions/cache@v4
       with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+        path: models
+        key: onnx-models-resnet18-v1-7
 
-
-
-    - name: Run benchmarks
-      run: cargo bench --all-features --features burn-import
-
-
-
-  release-check:
-    name: Release Check
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
-
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-
-    - name: Download ONNX models
+    - name: Download ResNet-18 ONNX model
       run: |
         mkdir -p models
-        # Download ResNet-18 model if it doesn't exist
-        if [ ! -f models/resnet18.onnx ]; then
-          curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
-        fi
+        [ -f models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o models/resnet18.onnx
 
-    - name: Check if version changed
-      id: version
-      run: |
-        current_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-        echo "version=$current_version" >> $GITHUB_OUTPUT
-
-    - name: Build release binary
-      run: cargo build --release --all-features --features burn-import
-
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: furnace-${{ runner.os }}-${{ steps.version.outputs.version }}
-        path: target/release/furnace*
+    - name: Run benchmarks
+      run: cargo bench --bench inference_benchmark

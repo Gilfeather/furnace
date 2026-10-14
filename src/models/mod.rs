@@ -1,126 +1,121 @@
-// Generated ONNX models following Burn documentation
-// These modules include the Rust code generated from ONNX files
+// Built-in models generated from ONNX files in models/ by build.rs (burn-onnx).
+//
+// The model *architecture* is compiled into the binary; the weights live in a separate
+// Burnpack file (`<name>.bpk`) loaded at startup, so the server binary stays small no matter
+// how large the model is. With the `embed-weights` feature the weights are compiled in instead.
 
-#[cfg(feature = "burn-import")]
+#[cfg(model_resnet18)]
+#[allow(clippy::all, unused)]
 pub mod resnet18 {
-    // Include the generated ResNet18 model code
     include!(concat!(env!("OUT_DIR"), "/models/resnet18.rs"));
 }
 
-// Only include if the model was successfully generated
-#[cfg(all(feature = "burn-import", model_gptneox_opset18))]
-pub mod gptneox_opset18 {
-    // Include the generated GPT-NeoX model code
-    include!(concat!(env!("OUT_DIR"), "/models/gptneox_Opset18.rs"));
-}
+#[cfg(model_resnet18)]
+use burn::tensor::{Device, Tensor};
+use std::path::{Path, PathBuf};
 
-// Re-export for easier access
-use burn::backend::ndarray::NdArray;
-use burn::tensor::Tensor;
-#[cfg(all(feature = "burn-import", model_gptneox_opset18))]
-pub use gptneox_opset18::Model as GptNeoxModel;
-#[cfg(feature = "burn-import")]
-pub use resnet18::Model as ResNet18Model;
-
+use crate::backend::BackendKind;
 use crate::error::{ModelError, Result};
-use crate::model::{BurnModel, OptimizationInfo};
+use crate::model::BurnModel;
 
-type Backend = NdArray<f32>;
-
-/// Simple wrapper for ResNet18 to avoid Sync issues
-#[cfg(feature = "burn-import")]
+/// ResNet-18 image classifier (ImageNet, 1000 classes)
+#[cfg(model_resnet18)]
 #[derive(Debug)]
-pub struct SimpleResNet18ModelWrapper {
-    model: std::sync::Arc<std::sync::Mutex<ResNet18Model<Backend>>>,
-    name: String,
+pub struct ResNet18 {
+    model: resnet18::Model,
+    device: Device,
+    backend: BackendKind,
     input_shape: Vec<usize>,
     output_shape: Vec<usize>,
 }
 
-/// Simple wrapper for GPT-NeoX to avoid Sync issues
-#[cfg(all(feature = "burn-import", model_gptneox_opset18))]
-#[derive(Debug)]
-pub struct SimpleGptNeoxModelWrapper {
-    model: std::sync::Arc<std::sync::Mutex<GptNeoxModel<Backend>>>,
-    name: String,
-    input_shape: Vec<usize>,
-    output_shape: Vec<usize>,
-}
-
-/// BurnModel implementation for the simple ResNet18 wrapper
-#[cfg(feature = "burn-import")]
-impl BurnModel for SimpleResNet18ModelWrapper {
-    fn predict(&self, input: Tensor<Backend, 2>) -> Result<Tensor<Backend, 2>> {
-        let [batch_size, input_size] = input.dims();
-
-        // Validate input size
-        let expected_input_size: usize = self.input_shape.iter().product();
-        if input_size != expected_input_size {
-            return Err(ModelError::InputValidation {
-                expected: self.input_shape.clone(),
-                actual: vec![input_size],
+#[cfg(model_resnet18)]
+impl ResNet18 {
+    /// Load ResNet-18 on `backend`, reading weights from `weights` (a `.bpk` file).
+    ///
+    /// With the `embed-weights` feature, `weights` is `None` and the compiled-in weights are used.
+    pub fn load(backend: BackendKind, weights: Option<&Path>) -> Result<Self> {
+        let device = backend.device();
+        let model = match weights {
+            Some(path) => {
+                let mut model = resnet18::Model::new(&device);
+                crate::weights::load_burnpack(&mut model, path)?;
+                model
             }
-            .into());
-        }
-
-        // Convert 2D input to 4D for ResNet (assuming image input)
-        let input_4d = input.reshape([
-            batch_size,
-            self.input_shape[1], // channels
-            self.input_shape[2], // height
-            self.input_shape[3], // width
-        ]);
-
-        // Run inference using the ResNet18 model
-        let model = self.model.lock().unwrap();
-        let output = model.forward(input_4d);
-
-        // Convert output back to 2D format
-        let output_2d = if output.dims().len() > 2 {
-            let output_dims = output.dims();
-            let output_size = output_dims[1..].iter().product::<usize>();
-            output.reshape([output_dims[0], output_size])
-        } else {
-            output
+            #[cfg(feature = "embed-weights")]
+            None => resnet18::Model::from_embedded(&device),
+            #[cfg(not(feature = "embed-weights"))]
+            None => unreachable!("weights are resolved before loading"),
         };
-
-        Ok(output_2d)
-    }
-
-    fn get_input_shape(&self) -> &[usize] {
-        &self.input_shape
-    }
-
-    fn get_output_shape(&self) -> &[usize] {
-        &self.output_shape
-    }
-
-    fn get_name(&self) -> &str {
-        &self.name
-    }
-
-    fn get_backend_info(&self) -> String {
-        "burn-resnet18".to_string()
-    }
-
-    fn get_optimization_info(&self) -> OptimizationInfo {
-        OptimizationInfo {
-            kernel_fusion: false,
-            autotuning_cache: false,
-            backend_type: self.get_backend_info(),
-        }
+        Ok(Self {
+            model,
+            device,
+            backend,
+            input_shape: vec![3, 224, 224],
+            output_shape: vec![1000],
+        })
     }
 }
 
-/// BurnModel implementation for the GPT-NeoX wrapper
-#[cfg(all(feature = "burn-import", model_gptneox_opset18))]
-impl BurnModel for SimpleGptNeoxModelWrapper {
-    fn predict(&self, input: Tensor<Backend, 2>) -> Result<Tensor<Backend, 2>> {
-        let [batch_size, input_size] = input.dims();
+/// Where to look for a built-in model's weights when `--weights` is not given, in order:
+/// next to the executable (release archives), `models/` in the working directory, and the
+/// build output directory (so `cargo run` works on the build machine).
+pub fn default_weight_candidates(name: &str) -> Vec<PathBuf> {
+    let file = format!("{name}.bpk");
+    let mut candidates = Vec::new();
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        candidates.push(dir.join(&file));
+    }
+    candidates.push(Path::new("models").join(&file));
+    candidates.push(Path::new(env!("OUT_DIR")).join("models").join(&file));
+    candidates
+}
 
-        // Validate input size
-        let expected_input_size: usize = self.input_shape.iter().product();
-        if input_size != expected_input_size {
+/// Resolve the weight file for a built-in model.
+///
+/// Returns `Ok(None)` when weights are compiled in and no override was given.
+pub fn resolve_weights(name: &str, explicit: Option<&Path>) -> Result<Option<PathBuf>> {
+    if let Some(path) = explicit {
+        if !path.is_file() {
+            return Err(ModelError::FileNotFound(path.to_path_buf()).into());
+        }
+        return Ok(Some(path.to_path_buf()));
+    }
+    if cfg!(feature = "embed-weights") {
+        return Ok(None);
+    }
+    let candidates = default_weight_candidates(name);
+    candidates
+        .iter()
+        .find(|p| p.is_file())
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| {
+            ModelError::InvalidArgument {
+                arg: "weights".to_string(),
+                value: name.to_string(),
+                reason: format!(
+                    "weight file not found; pass --weights <PATH> or place {name}.bpk in one of: {}",
+                    candidates
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+            .into()
+        })
+}
+
+#[cfg(model_resnet18)]
+impl BurnModel for ResNet18 {
+    fn predict(&self, input: Tensor<2>) -> Result<Tensor<2>> {
+        let [batch_size, input_size] = input.dims();
+        let expected: usize = self.input_shape.iter().product();
+        if input_size != expected {
             return Err(ModelError::InputValidation {
                 expected: self.input_shape.clone(),
                 actual: vec![input_size],
@@ -128,12 +123,18 @@ impl BurnModel for SimpleGptNeoxModelWrapper {
             .into());
         }
 
-        // For GPT-NeoX, input is typically [batch_size, seq_length]
-        // We may need to adjust based on the actual model requirements
-        let model = self.model.lock().unwrap();
-        let output = model.forward(input);
+        // Flattened [batch, C*H*W] -> NCHW image tensor
+        let images = input.reshape([
+            batch_size,
+            self.input_shape[0],
+            self.input_shape[1],
+            self.input_shape[2],
+        ]);
+        Ok(self.model.forward(images))
+    }
 
-        Ok(output)
+    fn device(&self) -> &Device {
+        &self.device
     }
 
     fn get_input_shape(&self) -> &[usize] {
@@ -145,133 +146,75 @@ impl BurnModel for SimpleGptNeoxModelWrapper {
     }
 
     fn get_name(&self) -> &str {
-        &self.name
+        "resnet18"
     }
 
-    fn get_backend_info(&self) -> String {
-        "burn-gptneox".to_string()
-    }
-
-    fn get_optimization_info(&self) -> OptimizationInfo {
-        OptimizationInfo {
-            kernel_fusion: false,
-            autotuning_cache: false,
-            backend_type: self.get_backend_info(),
-        }
+    fn backend(&self) -> BackendKind {
+        self.backend
     }
 }
 
-/// Enum for available built-in models
-/// Add new models here and implement the corresponding cases below
-#[derive(Debug, Clone, PartialEq)]
+/// Models compiled into the binary
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltInModel {
     ResNet18,
-    #[cfg(model_gptneox_opset18)]
-    GptNeox,
 }
 
 impl BuiltInModel {
-    /// Create a BuiltInModel from a string name
+    /// Look up a built-in model by name
     pub fn from_name(name: &str) -> Result<Self> {
         match name.to_lowercase().as_str() {
-            "resnet18" => Ok(Self::ResNet18),
-            #[cfg(model_gptneox_opset18)]
-            "gptneox" | "gpt-neox" => Ok(Self::GptNeox),
-            _ => {
-                let available_models = Self::available_models().join(", ");
-                Err(ModelError::InvalidArgument {
-                    arg: "model-name".to_string(),
-                    value: name.to_string(),
-                    reason: format!("unknown built-in model. Available models: {available_models}"),
-                }
-                .into())
+            "resnet18" | "resnet-18" => Ok(Self::ResNet18),
+            _ => Err(ModelError::InvalidArgument {
+                arg: "model-name".to_string(),
+                value: name.to_string(),
+                reason: format!(
+                    "unknown built-in model. Available models: {}",
+                    Self::available_models().join(", ")
+                ),
             }
+            .into()),
         }
     }
 
-    /// Get list of available built-in models
+    /// Built-in models that were successfully generated at build time
     pub fn available_models() -> Vec<&'static str> {
-        let models = vec!["resnet18"];
-        #[cfg(model_gptneox_opset18)]
-        models.push("gptneox");
-        models
+        vec![
+            #[cfg(model_resnet18)]
+            "resnet18",
+        ]
     }
 
-    /// Get the display name of the model
     pub fn name(&self) -> &'static str {
         match self {
             Self::ResNet18 => "resnet18",
-            #[cfg(model_gptneox_opset18)]
-            Self::GptNeox => "gptneox",
         }
     }
 
-    /// Create a model instance for this built-in model
-    pub fn create_model(&self) -> Result<Box<dyn BurnModel>> {
+    /// Instantiate the model on the given backend, loading weights from `weights`
+    /// (see [`resolve_weights`]).
+    pub fn create_model(
+        &self,
+        backend: BackendKind,
+        weights: Option<&Path>,
+    ) -> Result<Box<dyn BurnModel>> {
         match self {
             Self::ResNet18 => {
-                #[cfg(feature = "burn-import")]
+                #[cfg(model_resnet18)]
                 {
-                    // Create the generated ResNet18 model using default method
-                    let model = ResNet18Model::<Backend>::default();
-
-                    // Create a simplified wrapper with Arc<Mutex<>> for thread safety
-                    Ok(Box::new(SimpleResNet18ModelWrapper {
-                        model: std::sync::Arc::new(std::sync::Mutex::new(model)),
-                        name: "resnet18".to_string(),
-                        input_shape: vec![1, 3, 224, 224],
-                        output_shape: vec![1000],
-                    }))
+                    Ok(Box::new(ResNet18::load(backend, weights)?))
                 }
-                #[cfg(not(feature = "burn-import"))]
+                #[cfg(not(model_resnet18))]
                 {
-                    Err(
-                        ModelError::InvalidFormat("burn-import feature not enabled".to_string())
-                            .into(),
+                    let _ = (backend, weights);
+                    Err(ModelError::InvalidFormat(
+                        "resnet18 was not compiled into this binary. \
+                         Place models/resnet18.onnx and rebuild with the `onnx` feature"
+                            .to_string(),
                     )
+                    .into())
                 }
             }
-            #[cfg(model_gptneox_opset18)]
-            Self::GptNeox => {
-                #[cfg(all(feature = "burn-import", model_gptneox_opset18))]
-                {
-                    // Create the generated GPT-NeoX model using default method
-                    let model = GptNeoxModel::<Backend>::default();
-
-                    // Create a simplified wrapper with Arc<Mutex<>> for thread safety
-                    Ok(Box::new(SimpleGptNeoxModelWrapper {
-                        model: std::sync::Arc::new(std::sync::Mutex::new(model)),
-                        name: "gptneox".to_string(),
-                        input_shape: vec![1, 512],
-                        output_shape: vec![50257],
-                    }))
-                }
-                #[cfg(not(all(feature = "burn-import", model_gptneox_opset18)))]
-                {
-                    Err(
-                        ModelError::InvalidFormat("GPT-NeoX model not available (generation failed or burn-import not enabled)".to_string())
-                            .into(),
-                    )
-                }
-            }
-        }
-    }
-
-    /// Get the expected input shape for this model
-    pub fn input_shape(&self) -> Vec<usize> {
-        match self {
-            Self::ResNet18 => vec![1, 3, 224, 224],
-            #[cfg(model_gptneox_opset18)]
-            Self::GptNeox => vec![1, 512], // Example: sequence length 512
-        }
-    }
-
-    /// Get the expected output shape for this model
-    pub fn output_shape(&self) -> Vec<usize> {
-        match self {
-            Self::ResNet18 => vec![1000],
-            #[cfg(model_gptneox_opset18)]
-            Self::GptNeox => vec![50257], // GPT-NeoX vocab size
         }
     }
 }

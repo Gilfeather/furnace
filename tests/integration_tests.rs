@@ -1,171 +1,282 @@
-use furnace::api::start_server;
+//! End-to-end tests against a real HTTP server running the built-in ResNet-18.
+//!
+//! Requires `models/resnet18.onnx` at build time (see README).
+
+use furnace::api::{ServerConfig, router};
 use furnace::model::load_built_in_model;
 use reqwest::Client;
-use serde_json::json;
-use std::time::Duration;
-use tokio::time::sleep;
+use serde_json::{Value, json};
+use std::sync::OnceLock;
 
-#[tokio::test]
-async fn test_end_to_end_inference() {
-    // Start server in background with built-in model
-    let model = load_built_in_model("resnet18").expect("Failed to load built-in model");
+const RESNET_INPUT: usize = 3 * 224 * 224;
 
-    let server_handle = tokio::spawn(async move {
-        start_server("127.0.0.1", 3001, model).await.unwrap();
-    });
-
-    // Wait for server to start
-    sleep(Duration::from_millis(500)).await;
-
-    let client = Client::new();
-    let base_url = "http://127.0.0.1:3001";
-
-    // Test health check
-    let health_response = client
-        .get(format!("{base_url}/healthz"))
-        .send()
+/// Start a server on an ephemeral port and return its base URL
+async fn spawn_server(config: ServerConfig) -> String {
+    let model = tokio::task::spawn_blocking(|| load_built_in_model("resnet18"))
         .await
-        .expect("Failed to send health check request");
+        .unwrap()
+        .expect("resnet18 must be compiled in (place models/resnet18.onnx before building)");
+    let app = router(model, &config);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
 
-    assert_eq!(health_response.status(), 200);
-    let health_json: serde_json::Value = health_response.json().await.unwrap();
-    assert_eq!(health_json["status"], "healthy");
-    assert_eq!(health_json["model_loaded"], true);
+fn image(value: f32) -> Vec<f32> {
+    vec![value; RESNET_INPUT]
+}
 
-    // Test model info
-    let info_response = client
-        .get(format!("{base_url}/model/info"))
-        .send()
-        .await
-        .expect("Failed to send model info request");
-
-    assert_eq!(info_response.status(), 200);
-    let info_json: serde_json::Value = info_response.json().await.unwrap();
-    assert_eq!(
-        info_json["model_info"]["input_spec"]["shape"],
-        json!([1, 3, 224, 224])
-    );
-    assert_eq!(
-        info_json["model_info"]["output_spec"]["shape"],
-        json!([1000])
-    );
-
-    // Test single prediction (ResNet18 input size: 3 * 224 * 224 = 150,528)
-    let predict_payload = json!({
-        "inputs": [vec![0.5; 150528]]
-    });
-
-    let predict_response = client
-        .post(format!("{base_url}/predict"))
-        .json(&predict_payload)
-        .send()
-        .await
-        .expect("Failed to send prediction request");
-
-    assert_eq!(predict_response.status(), 200);
-    let predict_json: serde_json::Value = predict_response.json().await.unwrap();
-    assert_eq!(predict_json["status"], "success");
-    assert_eq!(predict_json["batch_size"], 1);
-    assert!(predict_json["output"].is_array());
-    assert_eq!(predict_json["output"].as_array().unwrap().len(), 1000);
-
-    // Test batch prediction (ResNet18 input size: 3 * 224 * 224 = 150,528)
-    let batch_payload = json!({
-        "inputs": vec![
-            vec![0.5; 150528],
-            vec![0.3; 150528],
-            vec![0.7; 150528]
-        ]
-    });
-
-    let batch_response = client
-        .post(format!("{base_url}/predict"))
-        .json(&batch_payload)
-        .send()
-        .await
-        .expect("Failed to send batch prediction request");
-
-    assert_eq!(batch_response.status(), 200);
-    let batch_json: serde_json::Value = batch_response.json().await.unwrap();
-    assert_eq!(batch_json["status"], "success");
-    assert_eq!(batch_json["batch_size"], 3);
-    assert!(batch_json["outputs"].is_array());
-    assert_eq!(batch_json["outputs"].as_array().unwrap().len(), 3);
-    // Each output should have 1000 elements (ImageNet classes)
-    assert_eq!(batch_json["outputs"][0].as_array().unwrap().len(), 1000);
-
-    // Test invalid input (wrong size for ResNet18)
-    let invalid_payload = json!({
-        "inputs": [vec![0.5; 100]] // Wrong size - should be 150,528
-    });
-
-    let invalid_response = client
-        .post(format!("{base_url}/predict"))
-        .json(&invalid_payload)
-        .send()
-        .await
-        .expect("Failed to send invalid prediction request");
-
-    assert_eq!(invalid_response.status(), 400);
-    let invalid_json: serde_json::Value = invalid_response.json().await.unwrap();
-    assert_eq!(invalid_json["code"], "INPUT_VALIDATION_FAILED");
-
-    // Clean up
-    server_handle.abort();
+fn client() -> &'static Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(Client::new)
 }
 
 #[tokio::test]
-async fn test_server_startup_with_invalid_model() {
-    let result = load_built_in_model("nonexistent_model");
+async fn test_end_to_end_inference() {
+    let base_url = spawn_server(ServerConfig::default()).await;
 
-    assert!(result.is_err());
-    // Should gracefully handle model loading failure
+    // Health check
+    let health: Value = client()
+        .get(format!("{base_url}/healthz"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["status"], "healthy");
+    assert_eq!(health["model_loaded"], true);
+    assert_eq!(health["backend"], "cpu");
+
+    // Model info
+    let info: Value = client()
+        .get(format!("{base_url}/model/info"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        info["model_info"]["input_spec"]["shape"],
+        json!([3, 224, 224])
+    );
+    assert_eq!(info["model_info"]["output_spec"]["shape"], json!([1000]));
+    assert_eq!(info["model_info"]["model_type"], "onnx");
+
+    // Single prediction: a full ResNet input is well over axum's 2 MB default body limit
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .json(&json!({ "input": image(0.5) }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let single: Value = response.json().await.unwrap();
+    assert_eq!(single["status"], "success");
+    assert_eq!(single["batch_size"], 1);
+    let logits = single["output"].as_array().unwrap();
+    assert_eq!(logits.len(), 1000);
+    // Real model, not a constant dummy output
+    assert!(logits.iter().any(|v| v != &logits[0]));
+
+    // Batch prediction: different images give different logits
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .json(&json!({ "inputs": [image(0.5), image(0.3), image(0.7)] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let batch: Value = response.json().await.unwrap();
+    assert_eq!(batch["batch_size"], 3);
+    let outputs = batch["outputs"].as_array().unwrap();
+    assert_eq!(outputs.len(), 3);
+    assert!(outputs.iter().all(|o| o.as_array().unwrap().len() == 1000));
+    assert_ne!(outputs[0], outputs[1]);
+
+    // Batching must not change results: batch item 0 equals the single prediction
+    let single_vals: Vec<f64> = logits.iter().map(|v| v.as_f64().unwrap()).collect();
+    let batch_vals: Vec<f64> = outputs[0]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert!(
+        single_vals
+            .iter()
+            .zip(&batch_vals)
+            .all(|(a, b)| (a - b).abs() < 1e-3)
+    );
+
+    // Wrong input size
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .json(&json!({ "inputs": [vec![0.5; 100]] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let invalid: Value = response.json().await.unwrap();
+    assert_eq!(invalid["code"], "INPUT_VALIDATION_FAILED");
+}
+
+fn le_bytes(values: &[f32]) -> Vec<u8> {
+    values.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
+fn json_floats(value: &Value) -> Vec<f32> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap() as f32)
+        .collect()
+}
+
+fn assert_close(a: &[f32], b: &[f32]) {
+    assert_eq!(a.len(), b.len());
+    assert!(a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3));
+}
+
+#[tokio::test]
+async fn test_end_to_end_binary_input() {
+    let base_url = spawn_server(ServerConfig::default()).await;
+    // A non-constant image so a mis-ordered decode would change the result
+    let ramp: Vec<f32> = (0..RESNET_INPUT)
+        .map(|i| (i % 224) as f32 / 112.0 - 1.0)
+        .collect();
+
+    // Reference: the same image through the JSON API
+    let reference: Value = client()
+        .post(format!("{base_url}/predict"))
+        .json(&json!({ "input": ramp }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let reference = json_floats(&reference["output"]);
+
+    // Binary in, JSON out: same response shape as `{"input": ...}`
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .header("content-type", "application/octet-stream")
+        .body(le_bytes(&ramp))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let single: Value = response.json().await.unwrap();
+    assert_eq!(single["batch_size"], 1);
+    assert_close(&json_floats(&single["output"]), &reference);
+
+    // Binary in, binary out, batch of 2
+    let mut body = le_bytes(&image(0.5));
+    body.extend(le_bytes(&ramp));
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .header("content-type", "application/octet-stream")
+        .header("accept", "application/octet-stream")
+        .header("x-batch-size", "2")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/octet-stream"
+    );
+    assert_eq!(response.headers()["x-batch-size"], "2");
+    assert_eq!(response.headers()["x-output-shape"], "1000");
+    let bytes = response.bytes().await.unwrap();
+    let (chunks, rest) = bytes.as_chunks::<4>();
+    assert!(rest.is_empty());
+    let outputs: Vec<f32> = chunks.iter().copied().map(f32::from_le_bytes).collect();
+    assert_eq!(outputs.len(), 2 * 1000);
+    assert_ne!(outputs[..1000], outputs[1000..]);
+    assert_close(&outputs[1000..], &reference);
+
+    // Size mismatch against X-Batch-Size
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .header("content-type", "application/octet-stream")
+        .header("x-batch-size", "2")
+        .body(le_bytes(&ramp))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let invalid: Value = response.json().await.unwrap();
+    assert_eq!(invalid["code"], "INPUT_VALIDATION_FAILED");
+    assert_eq!(invalid["details"]["received_bytes"], RESNET_INPUT * 4);
+}
+
+#[tokio::test]
+async fn test_invalid_model_name() {
+    assert!(load_built_in_model("nonexistent_model").is_err());
 }
 
 #[tokio::test]
 async fn test_concurrent_requests() {
-    // Start server in background with built-in model
-    let model = load_built_in_model("resnet18").expect("Failed to load built-in model");
+    let base_url = spawn_server(ServerConfig::default()).await;
 
-    let server_handle = tokio::spawn(async move {
-        start_server("127.0.0.1", 3002, model).await.unwrap();
-    });
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let url = format!("{base_url}/predict");
+            tokio::spawn(async move {
+                let response = client()
+                    .post(url)
+                    .json(&json!({ "input": image(i as f32 / 10.0) }))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), 200);
+                let body: Value = response.json().await.unwrap();
+                assert_eq!(body["status"], "success");
+            })
+        })
+        .collect();
 
-    // Wait for server to start
-    sleep(Duration::from_millis(500)).await;
-
-    let client = Client::new();
-    let base_url = "http://127.0.0.1:3002";
-
-    // Send multiple concurrent requests
-    let mut handles = Vec::new();
-    for _i in 0..10 {
-        let client = client.clone();
-        let base_url = base_url.to_string();
-        let handle = tokio::spawn(async move {
-            let predict_payload = json!({
-                "inputs": [vec![0.5; 150528]] // ResNet18 input size: 3 * 224 * 224 = 150,528
-            });
-
-            let response = client
-                .post(format!("{base_url}/predict"))
-                .json(&predict_payload)
-                .send()
-                .await
-                .expect("Failed to send prediction request");
-
-            assert_eq!(response.status(), 200);
-            let json: serde_json::Value = response.json().await.unwrap();
-            assert_eq!(json["status"], "success");
-        });
-        handles.push(handle);
-    }
-
-    // Wait for all requests to complete
     for handle in handles {
         handle.await.unwrap();
     }
+}
 
-    // Clean up
-    server_handle.abort();
+#[tokio::test]
+async fn test_backpressure_returns_503() {
+    let base_url = spawn_server(ServerConfig {
+        max_concurrent_requests: 1,
+        ..ServerConfig::default()
+    })
+    .await;
+
+    // Fire several requests at once against a single inference slot
+    let handles: Vec<_> = (0..6)
+        .map(|_| {
+            let url = format!("{base_url}/predict");
+            tokio::spawn(async move {
+                client()
+                    .post(url)
+                    .json(&json!({ "inputs": [image(0.5), image(0.5), image(0.5), image(0.5)] }))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+                    .as_u16()
+            })
+        })
+        .collect();
+
+    let mut statuses = Vec::new();
+    for handle in handles {
+        statuses.push(handle.await.unwrap());
+    }
+    assert!(statuses.contains(&200), "statuses: {statuses:?}");
+    assert!(statuses.contains(&503), "statuses: {statuses:?}");
+    assert!(statuses.iter().all(|s| *s == 200 || *s == 503));
 }

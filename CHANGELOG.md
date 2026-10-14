@@ -5,7 +5,85 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.5] - 2025-01-19
+## [Unreleased]
+
+Request I/O for `POST /predict`. Over HTTP on localhost, I/O overhead for one ResNet-18 image
+drops from ~14 ms to ~6 ms with JSON and ~1 ms with binary input (batch of 4: ~44 ms to ~21 ms
+JSON, ~3 ms binary). See README Performance.
+
+### Added
+- Binary input: `Content-Type: application/octet-stream` with raw little-endian `float32`
+  values, optional `X-Batch-Size: N` header for batches
+- Binary output: `Accept: application/octet-stream` returns raw little-endian `float32`
+  outputs with `X-Batch-Size`, `X-Output-Shape` and `X-Inference-Time-Ms` headers (also
+  exposed to browsers through CORS)
+- `Model::predict_flat` runs a batch stored in one contiguous buffer, without per-item copies
+- `request_decode/*` Criterion benchmarks and `benches/http_bench.py` for HTTP latency
+
+### Changed
+- JSON request bodies are parsed in one pass. The derived `flatten` + `untagged` deserializer
+  buffered the whole document into an intermediate tree first, roughly doubling parse time
+- Requests whose `Content-Type` is neither JSON nor `application/octet-stream` get
+  `415 INVALID_REQUEST` (JSON-only before, same status)
+- A JSON body with both `input` and `inputs` is now rejected with 422 instead of silently
+  using `input`
+- `INVALID_REQUEST` messages for JSON type errors no longer include the element path
+  (e.g. `input[3]`); they still include line and column
+
+## [0.4.0] - 2026-10-14
+
+Migration to Burn 0.22 and a correctness pass over the server. Performance figures in
+earlier releases were measured against a dummy fallback model and should be disregarded.
+
+### Changed
+- **BREAKING**: Upgraded to Burn 0.22. ONNX import moved from `burn-import` to `burn-onnx`;
+  the CPU backend is now `burn-flex` (replaces `burn-ndarray`)
+- **BREAKING**: Cargo feature `burn-import` renamed to `onnx` (enabled by default)
+- **BREAKING**: File-based models now use Burnpack (`<name>.bpk` + `<name>.json`) instead of
+  MessagePack `.mpk`. Re-export old models with Burn ≤0.21 + `burn-store`, or regenerate them
+- **BREAKING**: Rust edition 2024, MSRV raised to 1.95
+- `--backend` now selects the device at runtime (`cpu`, plus `wgpu`/`metal`/`cuda` when built
+  with the matching feature); only backends compiled into the binary are accepted
+- Built-in model weights are loaded at startup from a separate `<name>.bpk` file
+  (`--weights`, or found next to the executable / in `models/`). The server binary stays
+  ~5 MB. Previously the binary read weights from an absolute path in the build directory, so
+  it only worked on the machine that built it
+- ResNet-18 `input_spec.shape` is now `[3, 224, 224]` (per item, without the batch dimension)
+- `POST /predict` with `inputs` always returns `outputs` (even for a batch of one)
+- Inference runs on a blocking thread pool instead of async runtime workers
+- Models are shared across requests without a global mutex
+- Stats (`/model/info`) are now updated accurately in release builds
+
+### Added
+- `--weights <PATH>` to load built-in model weights from any `.bpk` file (e.g. fine-tuned)
+- `embed-weights` Cargo feature for single-file binaries with compiled-in weights
+- Release assets include `resnet18.bpk`
+- `--model-path` for file-based Burnpack models
+- `--max-body-mb` (default 100) and `--request-timeout-ms` (returns 504 on timeout)
+- Backpressure: requests beyond `--max-concurrent-requests` get `503 SERVER_BUSY` immediately
+- `GET /metrics` with request, error, busy-rejection and in-flight counters. Based on #32
+  by @tamish560, adapted to the new API layer
+- `GET /health` alias for `/healthz`; health response includes `backend`
+- Structured `INVALID_REQUEST` errors for malformed JSON
+- End-to-end tests with real ResNet-18 inference, batch consistency and backpressure checks
+- CI: MSRV job, wgpu feature check, cargo-deny
+
+### Fixed
+- Real ResNet-18 requests (~1.5–3 MB JSON) were rejected with `length limit exceeded` by
+  axum's 2 MB default body limit
+- Model load failures silently fell back to a dummy model returning constant `0.5` outputs
+- Benchmarks measured the dummy fallback model instead of ResNet-18
+- Release workflow built binaries without the ResNet-18 model and referenced a removed Dockerfile
+- README referenced a `/health` endpoint that did not exist
+
+### Removed
+- `--enable-kernel-fusion` / `--enable-autotuning` are now hidden no-ops (they never had an
+  effect); Burn configures fusion and autotuning through Cargo features
+- Unused runtime dependencies: bollard, plotters, hdrhistogram, statistical, toml, futures
+- Obsolete examples: `onnx_direct_inference`, `create_small_resnet_sample`,
+  `create_resnet_test_sample`
+
+## [0.3.5] - 2025-07-24
 
 ### Fixed
 - Fixed ONNX model generation using proper OUT_DIR environment variable
