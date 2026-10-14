@@ -64,6 +64,19 @@ pub struct HealthResponse {
     pub timestamp: String,
 }
 
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MetricsResponse {
+    pub uptime_seconds: u64,
+    pub total_requests: u64,
+    pub total_errors: u64,
+    pub total_inferences: u64,
+    pub average_inference_time_ms: f64,
+    pub last_inference_time_ms: f64,
+    pub memory_usage_bytes: u64,
+    pub timestamp: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ModelInfoResponse {
     pub model_info: ModelInfo,
@@ -93,6 +106,7 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub max_concurrent_requests: Option<usize>,
+    pub request_timeout_secs: Option<u64>,
 }
 
 type AppState = Arc<ServerState>;
@@ -100,6 +114,9 @@ type AppState = Arc<ServerState>;
 struct ServerState {
     model: Model,
     start_time: SystemTime,
+    total_requests: std::sync::atomic::AtomicU64,
+    total_errors: std::sync::atomic::AtomicU64,
+    request_timeout_secs: u64,
 }
 
 impl ServerState {
@@ -107,6 +124,9 @@ impl ServerState {
         Self {
             model,
             start_time: SystemTime::now(),
+            total_requests: std::sync::atomic::AtomicU64::new(0),
+            total_errors: std::sync::atomic::AtomicU64::new(0),
+            request_timeout_secs: 30,
         }
     }
 
@@ -120,12 +140,17 @@ pub async fn start_server(host: &str, port: u16, model: Model) -> Result<()> {
         host: host.to_string(),
         port,
         max_concurrent_requests: None,
+        request_timeout_secs: Some(30),
     };
     start_server_with_config(config, model).await
 }
 
 pub async fn start_server_with_config(config: ServerConfig, model: Model) -> Result<()> {
-    let app_state = Arc::new(ServerState::new(model));
+    let mut state = ServerState::new(model);
+    if let Some(secs) = config.request_timeout_secs {
+        state.request_timeout_secs = secs;
+    }
+    let app_state = Arc::new(state);
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -136,6 +161,7 @@ pub async fn start_server_with_config(config: ServerConfig, model: Model) -> Res
         .route("/healthz", get(health_check))
         .route("/predict", post(predict))
         .route("/model/info", get(model_info))
+        .route("/metrics", get(metrics))
         .layer(RequestBodyLimitLayer::new(100 * 1024 * 1024)) // 100MB limit
         .layer(SetResponseHeaderLayer::overriding(
             X_CONTENT_TYPE_OPTIONS,
@@ -224,6 +250,8 @@ async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
 async fn predict(State(state): State<AppState>, Json(payload): Json<PredictRequest>) -> Response {
     let start_time = std::time::Instant::now();
 
+    state.total_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     let input_count = match &payload.input_data {
         PredictInputData::Single { input } => input.len(),
         PredictInputData::Batch { inputs } => inputs.len(),
@@ -238,6 +266,7 @@ async fn predict(State(state): State<AppState>, Json(payload): Json<PredictReque
     // Security: Validate input data for potential attacks
     if let Err(e) = validate_input_security(&payload.input_data) {
         warn!("Security validation failed: {}", e);
+        state.total_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return create_error_response(
             StatusCode::BAD_REQUEST,
             "SECURITY_VALIDATION_FAILED",
@@ -307,9 +336,15 @@ async fn predict(State(state): State<AppState>, Json(payload): Json<PredictReque
         }
     };
 
-    // Run inference
-    match state.model.predict_batch(inputs) {
-        Ok(outputs) => {
+    // Run inference with optional timeout
+    let timeout_secs = state.request_timeout_secs;
+    let error_counter = Arc::clone(&state);
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        tokio::task::spawn_blocking(move || state.model.predict_batch(inputs)),
+    ).await {
+        Ok(Ok(Ok(outputs))) => {
             let inference_time = start_time.elapsed().as_millis() as f64;
 
             let output_data = if batch_size == 1 {
@@ -334,7 +369,7 @@ async fn predict(State(state): State<AppState>, Json(payload): Json<PredictReque
             );
             (StatusCode::OK, Json(response)).into_response()
         }
-        Err(e) => {
+        Ok(Ok(Err(e))) => {
             error!("Prediction error: {}", e);
 
             let (status_code, error_code) = match &e {
@@ -347,7 +382,28 @@ async fn predict(State(state): State<AppState>, Json(payload): Json<PredictReque
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
             };
 
+            error_counter.total_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             create_error_response(status_code, error_code, &e.to_string(), None)
+        }
+        Ok(Err(e)) => {
+            error!("Inference task failed: {}", e);
+            error_counter.total_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            create_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INFERENCE_TASK_FAILED",
+                &e.to_string(),
+                None,
+            )
+        }
+        Err(_) => {
+            warn!("Request timed out after {}s", timeout_secs);
+            error_counter.total_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            create_error_response(
+                StatusCode::REQUEST_TIMEOUT,
+                "REQUEST_TIMEOUT",
+                &format!("Request timed out after {}s", timeout_secs),
+                None,
+            )
         }
     }
 }
@@ -356,6 +412,28 @@ async fn model_info(State(state): State<AppState>) -> Json<ModelInfoResponse> {
     let response = ModelInfoResponse {
         model_info: state.model.get_info().clone(),
         stats: state.model.get_stats(),
+        timestamp: Utc::now().to_rfc3339(),
+    };
+
+    Json(response)
+}
+
+
+async fn metrics(State(state): State<AppState>) -> Json<MetricsResponse> {
+    let stats = state.model.get_stats();
+    let total_requests = state.total_requests.load(std::sync::atomic::Ordering::Relaxed);
+    let total_errors = state.total_errors.load(std::sync::atomic::Ordering::Relaxed);
+
+    let response = MetricsResponse {
+        uptime_seconds: state.uptime_seconds(),
+        total_requests,
+        total_errors,
+        total_inferences: stats.inference_count,
+        average_inference_time_ms: stats.average_inference_time_ms,
+        last_inference_time_ms: stats.last_inference_time
+            .map(|t| (Utc::now() - t).num_milliseconds() as f64)
+            .unwrap_or(0.0),
+        memory_usage_bytes: stats.memory_usage_bytes,
         timestamp: Utc::now().to_rfc3339(),
     };
 
@@ -503,6 +581,7 @@ mod tests {
             .route("/healthz", get(health_check))
             .route("/predict", post(predict))
             .route("/model/info", get(model_info))
+        .route("/metrics", get(metrics))
             .with_state(state)
     }
 
@@ -650,5 +729,31 @@ mod tests {
         let error_response: ErrorResponse = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(error_response.code, "INVALID_INPUT");
+    }
+
+    #[tokio::test]
+    async fn test_metrics_endpoint() {
+        let app = create_test_app().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let metrics_response: MetricsResponse = serde_json::from_slice(&body).unwrap();
+
+        assert!(metrics_response.uptime_seconds < u64::MAX);
+        assert_eq!(metrics_response.total_requests, 0);
+        assert_eq!(metrics_response.total_errors, 0);
     }
 }

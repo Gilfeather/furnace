@@ -43,8 +43,8 @@ ndarray = "0.16"
 
 # Web Framework
 axum = "0.8"
-tower = { version = "0.5", features = ["limit"] }
-tower-http = { version = "0.6", features = ["cors", "limit", "set-header"] }
+tower = { version = "0.5", features = ["limit", "timeout"] }
+tower-http = { version = "0.6", features = ["cors", "limit", "set-header", "timeout"] }
 tokio = { version = "1.46", features = ["full"] }
 
 # CLI
@@ -84,7 +84,6 @@ burn-import = { version = "0.17", features = ["onnx"], optional = true }
 # Testing utilities
 tempfile = "3.12"
 reqwest = { version = "0.12", features = ["json"] }
-tower = { version = "0.5", features = ["util"] }
 
 # Benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
