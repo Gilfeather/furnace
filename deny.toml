@@ -2,7 +2,8 @@
 # https://embarkstudios.github.io/cargo-deny/
 
 [graph]
-all-features = false
+# CI runs cargo-deny with --all-features, so GPU backend dependencies are checked too
+all-features = true
 
 [advisories]
 # Vulnerabilities always fail; unmaintained crates only matter for our direct dependencies
@@ -20,6 +21,10 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # Boost license (permissive); xxhash-rust via the GPU backends
+    "BSL-1.0",
+    # Permissive data license for Mozilla's CA roots (webpki-roots via the GPU backends)
+    "CDLA-Permissive-2.0",
     "ISC",
     # Weak (file-level) copyleft; used by Burn via `colored`
     "MPL-2.0",
