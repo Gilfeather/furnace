@@ -37,7 +37,11 @@ impl ResNet18 {
     pub fn load(backend: BackendKind, weights: Option<&Path>) -> Result<Self> {
         let device = backend.device();
         let model = match weights {
-            Some(path) => load_burnpack(resnet18::Model::new(&device), path)?,
+            Some(path) => {
+                let mut model = resnet18::Model::new(&device);
+                crate::weights::load_burnpack(&mut model, path)?;
+                model
+            }
             #[cfg(feature = "embed-weights")]
             None => resnet18::Model::from_embedded(&device),
             #[cfg(not(feature = "embed-weights"))]
@@ -51,20 +55,6 @@ impl ResNet18 {
             output_shape: vec![1000],
         })
     }
-}
-
-/// Load Burnpack weights into a freshly constructed module, reporting errors instead of
-/// panicking (release builds use `panic = "abort"`).
-#[cfg(model_resnet18)]
-fn load_burnpack<M: burn_store::ModuleSnapshot>(mut model: M, path: &Path) -> Result<M> {
-    let mut store = burn_store::BurnpackStore::from_file(path).auto_extension(false);
-    model
-        .load_from(&mut store)
-        .map_err(|e| ModelError::LoadFailed {
-            path: path.to_path_buf(),
-            source: Box::new(e),
-        })?;
-    Ok(model)
 }
 
 /// Where to look for a built-in model's weights when `--weights` is not given, in order:

@@ -116,6 +116,11 @@ cp target/release/build/furnace-*/out/models/resnet18.bpk dist/
 If you'd rather ship a single file, build with `--features embed-weights`. The weights are
 then compiled into the binary, so it grows by the size of the model.
 
+The weight file is memory-mapped, not copied into the heap, so don't edit it in place
+while the server runs. On Linux and macOS, write the new file elsewhere and rename it over
+the old one; the running process keeps the old weights until it restarts. Windows locks the
+file while it is mapped, so stop the server first or point `--weights` at a new file.
+
 ## 🔀 Backends
 
 The CPU backend ([burn-flex](https://github.com/tracel-ai/burn), pure Rust) is always
@@ -227,7 +232,7 @@ To serve another ONNX model:
    }
    ```
 
-   The generated `Model` exposes `new(&Device)` (load weights with `load_burnpack`) and
+   The generated `Model` exposes `new(&Device)` (load weights with `weights::load_burnpack`) and
    `forward(...)`.
 4. Add a variant to `BuiltInModel` and handle it in `from_name`, `available_models` and
    `create_model`.
@@ -271,7 +276,11 @@ Other numbers:
 
 - **Startup**: ~0.45 s to healthy, including loading the 46 MB weight file
 - **Binary size**: ~5 MB (+ 46 MB `resnet18.bpk`)
-- **Memory**: ~53 MB working set after inference, mostly the ResNet-18 weights
+- **Memory**: ~52 MB working set but only ~4 MB private memory after inference. The weight
+  file is memory-mapped and tensors use its pages directly, so the 46 MB of ResNet-18 weights
+  are shared, file-backed pages that the OS can drop and reload under pressure and that
+  multiple server processes share. Reading the weights into the heap instead used ~49 MB
+  private (measured with `Process.PrivateMemorySize64` after 3 `/predict` calls).
 
 Reproduce:
 

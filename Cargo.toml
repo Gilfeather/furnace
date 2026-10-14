@@ -43,6 +43,9 @@ cuda = ["burn/cuda"]
 # ML Framework
 burn = { version = "0.22", default-features = false, features = ["std", "flex", "store"] }
 burn-store = { version = "0.22", features = ["std"] }
+# Zero-copy weight loading: .bpk files are memory-mapped and shared with tensors
+bytes = "1.9"
+memmap2 = "0.9"
 
 # Web Framework
 axum = "0.8"
