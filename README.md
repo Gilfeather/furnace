@@ -19,6 +19,8 @@ CPU/GPU backend.
   (swap in fine-tuned weights without rebuilding, or embed them with `--features embed-weights`)
 - 🔀 **Runtime backend selection**: `--backend cpu|wgpu|metal|cuda` (Burn 0.22 `Device` API)
 - 🖼️ **Built-in ResNet-18**: ImageNet classifier, ~75–90 ms per image on a laptop CPU
+- ⚡ **Binary I/O**: send raw `float32` (`application/octet-stream`) instead of JSON; ~1 ms of
+  request overhead per ResNet-18 image
 - 🚦 **Backpressure**: bounded concurrency with immediate `503` instead of unbounded queues
 - 🛡️ **Hardened API**: body size limit, input validation, timeouts, security headers,
   graceful shutdown
@@ -186,6 +188,41 @@ Batch (up to 1000 items):
 
 Outputs are raw logits; apply softmax client-side for probabilities.
 
+#### Binary input and output
+
+For large inputs, skip JSON and send raw little-endian `float32` values with
+`Content-Type: application/octet-stream`. The body is the flattened items back to back
+(`batch × 150,528 × 4` bytes for ResNet-18). This avoids formatting and parsing ~10 bytes
+of text per value, and the body is ~2.5× smaller.
+
+| Request header | Meaning |
+|---|---|
+| `Content-Type: application/octet-stream` | Body is raw `float32` (little-endian) |
+| `X-Batch-Size: N` | Optional. Body holds `N` items and the JSON response uses `outputs`. Without it the body is one item and the response uses `output`, as with `input` |
+| `Accept: application/octet-stream` | Optional, works with JSON requests too. Respond with raw little-endian `float32` outputs (`batch × output_size`) instead of JSON |
+
+A binary response carries its metadata in headers: `X-Batch-Size`, `X-Output-Shape` (per item,
+comma separated, e.g. `1000`) and `X-Inference-Time-Ms`. Errors are always JSON.
+
+```python
+import numpy as np, requests
+
+batch = np.random.randn(4, 3, 224, 224).astype("<f4")   # little-endian float32
+r = requests.post("http://localhost:3000/predict", data=batch.tobytes(), headers={
+    "Content-Type": "application/octet-stream",
+    "X-Batch-Size": "4",
+    "Accept": "application/octet-stream",
+})
+logits = np.frombuffer(r.content, dtype="<f4").reshape(4, 1000)
+```
+
+```bash
+# Raw float32 file with one 3x224x224 image
+curl -X POST http://localhost:3000/predict \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @image.f32
+```
+
 ### Errors
 
 Errors share one shape:
@@ -196,9 +233,12 @@ Errors share one shape:
 
 | Status | `code` | Cause |
 |---|---|---|
-| 400 | `INVALID_REQUEST` | Malformed JSON or missing `input`/`inputs` |
+| 400 | `INVALID_REQUEST` | Malformed JSON, or `X-Batch-Size` not an integer |
+| 422 | `INVALID_REQUEST` | Valid JSON without exactly one of `input`/`inputs`, or non-numeric values |
+| 415 | `INVALID_REQUEST` | `Content-Type` is neither `application/json` nor `application/octet-stream` |
 | 400 | `INVALID_INPUT` | Empty input |
-| 400 | `INPUT_VALIDATION_FAILED` | Wrong number of values for the model |
+| 400 | `INPUT_VALIDATION_FAILED` | Wrong number of values (or bytes, for binary input) for the model |
+| 400 | `INVALID_INPUT_VALUE` | NaN or infinite value |
 | 400 | `BATCH_TOO_LARGE` | More than 1000 items |
 | 413 | `INVALID_REQUEST` | Body larger than `--max-body-mb` |
 | 503 | `SERVER_BUSY` | All `--max-concurrent-requests` slots in use; retry later |
@@ -263,9 +303,23 @@ Criterion, in-process `Model::predict_batch` (median):
 | Server overhead only (`overhead/*`, ResNet-sized I/O) | 0.31 ms | 1.18 ms (×4) | |
 | MLP 784→128→10 (`mlp/*`) | 14 µs | 109 µs (×32) | ~290k items/s batched |
 
-End to end over HTTP on localhost (curl, 1.5 MB JSON body), single ResNet-18 image: ~300 ms
-total, of which ~75 ms is inference. The rest is sending and parsing JSON; for
-latency-sensitive use, send batches.
+End to end over HTTP on localhost, ResNet-18, release binary, keep-alive client
+(`benches/http_bench.py`, median of 30 requests). *I/O overhead* is end-to-end time minus
+the server's `inference_time_ms`: sending, receiving and decoding the request and response.
+Inference alone varies by ±10 ms between runs, so compare the overhead column.
+
+| Request | Body | End to end | I/O overhead |
+|---|---|---|---|
+| JSON, 1 image (0.4.0 before this change) | 1.7 MB | 102 ms | 14 ms |
+| JSON, 1 image | 1.7 MB | 91–96 ms | 6 ms |
+| Binary (`application/octet-stream`), 1 image | 0.6 MB | 79–80 ms | 1 ms |
+| JSON, batch 4 (0.4.0 before this change) | 6.7 MB | 334 ms | 44 ms |
+| JSON, batch 4 | 6.7 MB | 299–323 ms | 21 ms |
+| Binary, batch 4 | 2.4 MB | 285–297 ms | 3 ms |
+
+In process (`request_decode/*`), turning one ResNet-18 body into floats takes 4.0 ms for
+JSON (about half the time of the previous derived deserializer) and 27 µs for binary. For latency-sensitive clients,
+send binary.
 
 Other numbers:
 
@@ -277,6 +331,11 @@ Reproduce:
 
 ```bash
 cargo bench --bench inference_benchmark
+```
+
+```bash
+# With a release server running on port 3000 (stdlib-only Python)
+python benches/http_bench.py 3000 json1 json4 bin1 bin4
 ```
 
 The `overhead/*` group runs a constant-output model with ResNet-sized I/O, so it measures

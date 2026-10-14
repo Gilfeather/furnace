@@ -5,8 +5,11 @@
 //! - `mlp/*`: file-format MLP (784 -> 128 -> 10)
 //! - `overhead/*`: constant-output dummy model with ResNet-sized I/O, i.e. the cost of
 //!   validation and tensor conversion alone, excluding the network itself
+//! - `request_decode/*`: turning one ResNet-sized `/predict` body into floats, JSON vs raw
+//!   little-endian `f32` (`application/octet-stream`)
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use furnace::api::PredictRequest;
 use furnace::model::{DummyModel, Model, load_model};
 use std::hint::black_box;
 use std::path::Path;
@@ -50,9 +53,37 @@ fn bench_overhead(c: &mut Criterion) {
     bench_model(c, "overhead", &dummy_resnet_shaped(), &[1, 4]);
 }
 
+fn bench_request_decode(c: &mut Criterion) {
+    // Deterministic, varied values: JSON size and parse cost depend on the digits
+    let image: Vec<f32> = (0..RESNET_INPUT)
+        .map(|i| ((i * 7919) % 10007) as f32 / 2501.0 - 2.0)
+        .collect();
+    let json = serde_json::to_vec(&serde_json::json!({ "input": image })).unwrap();
+    let binary: Vec<u8> = image.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let mut group = c.benchmark_group("request_decode");
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("json", |b| {
+        b.iter(|| black_box(serde_json::from_slice::<PredictRequest>(black_box(&json)).unwrap()))
+    });
+    group.bench_function("binary", |b| {
+        b.iter(|| {
+            let (chunks, _) = black_box(binary.as_slice()).as_chunks::<4>();
+            black_box(
+                chunks
+                    .iter()
+                    .copied()
+                    .map(f32::from_le_bytes)
+                    .collect::<Vec<f32>>(),
+            )
+        })
+    });
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(20);
-    targets = bench_overhead, bench_mlp, bench_resnet18
+    targets = bench_request_decode, bench_overhead, bench_mlp, bench_resnet18
 }
 criterion_main!(benches);

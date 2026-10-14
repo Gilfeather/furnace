@@ -1,16 +1,19 @@
 use axum::http::{
-    HeaderValue,
-    header::{X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS},
+    HeaderMap, HeaderName, HeaderValue,
+    header::{ACCEPT, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS},
 };
 use axum::{
     Router,
-    extract::{DefaultBodyLimit, State, rejection::JsonRejection},
+    body::Bytes,
+    extract::{DefaultBodyLimit, FromRequest, Request, State},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
 use chrono::Utc;
+use serde::de::{self, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::signal;
@@ -22,7 +25,17 @@ use tracing::{error, info, warn};
 use crate::error::{ApiError, FurnaceError, ModelError, Result};
 use crate::model::{MAX_BATCH_SIZE, Model, ModelInfo, ModelStats};
 
-#[derive(Debug, Deserialize, Serialize)]
+/// Media type of the raw little-endian `f32` input/output format
+pub const OCTET_STREAM: &str = "application/octet-stream";
+/// Request: number of items in a binary body (omit for a single item).
+/// Response: number of items in a binary body.
+pub const BATCH_SIZE_HEADER: HeaderName = HeaderName::from_static("x-batch-size");
+/// Binary response: per-item output shape, comma separated (e.g. `1000`)
+pub const OUTPUT_SHAPE_HEADER: HeaderName = HeaderName::from_static("x-output-shape");
+/// Binary response: what `inference_time_ms` holds in the JSON response
+pub const INFERENCE_TIME_HEADER: HeaderName = HeaderName::from_static("x-inference-time-ms");
+
+#[derive(Debug, Serialize)]
 pub struct PredictRequest {
     #[serde(flatten)]
     pub input_data: PredictInputData,
@@ -33,6 +46,72 @@ pub struct PredictRequest {
 pub enum PredictInputData {
     Single { input: Vec<f32> },
     Batch { inputs: Vec<Vec<f32>> },
+}
+
+// Hand-written so the float arrays are parsed straight into `Vec`s. The derived
+// `flatten` + `untagged` impl first buffers the whole document into serde's generic
+// `Content` tree and then parses it a second time, which doubles the cost on
+// image-sized payloads.
+impl<'de> Deserialize<'de> for PredictRequest {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "lowercase")]
+        enum Field {
+            Input,
+            Inputs,
+            #[serde(other)]
+            Other,
+        }
+
+        struct RequestVisitor;
+
+        impl<'de> Visitor<'de> for RequestVisitor {
+            type Value = PredictRequest;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("an object with an `input` or `inputs` field")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<PredictRequest, A::Error> {
+                let mut input_data = None;
+                while let Some(field) = map.next_key()? {
+                    let value = match field {
+                        Field::Input => PredictInputData::Single {
+                            input: map.next_value()?,
+                        },
+                        Field::Inputs => PredictInputData::Batch {
+                            inputs: map.next_value()?,
+                        },
+                        Field::Other => {
+                            map.next_value::<IgnoredAny>()?;
+                            continue;
+                        }
+                    };
+                    if input_data.replace(value).is_some() {
+                        return Err(de::Error::custom(
+                            "expected exactly one of `input` or `inputs`",
+                        ));
+                    }
+                }
+                input_data
+                    .map(|input_data| PredictRequest { input_data })
+                    .ok_or_else(|| de::Error::custom("missing field `input` or `inputs`"))
+            }
+        }
+
+        deserializer.deserialize_map(RequestVisitor)
+    }
+}
+
+/// A decoded `/predict` body: `batch_size` items back to back in one buffer
+struct PredictInput {
+    data: Vec<f32>,
+    batch_size: usize,
+    /// Answer with `output` instead of `outputs`
+    single: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -128,7 +207,12 @@ pub fn router(model: Model, config: &ServerConfig) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_headers(Any)
+        .expose_headers([
+            BATCH_SIZE_HEADER,
+            OUTPUT_SHAPE_HEADER,
+            INFERENCE_TIME_HEADER,
+        ]);
 
     Router::new()
         .route("/healthz", get(health_check))
@@ -214,14 +298,26 @@ async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
-async fn predict(
-    State(state): State<AppState>,
-    payload: std::result::Result<Json<PredictRequest>, JsonRejection>,
-) -> Response {
-    let start_time = Instant::now();
+async fn predict(State(state): State<AppState>, request: Request) -> Response {
+    // Pick the decoder before buffering the body so unsupported types fail fast
+    let format = match RequestFormat::from_headers(request.headers()) {
+        Some(format) => format,
+        None => {
+            return create_error_response(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "INVALID_REQUEST",
+                &format!(
+                    "Expected request with `Content-Type: application/json` or `{OCTET_STREAM}`"
+                ),
+                None,
+            );
+        }
+    };
+    let binary_response = accepts_octet_stream(request.headers());
+    let headers = request.headers().clone();
 
-    let Json(payload) = match payload {
-        Ok(p) => p,
+    let body = match Bytes::from_request(request, &state).await {
+        Ok(body) => body,
         Err(rejection) => {
             warn!("Rejected request body: {}", rejection.body_text());
             return create_error_response(
@@ -233,15 +329,22 @@ async fn predict(
         }
     };
 
-    let (inputs, single) = match payload.input_data {
-        PredictInputData::Single { input } => (vec![input], true),
-        PredictInputData::Batch { inputs } => (inputs, false),
+    let decoded = match format {
+        RequestFormat::Json => decode_json(&state.model, &body),
+        RequestFormat::Binary => decode_binary(&state.model, &headers, &body),
     };
-
-    if let Err(response) = validate_inputs(&state.model, &inputs) {
-        return *response;
-    }
-    let batch_size = inputs.len();
+    // Free the raw body before inference; only the decoded floats are needed now
+    drop(body);
+    let PredictInput {
+        data,
+        batch_size,
+        single,
+    } = match decoded {
+        Ok(input) => input,
+        Err(response) => return *response,
+    };
+    // `inference_time_ms` excludes receiving and decoding the body
+    let start_time = Instant::now();
 
     // Backpressure: reject immediately instead of queueing when all slots are busy
     let permit = match state.inference_slots.clone().try_acquire_owned() {
@@ -261,7 +364,7 @@ async fn predict(
     let model = state.model.clone();
     let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        model.predict_batch(inputs)
+        model.predict_flat(data, batch_size)
     });
 
     let joined = match state.request_timeout {
@@ -294,20 +397,32 @@ async fn predict(
     };
 
     match result {
-        Ok(mut outputs) => {
+        Ok(output) => {
             let inference_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-            let output_data = if single {
-                PredictOutputData::Single {
-                    output: outputs.pop().unwrap_or_default(),
-                }
-            } else {
-                PredictOutputData::Batch { outputs }
-            };
-
             info!(
                 "Prediction completed in {:.2}ms, batch size: {}",
                 inference_time_ms, batch_size
             );
+            if binary_response {
+                return binary_output_response(
+                    &output,
+                    batch_size,
+                    &state.model.get_info().output_spec.shape,
+                    inference_time_ms,
+                );
+            }
+
+            let output_data = if single {
+                PredictOutputData::Single { output }
+            } else {
+                let output_size = output.len() / batch_size;
+                PredictOutputData::Batch {
+                    outputs: output
+                        .chunks_exact(output_size)
+                        .map(<[f32]>::to_vec)
+                        .collect(),
+                }
+            };
             (
                 StatusCode::OK,
                 Json(PredictResponse {
@@ -339,27 +454,206 @@ async fn predict(
     }
 }
 
-/// Cheap request-level checks done before taking an inference slot
-fn validate_inputs(model: &Model, inputs: &[Vec<f32>]) -> std::result::Result<(), Box<Response>> {
-    if inputs.is_empty() || inputs.iter().any(Vec::is_empty) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestFormat {
+    Json,
+    /// Raw little-endian `f32`, see [`decode_binary`]
+    Binary,
+}
+
+impl RequestFormat {
+    fn from_headers(headers: &HeaderMap) -> Option<Self> {
+        let content_type = headers.get(CONTENT_TYPE)?.to_str().ok()?;
+        let essence = media_type_essence(content_type);
+        if essence.eq_ignore_ascii_case("application/json")
+            || essence.to_ascii_lowercase().ends_with("+json")
+        {
+            Some(Self::Json)
+        } else if essence.eq_ignore_ascii_case(OCTET_STREAM) {
+            Some(Self::Binary)
+        } else {
+            None
+        }
+    }
+}
+
+/// `type/subtype` without parameters such as `; charset=utf-8`
+fn media_type_essence(value: &str) -> &str {
+    value.split(';').next().unwrap_or_default().trim()
+}
+
+/// Whether the client asked for a raw `f32` response with `Accept: application/octet-stream`
+fn accepts_octet_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(ACCEPT)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|item| media_type_essence(item).eq_ignore_ascii_case(OCTET_STREAM))
+}
+
+fn decode_json(model: &Model, body: &[u8]) -> std::result::Result<PredictInput, Box<Response>> {
+    // serde_json directly rather than axum's `Json`, which also tracks the path of
+    // every element for error messages
+    let request: PredictRequest = serde_json::from_slice(body).map_err(|e| {
+        let (status, message) = match e.classify() {
+            serde_json::error::Category::Data => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Failed to deserialize the JSON body into the target type: {e}"),
+            ),
+            _ => (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to parse the request body as JSON: {e}"),
+            ),
+        };
+        warn!("Rejected request body: {}", message);
+        Box::new(create_error_response(
+            status,
+            "INVALID_REQUEST",
+            &message,
+            None,
+        ))
+    })?;
+
+    match request.input_data {
+        PredictInputData::Single { input } => {
+            validate_inputs(model, std::slice::from_ref(&input))?;
+            Ok(PredictInput {
+                data: input,
+                batch_size: 1,
+                single: true,
+            })
+        }
+        PredictInputData::Batch { inputs } => {
+            validate_inputs(model, &inputs)?;
+            Ok(PredictInput {
+                batch_size: inputs.len(),
+                data: inputs.concat(),
+                single: false,
+            })
+        }
+    }
+}
+
+/// Decode a raw body of `batch_size × input_size` little-endian `f32` values.
+///
+/// Without an `X-Batch-Size` header the body is one item and the response uses
+/// `output`; with it the response uses `outputs`, mirroring `input` / `inputs`.
+fn decode_binary(
+    model: &Model,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> std::result::Result<PredictInput, Box<Response>> {
+    let batch_header = headers.get(BATCH_SIZE_HEADER);
+    let batch_size = match batch_header {
+        None => 1,
+        Some(value) => match value.to_str().ok().and_then(|s| s.trim().parse().ok()) {
+            Some(n) => n,
+            None => {
+                return Err(Box::new(create_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_REQUEST",
+                    "X-Batch-Size must be a non-negative integer",
+                    None,
+                )));
+            }
+        },
+    };
+
+    check_batch_len(batch_size)?;
+    if body.is_empty() {
+        return Err(empty_input_response());
+    }
+
+    let shape = &model.get_info().input_spec.shape;
+    let input_size: usize = shape.iter().product();
+    let expected_bytes = batch_size * input_size * size_of::<f32>();
+    if body.len() != expected_bytes {
         return Err(Box::new(create_error_response(
             StatusCode::BAD_REQUEST,
-            "INVALID_INPUT",
-            "Input cannot be empty",
-            None,
+            "INPUT_VALIDATION_FAILED",
+            &format!(
+                "Expected {expected_bytes} bytes ({batch_size} item(s) of shape {shape:?} as \
+                 little-endian f32), got {}",
+                body.len()
+            ),
+            Some(serde_json::json!({
+                "expected_shape": shape,
+                "batch_size": batch_size,
+                "expected_bytes": expected_bytes,
+                "received_bytes": body.len()
+            })),
         )));
     }
 
-    if inputs.len() > MAX_BATCH_SIZE {
+    // Length was checked above, so there is no remainder
+    let (chunks, _) = body.as_chunks::<4>();
+    let data = chunks.iter().copied().map(f32::from_le_bytes).collect();
+    Ok(PredictInput {
+        data,
+        batch_size,
+        single: batch_header.is_none(),
+    })
+}
+
+/// Raw little-endian `f32` outputs, `batch_size × output_size` values
+fn binary_output_response(
+    output: &[f32],
+    batch_size: usize,
+    output_shape: &[usize],
+    inference_time_ms: f64,
+) -> Response {
+    let mut body = Vec::with_capacity(size_of_val(output));
+    for value in output {
+        body.extend_from_slice(&value.to_le_bytes());
+    }
+    let shape = output_shape
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    (
+        StatusCode::OK,
+        [
+            (CONTENT_TYPE, OCTET_STREAM.to_string()),
+            (BATCH_SIZE_HEADER, batch_size.to_string()),
+            (OUTPUT_SHAPE_HEADER, shape),
+            (INFERENCE_TIME_HEADER, format!("{inference_time_ms:.3}")),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+fn empty_input_response() -> Box<Response> {
+    Box::new(create_error_response(
+        StatusCode::BAD_REQUEST,
+        "INVALID_INPUT",
+        "Input cannot be empty",
+        None,
+    ))
+}
+
+fn check_batch_len(batch_size: usize) -> std::result::Result<(), Box<Response>> {
+    if batch_size == 0 {
+        return Err(empty_input_response());
+    }
+    if batch_size > MAX_BATCH_SIZE {
         return Err(Box::new(create_error_response(
             StatusCode::BAD_REQUEST,
             "BATCH_TOO_LARGE",
-            &format!(
-                "Batch size {} exceeds maximum allowed batch size {MAX_BATCH_SIZE}",
-                inputs.len()
-            ),
+            &format!("Batch size {batch_size} exceeds maximum allowed batch size {MAX_BATCH_SIZE}"),
             None,
         )));
+    }
+    Ok(())
+}
+
+/// Cheap request-level checks done before taking an inference slot
+fn validate_inputs(model: &Model, inputs: &[Vec<f32>]) -> std::result::Result<(), Box<Response>> {
+    check_batch_len(inputs.len())?;
+    if inputs.iter().any(Vec::is_empty) {
+        return Err(empty_input_response());
     }
 
     for (i, input) in inputs.iter().enumerate() {
@@ -568,5 +862,246 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(error.code, "SERVER_BUSY");
+    }
+    fn binary_request(values: &[f32], batch_size: Option<&str>) -> Request<Body> {
+        let body: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut builder = Request::builder()
+            .uri("/predict")
+            .method("POST")
+            .header("content-type", OCTET_STREAM);
+        if let Some(n) = batch_size {
+            builder = builder.header(BATCH_SIZE_HEADER, n);
+        }
+        builder.body(Body::from(body)).unwrap()
+    }
+
+    async fn error_code(app: Router, request: Request<Body>) -> (StatusCode, String) {
+        let (status, body) = send(app, request).await;
+        let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
+        (status, error.code)
+    }
+
+    #[test]
+    fn test_predict_request_deserialize() {
+        let single: PredictRequest =
+            serde_json::from_str(r#"{"input": [1, 2.5, -3e-2], "extra": {"a": [1]}}"#).unwrap();
+        match &single.input_data {
+            PredictInputData::Single { input } => assert_eq!(input, &vec![1.0, 2.5, -0.03]),
+            _ => panic!("Expected single input"),
+        }
+
+        let batch: PredictRequest = serde_json::from_str(r#"{"inputs": [[1], [2, 3]]}"#).unwrap();
+        match batch.input_data {
+            PredictInputData::Batch { inputs } => {
+                assert_eq!(inputs, vec![vec![1.0], vec![2.0, 3.0]])
+            }
+            _ => panic!("Expected batch input"),
+        }
+
+        for invalid in [
+            r#"{}"#,
+            r#"{"input": [1], "inputs": [[1]]}"#,
+            r#"{"input": [1], "input": [2]}"#,
+            r#"{"input": "nope"}"#,
+            r#"[1, 2]"#,
+        ] {
+            assert!(
+                serde_json::from_str::<PredictRequest>(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+
+        // Serialization is unchanged
+        let round_trip = serde_json::to_value(&single).unwrap();
+        assert_eq!(round_trip["input"], serde_json::json!([1.0, 2.5, -0.03f32]));
+    }
+
+    #[tokio::test]
+    async fn test_predict_json_errors() {
+        // Valid JSON, wrong structure: 422, like axum's `Json` extractor
+        let body = serde_json::json!({ "data": [1, 2] }).to_string();
+        let (status, code) = error_code(test_app(), predict_request(body)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(code, "INVALID_REQUEST");
+
+        // Content type parameters are allowed
+        let request = Request::builder()
+            .uri("/predict")
+            .method("POST")
+            .header("content-type", "application/json; charset=utf-8")
+            .body(Body::from(
+                serde_json::json!({ "input": vec![0.5; 784] }).to_string(),
+            ))
+            .unwrap();
+        let (status, _) = send(test_app(), request).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_predict_unsupported_content_type() {
+        for content_type in [Some("text/plain"), None] {
+            let mut builder = Request::builder().uri("/predict").method("POST");
+            if let Some(content_type) = content_type {
+                builder = builder.header("content-type", content_type);
+            }
+            let request = builder.body(Body::from("{}")).unwrap();
+            let (status, code) = error_code(test_app(), request).await;
+            assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+            assert_eq!(code, "INVALID_REQUEST");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_predict_binary_single() {
+        let (status, body) = send(test_app(), binary_request(&[0.5; 784], None)).await;
+        assert_eq!(status, StatusCode::OK);
+        let response: PredictResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response.batch_size, 1);
+        match response.output_data {
+            PredictOutputData::Single { output } => assert_eq!(output.len(), 10),
+            _ => panic!("Expected single output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_predict_binary_batch() {
+        let request = binary_request(&[0.5; 784 * 3], Some("3"));
+        let (status, body) = send(test_app(), request).await;
+        assert_eq!(status, StatusCode::OK);
+        let response: PredictResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response.batch_size, 3);
+        match response.output_data {
+            PredictOutputData::Batch { outputs } => {
+                assert_eq!(outputs.len(), 3);
+                assert!(outputs.iter().all(|o| o.len() == 10));
+            }
+            _ => panic!("Expected batch output"),
+        }
+
+        // An explicit batch of one still answers with `outputs`
+        let (status, body) = send(test_app(), binary_request(&[0.5; 784], Some("1"))).await;
+        assert_eq!(status, StatusCode::OK);
+        let response: PredictResponse = serde_json::from_slice(&body).unwrap();
+        assert!(matches!(
+            response.output_data,
+            PredictOutputData::Batch { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_predict_binary_response() {
+        let mut request = binary_request(&[0.5; 784 * 2], Some("2"));
+        request
+            .headers_mut()
+            .insert(ACCEPT, HeaderValue::from_static(OCTET_STREAM));
+        let response = test_app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = response.headers().clone();
+        assert_eq!(headers[CONTENT_TYPE], OCTET_STREAM);
+        assert_eq!(headers[BATCH_SIZE_HEADER], "2");
+        assert_eq!(headers[OUTPUT_SHAPE_HEADER], "10");
+        let time: f64 = headers[INFERENCE_TIME_HEADER]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(time >= 0.0);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.len(), 2 * 10 * 4);
+        let (values, _) = body.as_chunks::<4>();
+        assert!(values.iter().all(|v| f32::from_le_bytes(*v) == 0.5));
+
+        // JSON requests can ask for a binary response too
+        let request = Request::builder()
+            .uri("/predict")
+            .method("POST")
+            .header("content-type", "application/json")
+            .header("accept", "text/html, application/octet-stream;q=0.9")
+            .body(Body::from(
+                serde_json::json!({ "input": vec![0.5; 784] }).to_string(),
+            ))
+            .unwrap();
+        let response = test_app().oneshot(request).await.unwrap();
+        assert_eq!(response.headers()[CONTENT_TYPE], OCTET_STREAM);
+        assert_eq!(response.headers()[BATCH_SIZE_HEADER], "1");
+    }
+
+    #[tokio::test]
+    async fn test_predict_binary_errors() {
+        let cases = [
+            // Body length doesn't match the model input
+            (
+                binary_request(&[0.5; 100], None),
+                StatusCode::BAD_REQUEST,
+                "INPUT_VALIDATION_FAILED",
+            ),
+            // Body length doesn't match X-Batch-Size
+            (
+                binary_request(&[0.5; 784 * 2], Some("3")),
+                StatusCode::BAD_REQUEST,
+                "INPUT_VALIDATION_FAILED",
+            ),
+            (
+                binary_request(&[0.5; 784], Some("abc")),
+                StatusCode::BAD_REQUEST,
+                "INVALID_REQUEST",
+            ),
+            (
+                binary_request(&[0.5; 784], Some("0")),
+                StatusCode::BAD_REQUEST,
+                "INVALID_INPUT",
+            ),
+            (
+                binary_request(&[], None),
+                StatusCode::BAD_REQUEST,
+                "INVALID_INPUT",
+            ),
+            (
+                binary_request(&[0.5; 784], Some("1001")),
+                StatusCode::BAD_REQUEST,
+                "BATCH_TOO_LARGE",
+            ),
+        ];
+        for (request, expected_status, expected_code) in cases {
+            let (status, code) = error_code(test_app(), request).await;
+            assert_eq!((status, code.as_str()), (expected_status, expected_code));
+        }
+
+        // Odd byte counts are rejected, not truncated
+        let request = Request::builder()
+            .uri("/predict")
+            .method("POST")
+            .header("content-type", OCTET_STREAM)
+            .body(Body::from(vec![0u8; 784 * 4 + 1]))
+            .unwrap();
+        let (status, code) = error_code(test_app(), request).await;
+        assert_eq!(
+            (status, code.as_str()),
+            (StatusCode::BAD_REQUEST, "INPUT_VALIDATION_FAILED")
+        );
+
+        // Non-finite values are caught by the model, as for JSON
+        let mut values = vec![0.5; 784];
+        values[7] = f32::INFINITY;
+        let (status, code) = error_code(test_app(), binary_request(&values, None)).await;
+        assert_eq!(
+            (status, code.as_str()),
+            (StatusCode::BAD_REQUEST, "INVALID_INPUT_VALUE")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_predict_binary_body_limit_enforced() {
+        let config = ServerConfig {
+            max_body_bytes: 1024,
+            ..ServerConfig::default()
+        };
+        let app = router(dummy_model(), &config);
+        let (status, code) = error_code(app, binary_request(&[0.5; 784], None)).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(code, "INVALID_REQUEST");
     }
 }
