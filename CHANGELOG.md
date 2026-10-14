@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `benches/compare`: ResNet-18 comparison against tract and ONNX Runtime (latency, memory,
   startup, binary size, top-1 check on a real image). Its own Cargo workspace, so `ort` and
   `tract` never become furnace dependencies
+- Image input behind the opt-in `image` Cargo feature: `Content-Type: image/jpeg` or
+  `image/png` with one image per request. The server applies ImageNet preprocessing (shorter
+  side to 256, bilinear; centre crop 224; ImageNet mean/std; CHW `float32`), so clients don't
+  need Python/PIL. Only models with `[3, H, W]` input accept images (others return 415);
+  undecodable images return `400 INVALID_IMAGE`
+- `examples/http_bench.rs` replaces `benches/http_bench.py` for HTTP latency
+  (`cargo run --release --example http_bench`), so the repository has no Python left
 
 ### Changed
 - `BuiltInModel` is a handle into the generated registry instead of an enum

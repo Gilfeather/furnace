@@ -437,3 +437,113 @@ fn test_cli_lists_available_models() {
     assert!(stderr.contains("unknown built-in model"), "{stderr}");
     assert!(stderr.contains("mnist, resnet18"), "{stderr}");
 }
+
+/// Image input: the server's preprocessing must give the same logits as sending the
+/// preprocessed floats, and JPEG input must work end to end
+#[cfg(feature = "image")]
+#[tokio::test]
+async fn test_end_to_end_image_input() {
+    use furnace::preprocess::{ImageKind, preprocess_image};
+    use image::codecs::jpeg::JpegEncoder;
+    use image::codecs::png::PngEncoder;
+    use image::{ExtendedColorType, ImageEncoder, Rgb, RgbImage};
+
+    let base_url = spawn_server(ServerConfig::default()).await;
+
+    // A 320x240 synthetic photo-like image: gradients plus a bright disc off centre
+    let image = RgbImage::from_fn(320, 240, |x, y| {
+        let (dx, dy) = (x as i32 - 190, y as i32 - 110);
+        if dx * dx + dy * dy < 50 * 50 {
+            Rgb([240, 220, 60])
+        } else {
+            Rgb([(x * 255 / 320) as u8, (y * 255 / 240) as u8, 90])
+        }
+    });
+    let mut png = Vec::new();
+    PngEncoder::new(&mut png)
+        .write_image(image.as_raw(), 320, 240, ExtendedColorType::Rgb8)
+        .unwrap();
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .write_image(image.as_raw(), 320, 240, ExtendedColorType::Rgb8)
+        .unwrap();
+
+    // Reference: preprocess on the client and send floats
+    let floats = preprocess_image(&png, ImageKind::Png, 224, 224).unwrap();
+    assert_eq!(floats.len(), RESNET_INPUT);
+    let reference: Value = client()
+        .post(format!("{base_url}/predict"))
+        .header("content-type", "application/octet-stream")
+        .body(le_bytes(&floats))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let reference = json_floats(&reference["output"]);
+
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .header("content-type", "image/png")
+        .body(png)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let from_png: Value = response.json().await.unwrap();
+    assert_eq!(from_png["batch_size"], 1);
+    assert_close(&json_floats(&from_png["output"]), &reference);
+
+    // JPEG is lossy, so only check that it decodes to the same top-1 class
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .header("content-type", "image/jpeg")
+        .body(jpeg)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let from_jpeg: Value = response.json().await.unwrap();
+    let argmax = |logits: &[f32]| {
+        (0..logits.len())
+            .max_by(|&a, &b| logits[a].total_cmp(&logits[b]))
+            .unwrap()
+    };
+    assert_eq!(
+        argmax(&json_floats(&from_jpeg["output"])),
+        argmax(&reference)
+    );
+
+    // Not an image
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .header("content-type", "image/jpeg")
+        .body("hello")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let invalid: Value = response.json().await.unwrap();
+    assert_eq!(invalid["code"], "INVALID_IMAGE");
+}
+
+/// Image input needs a `[3, H, W]` model: MNIST (`[1, 28, 28]`) rejects it, with or without
+/// the `image` feature
+#[tokio::test]
+async fn test_image_input_rejected_for_non_rgb_model() {
+    let base_url = spawn_model_server("mnist", ServerConfig::default()).await;
+    // A PNG signature is enough: the shape (or content type) is checked before decoding
+    let response = client()
+        .post(format!("{base_url}/predict"))
+        .header("content-type", "image/png")
+        .body(b"\x89PNG\r\n\x1a\n".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 415);
+    let error: Value = response.json().await.unwrap();
+    assert_eq!(error["code"], "INVALID_REQUEST");
+    #[cfg(feature = "image")]
+    assert_eq!(error["details"]["expected_shape"], json!([1, 28, 28]));
+}

@@ -35,6 +35,9 @@ onnx = ["dep:burn-onnx", "dep:onnx-ir"]
 # Compile built-in model weights into the binary (single-file deploys).
 # Default: weights stay in a separate <name>.bpk file loaded at startup.
 embed-weights = ["onnx"]
+# Accept `image/jpeg` and `image/png` on POST /predict, with ImageNet preprocessing done by
+# the server. Off by default to keep the binary small.
+image = ["dep:image"]
 wgpu = ["burn/wgpu"]
 metal = ["burn/metal"]
 cuda = ["burn/cuda"]
@@ -66,6 +69,9 @@ serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "chrono"] }
 uuid = { version = "1.0", features = ["v4"] }
+
+# Image input (`image` feature)
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 
 # Error Handling
 thiserror = "2.0"

@@ -4,6 +4,8 @@ pub mod burn_model;
 pub mod error;
 pub mod model;
 pub mod models;
+#[cfg(feature = "image")]
+pub mod preprocess;
 pub mod types;
 pub mod weights;
 

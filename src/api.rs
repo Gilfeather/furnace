@@ -26,6 +26,8 @@ use tracing::{error, info, warn};
 
 use crate::error::{ApiError, FurnaceError, ModelError, Result};
 use crate::model::{MAX_BATCH_SIZE, Model, ModelInfo, ModelStats};
+#[cfg(feature = "image")]
+use crate::preprocess::{ImageKind, image_input_size, preprocess_image};
 
 /// Media type of the raw little-endian `f32` input/output format
 pub const OCTET_STREAM: &str = "application/octet-stream";
@@ -344,13 +346,17 @@ async fn predict(State(state): State<AppState>, request: Request) -> Response {
             return create_error_response(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "INVALID_REQUEST",
-                &format!(
-                    "Expected request with `Content-Type: application/json` or `{OCTET_STREAM}`"
-                ),
+                &format!("Expected request with `Content-Type: {SUPPORTED_REQUEST_TYPES}`"),
                 None,
             );
         }
     };
+    #[cfg(feature = "image")]
+    if let RequestFormat::Image(_) = format
+        && let Err(response) = image_size(&state.model)
+    {
+        return *response;
+    }
     let binary_response = accepts_octet_stream(request.headers());
     let headers = request.headers().clone();
 
@@ -370,6 +376,8 @@ async fn predict(State(state): State<AppState>, request: Request) -> Response {
     let decoded = match format {
         RequestFormat::Json => decode_json(&state.model, &body),
         RequestFormat::Binary => decode_binary(&state.model, &headers, &body),
+        #[cfg(feature = "image")]
+        RequestFormat::Image(kind) => decode_image(&state, kind, body.clone()).await,
     };
     // Free the raw body before inference; only the decoded floats are needed now
     drop(body);
@@ -389,12 +397,7 @@ async fn predict(State(state): State<AppState>, request: Request) -> Response {
         Ok(permit) => permit,
         Err(_) => {
             warn!("All inference slots busy, rejecting request");
-            return create_error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "SERVER_BUSY",
-                "Too many concurrent requests, retry later",
-                None,
-            );
+            return busy_response();
         }
     };
 
@@ -492,11 +495,29 @@ async fn predict(State(state): State<AppState>, request: Request) -> Response {
     }
 }
 
+fn busy_response() -> Response {
+    create_error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "SERVER_BUSY",
+        "Too many concurrent requests, retry later",
+        None,
+    )
+}
+
+#[cfg(not(feature = "image"))]
+const SUPPORTED_REQUEST_TYPES: &str = "application/json` or `application/octet-stream";
+#[cfg(feature = "image")]
+const SUPPORTED_REQUEST_TYPES: &str =
+    "application/json`, `application/octet-stream`, `image/jpeg` or `image/png";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestFormat {
     Json,
     /// Raw little-endian `f32`, see [`decode_binary`]
     Binary,
+    /// One encoded image, see [`decode_image`]
+    #[cfg(feature = "image")]
+    Image(ImageKind),
 }
 
 impl RequestFormat {
@@ -506,12 +527,16 @@ impl RequestFormat {
         if essence.eq_ignore_ascii_case("application/json")
             || essence.to_ascii_lowercase().ends_with("+json")
         {
-            Some(Self::Json)
-        } else if essence.eq_ignore_ascii_case(OCTET_STREAM) {
-            Some(Self::Binary)
-        } else {
-            None
+            return Some(Self::Json);
         }
+        if essence.eq_ignore_ascii_case(OCTET_STREAM) {
+            return Some(Self::Binary);
+        }
+        #[cfg(feature = "image")]
+        if let Some(kind) = ImageKind::from_media_type(essence) {
+            return Some(Self::Image(kind));
+        }
+        None
     }
 }
 
@@ -632,6 +657,75 @@ fn decode_binary(
         batch_size,
         single: batch_header.is_none(),
     })
+}
+
+/// `(H, W)` of a model that takes `[3, H, W]` input, or a 415 for any other model
+#[cfg(feature = "image")]
+fn image_size(model: &Model) -> std::result::Result<(u32, u32), Box<Response>> {
+    let shape = &model.get_info().input_spec.shape;
+    image_input_size(shape).ok_or_else(|| {
+        Box::new(create_error_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "INVALID_REQUEST",
+            &format!(
+                "Image input needs a model with input shape [3, H, W]; this model takes \
+                 {shape:?}. Send JSON or `{OCTET_STREAM}` instead"
+            ),
+            Some(serde_json::json!({ "expected_shape": shape })),
+        ))
+    })
+}
+
+/// Decode one JPEG or PNG and apply ImageNet preprocessing (see [`crate::preprocess`]).
+///
+/// The response uses `output`, as for `{"input": ...}`.
+#[cfg(feature = "image")]
+async fn decode_image(
+    state: &ServerState,
+    kind: ImageKind,
+    body: Bytes,
+) -> std::result::Result<PredictInput, Box<Response>> {
+    let (height, width) = image_size(&state.model)?;
+    if body.is_empty() {
+        return Err(empty_input_response());
+    }
+
+    // Decoding can allocate far more than the body size, so it shares the inference
+    // slots: at most `max_concurrent_requests` decodes or inferences run at once
+    let Ok(permit) = state.inference_slots.clone().try_acquire_owned() else {
+        warn!("All inference slots busy, rejecting image request");
+        return Err(Box::new(busy_response()));
+    };
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        preprocess_image(&body, kind, height, width)
+    });
+
+    match task.await {
+        Ok(Ok(data)) => Ok(PredictInput {
+            data,
+            batch_size: 1,
+            single: true,
+        }),
+        Ok(Err(e)) => {
+            warn!("Rejected image body: {}", e);
+            Err(Box::new(create_error_response(
+                StatusCode::BAD_REQUEST,
+                "INVALID_IMAGE",
+                &format!("Failed to decode the image: {e}"),
+                None,
+            )))
+        }
+        Err(e) => {
+            error!("Image decoding task failed: {}", e);
+            Err(Box::new(create_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Image decoding task panicked",
+                None,
+            )))
+        }
+    }
 }
 
 /// Raw little-endian `f32` outputs, `batch_size × output_size` values
@@ -1228,5 +1322,107 @@ mod tests {
         let (status, code) = error_code(app, binary_request(&[0.5; 784], None)).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(code, "INVALID_REQUEST");
+    }
+
+    fn image_request(content_type: &str, body: Vec<u8>) -> Request<Body> {
+        Request::builder()
+            .uri("/predict")
+            .method("POST")
+            .header("content-type", content_type)
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    #[cfg(not(feature = "image"))]
+    #[tokio::test]
+    async fn test_predict_image_needs_feature() {
+        let request = image_request("image/png", vec![0x89, b'P', b'N', b'G']);
+        let (status, code) = error_code(test_app(), request).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(code, "INVALID_REQUEST");
+    }
+
+    #[cfg(feature = "image")]
+    mod image_input {
+        use super::*;
+        use image::{ImageEncoder, RgbImage, codecs::png::PngEncoder};
+
+        fn image_model_app(config: &ServerConfig) -> Router {
+            let dummy = DummyModel::new("rgb".to_string(), vec![3, 16, 16], vec![10]);
+            router(Model::new(Box::new(dummy), "dummy", 0), config)
+        }
+
+        fn png(width: u32, height: u32) -> Vec<u8> {
+            let image = RgbImage::from_fn(width, height, |x, y| {
+                image::Rgb([(x * 7) as u8, (y * 5) as u8, 128])
+            });
+            let mut bytes = Vec::new();
+            PngEncoder::new(&mut bytes)
+                .write_image(
+                    image.as_raw(),
+                    width,
+                    height,
+                    image::ExtendedColorType::Rgb8,
+                )
+                .unwrap();
+            bytes
+        }
+
+        #[tokio::test]
+        async fn test_predict_png() {
+            let app = image_model_app(&ServerConfig::default());
+            let request = image_request("image/png", png(40, 30));
+            let (status, body) = send(app, request).await;
+            assert_eq!(status, StatusCode::OK);
+            let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(response["batch_size"], 1);
+            assert_eq!(response["output"].as_array().unwrap().len(), 10);
+        }
+
+        #[tokio::test]
+        async fn test_predict_image_wrong_model_shape() {
+            // The default test model takes [784]
+            let (status, body) = send(test_app(), image_request("image/png", png(8, 8))).await;
+            assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+            let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
+            assert_eq!(error.code, "INVALID_REQUEST");
+            assert_eq!(
+                error.details.unwrap()["expected_shape"],
+                serde_json::json!([784])
+            );
+        }
+
+        #[tokio::test]
+        async fn test_predict_invalid_image() {
+            let app = image_model_app(&ServerConfig::default());
+            for (content_type, body) in [
+                ("image/jpeg", b"not a jpeg".to_vec()),
+                // PNG bytes labelled as JPEG
+                ("image/jpeg", png(8, 8)),
+            ] {
+                let request = image_request(content_type, body);
+                let (status, code) = error_code(app.clone(), request).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(code, "INVALID_IMAGE");
+            }
+
+            let (status, code) = error_code(app, image_request("image/png", Vec::new())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(code, "INVALID_INPUT");
+        }
+
+        #[tokio::test]
+        async fn test_predict_image_body_limit_enforced() {
+            let config = ServerConfig {
+                max_body_bytes: 1024,
+                ..ServerConfig::default()
+            };
+            let app = image_model_app(&config);
+            let body = png(256, 256);
+            assert!(body.len() > 1024);
+            let (status, code) = error_code(app, image_request("image/png", body)).await;
+            assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(code, "INVALID_REQUEST");
+        }
     }
 }

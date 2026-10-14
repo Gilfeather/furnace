@@ -61,10 +61,13 @@ jobs:
 
     - name: Run clippy
       if: matrix.rust == 'stable'
-      run: cargo clippy --all-targets -- -D warnings
+      run: |
+        cargo clippy --all-targets -- -D warnings
+        cargo clippy --all-targets --features image -- -D warnings
 
+    # With the optional image input; the default build's only extra test is its 415
     - name: Run tests
-      run: cargo test --release --all-targets
+      run: cargo test --release --all-targets --features image
 
   gpu-features:
     name: Check GPU backend features
