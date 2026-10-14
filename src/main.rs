@@ -13,6 +13,7 @@ use furnace::{BackendKind, api, error, model, models::BuiltInModel};
 struct CliArgs {
     model_name: Option<String>,
     model_path: Option<PathBuf>,
+    weights: Option<PathBuf>,
     host: String,
     port: u16,
     backend: BackendKind,
@@ -32,6 +33,7 @@ fn build_cli() -> Command {
             with zero Python dependencies. Built with Rust and the Burn framework.\n\n\
             EXAMPLES:\n  \
             furnace --model-name resnet18 --port 3000\n  \
+            furnace --model-name resnet18 --weights ./resnet18-finetuned.bpk\n  \
             furnace --model-name resnet18 --backend wgpu --host 0.0.0.0\n  \
             furnace --model-path ./sample_model --max-concurrent-requests 8",
         )
@@ -48,6 +50,18 @@ fn build_cli() -> Command {
                 .value_name("PATH")
                 .help("File-based Burn model: <PATH>.bpk weights + <PATH>.json metadata")
                 .value_parser(clap::value_parser!(PathBuf)),
+        )
+        .arg(
+            Arg::new("weights")
+                .long("weights")
+                .short('w')
+                .value_name("PATH")
+                .help(
+                    "Weight file (.bpk) for the built-in model \
+                     [default: <exe dir>/<name>.bpk, then models/<name>.bpk]",
+                )
+                .value_parser(clap::value_parser!(PathBuf))
+                .conflicts_with("model-path"),
         )
         .group(
             ArgGroup::new("model")
@@ -197,6 +211,7 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
         CliArgs {
             model_name,
             model_path,
+            weights: matches.get_one::<PathBuf>("weights").cloned(),
             host,
             port,
             backend,
@@ -310,6 +325,7 @@ async fn main() -> Result<()> {
         session_id = %session_id,
         model_name = ?args.model_name,
         model_path = ?args.model_path,
+        weights = ?args.weights,
         backend = %args.backend,
         "📦 Loading model"
     );
@@ -318,9 +334,12 @@ async fn main() -> Result<()> {
     let backend = args.backend;
     let model_name = args.model_name.clone();
     let model_path = args.model_path.clone();
+    let weights = args.weights.clone();
     let loaded = tokio::task::spawn_blocking(move || match (model_path, model_name) {
         (Some(path), _) => model::load_model_with_backend(&path, backend),
-        (None, Some(name)) => model::load_built_in_model_with_backend(&name, backend),
+        (None, Some(name)) => {
+            model::load_built_in_model_with_backend(&name, backend, weights.as_deref())
+        }
         (None, None) => unreachable!("parse_args defaults the model name"),
     })
     .await

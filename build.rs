@@ -38,6 +38,9 @@ fn generate_onnx_models() {
         }
     };
 
+    // Keep weights out of the binary unless explicitly requested
+    let embed = std::env::var_os("CARGO_FEATURE_EMBED_WEIGHTS").is_some();
+
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
     let models_out_dir = format!("{out_dir}/models");
     fs::create_dir_all(&models_out_dir).expect("Failed to create models output directory");
@@ -57,8 +60,11 @@ fn generate_onnx_models() {
             ModelGen::new()
                 .input(&input)
                 .out_dir(&out)
-                // Embed weights so the release binary is self-contained
-                .load_strategy(LoadStrategy::Embedded)
+                .load_strategy(if embed {
+                    LoadStrategy::Embedded
+                } else {
+                    LoadStrategy::File
+                })
                 .run_from_script();
         });
 

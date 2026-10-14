@@ -39,11 +39,14 @@ jobs:
         body: |
           ## 🔥 Furnace ${{ steps.get_version.outputs.version }}
 
-          Rust ML inference server powered by the Burn framework. Release binaries include the
-          built-in ResNet-18 model (weights embedded, no files needed at runtime).
+          Lightweight Rust ML inference server powered by the Burn framework.
+          Download the binary for your platform plus `resnet18.bpk` (weights), and place them
+          side by side:
 
           ```bash
           ./furnace --model-name resnet18 --port 3000
+          # or point at the weights explicitly
+          ./furnace --model-name resnet18 --weights /path/to/resnet18.bpk
           ```
 
           See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for detailed changes.
@@ -112,6 +115,13 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         files: release-assets/${{ matrix.asset_name }}
+
+    # Weights are platform-independent; publish them once
+    - name: Upload ResNet-18 weights
+      if: matrix.target == 'x86_64-unknown-linux-gnu'
+      uses: softprops/action-gh-release@v1
+      with:
+        files: target/${{ matrix.target }}/release/build/furnace-*/out/models/resnet18.bpk
 
   publish-crate:
     name: Publish to crates.io

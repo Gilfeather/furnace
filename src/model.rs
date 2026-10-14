@@ -9,7 +9,7 @@ use tracing::{debug, info};
 use crate::backend::BackendKind;
 use crate::burn_model::{BurnModelContainer, create_sample_model};
 use crate::error::{ModelError, Result};
-use crate::models::BuiltInModel;
+use crate::models::{BuiltInModel, resolve_weights};
 use crate::types::TensorSpec;
 
 /// Hard upper bound on the number of items in one inference batch
@@ -396,20 +396,38 @@ pub fn load_model_with_backend(path: &Path, backend: BackendKind) -> Result<Mode
     ))
 }
 
-/// Load a built-in (compiled-in) model by name
+/// Load a built-in (compiled-in) model by name on the CPU backend, with default weight lookup
 pub fn load_built_in_model(model_name: &str) -> Result<Model> {
-    load_built_in_model_with_backend(model_name, BackendKind::Cpu)
+    load_built_in_model_with_backend(model_name, BackendKind::Cpu, None)
 }
 
-/// Load a built-in (compiled-in) model by name on the given backend
-pub fn load_built_in_model_with_backend(model_name: &str, backend: BackendKind) -> Result<Model> {
-    info!(
-        "Loading built-in model: {} ({} backend)",
-        model_name, backend
-    );
+/// Load a built-in model by name on the given backend.
+///
+/// `weights` overrides where the `.bpk` weight file is read from; see
+/// [`crate::models::resolve_weights`] for the default lookup.
+pub fn load_built_in_model_with_backend(
+    model_name: &str,
+    backend: BackendKind,
+    weights: Option<&Path>,
+) -> Result<Model> {
     let built_in = BuiltInModel::from_name(model_name)?;
-    let inner = built_in.create_model(backend)?;
-    Ok(Model::new(inner, "onnx", 0))
+    let weights = resolve_weights(built_in.name(), weights)?;
+    match &weights {
+        Some(path) => info!(
+            "Loading built-in model {} ({} backend) with weights from {:?}",
+            model_name, backend, path
+        ),
+        None => info!(
+            "Loading built-in model {} ({} backend) with embedded weights",
+            model_name, backend
+        ),
+    }
+    let model_size_bytes = weights
+        .as_deref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map_or(0, |m| m.len());
+    let inner = built_in.create_model(backend, weights.as_deref())?;
+    Ok(Model::new(inner, "onnx", model_size_bytes))
 }
 
 #[cfg(test)]
@@ -507,6 +525,42 @@ mod tests {
         let out = model.predict(vec![0.3; 784]).unwrap();
         assert_eq!(out.len(), 10);
         assert!(out.iter().any(|&v| v != out[0]));
+    }
+
+    #[test]
+    fn test_built_in_model_missing_weights_file() {
+        let result = load_built_in_model_with_backend(
+            "resnet18",
+            BackendKind::Cpu,
+            Some(Path::new("does/not/exist.bpk")),
+        );
+        assert!(matches!(
+            result,
+            Err(crate::error::FurnaceError::Model(ModelError::FileNotFound(
+                _
+            )))
+        ));
+    }
+
+    #[cfg(model_resnet18)]
+    #[test]
+    fn test_resnet18_weights_from_explicit_path() {
+        // Copy the generated weights elsewhere to prove the path override is honored
+        let dir = tempfile::tempdir().unwrap();
+        let src = Path::new(env!("OUT_DIR")).join("models/resnet18.bpk");
+        if !src.exists() {
+            return; // built with embed-weights: no separate file
+        }
+        let dst = dir.path().join("custom.bpk");
+        std::fs::copy(&src, &dst).unwrap();
+
+        let model =
+            load_built_in_model_with_backend("resnet18", BackendKind::Cpu, Some(&dst)).unwrap();
+        assert_eq!(
+            model.get_info().model_size_bytes,
+            std::fs::metadata(&dst).unwrap().len()
+        );
+        assert_eq!(model.predict(vec![0.5; 3 * 224 * 224]).unwrap().len(), 1000);
     }
 
     #[cfg(model_resnet18)]
