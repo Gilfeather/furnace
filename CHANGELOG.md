@@ -19,8 +19,10 @@ earlier releases were measured against a dummy fallback model and should be disr
 - **BREAKING**: Rust edition 2024, MSRV raised to 1.95
 - `--backend` now selects the device at runtime (`cpu`, plus `wgpu`/`metal`/`cuda` when built
   with the matching feature); only backends compiled into the binary are accepted
-- Built-in model weights are embedded in the binary, so release binaries are self-contained
-  (binary is ~50 MB with ResNet-18)
+- Built-in model weights are loaded at startup from a separate `<name>.bpk` file
+  (`--weights`, or found next to the executable / in `models/`). The server binary stays
+  ~5 MB. Previously the binary read weights from an absolute path in the build directory, so
+  it only worked on the machine that built it
 - ResNet-18 `input_spec.shape` is now `[3, 224, 224]` (per item, without the batch dimension)
 - `POST /predict` with `inputs` always returns `outputs` (even for a batch of one)
 - Inference runs on a blocking thread pool instead of async runtime workers
@@ -28,6 +30,9 @@ earlier releases were measured against a dummy fallback model and should be disr
 - Stats (`/model/info`) are now updated accurately in release builds
 
 ### Added
+- `--weights <PATH>` to load built-in model weights from any `.bpk` file (e.g. fine-tuned)
+- `embed-weights` Cargo feature for single-file binaries with compiled-in weights
+- Release assets include `resnet18.bpk`
 - `--model-path` for file-based Burnpack models
 - `--max-body-mb` (default 100) and `--request-timeout-ms` (returns 504 on timeout)
 - Backpressure: requests beyond `--max-concurrent-requests` get `503 SERVER_BUSY` immediately

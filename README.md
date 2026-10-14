@@ -8,13 +8,15 @@
 **A Rust HTTP inference server for ONNX and Burn models, with zero Python dependencies.**
 
 Furnace compiles ONNX models into native Rust code at build time with
-[`burn-onnx`](https://github.com/tracel-ai/burn-onnx), embeds the weights, and serves them over
-a small JSON API. One self-contained binary, runtime-selectable CPU/GPU backend.
+[`burn-onnx`](https://github.com/tracel-ai/burn-onnx) and serves them over a small JSON API.
+The model is yours to choose; the server stays a ~5 MB binary with a runtime-selectable
+CPU/GPU backend.
 
 ## ✨ Features
 
 - 🦀 **Pure Rust**: ONNX graphs become Rust code at build time; no ONNX runtime, no Python
-- 📦 **Single binary**: model weights are embedded; nothing to ship alongside the executable
+- 🪶 **Lightweight**: ~5 MB server binary; model weights live in a separate `.bpk` file
+  (swap in fine-tuned weights without rebuilding, or embed them with `--features embed-weights`)
 - 🔀 **Runtime backend selection**: `--backend cpu|wgpu|metal|cuda` (Burn 0.22 `Device` API)
 - 🖼️ **Built-in ResNet-18**: ImageNet classifier, ~75–90 ms per image on a laptop CPU
 - 🚦 **Backpressure**: bounded concurrency with immediate `503` instead of unbounded queues
@@ -44,8 +46,9 @@ curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification
 cargo build --release
 ```
 
-`build.rs` converts every `models/*.onnx` into Rust code and embeds its weights. The binary
-is `target/release/furnace` (~50 MB, most of it ResNet-18 weights).
+`build.rs` converts every `models/*.onnx` into Rust code plus a Burnpack weight file. The
+server binary is `target/release/furnace` (~5 MB). When run from the build machine it finds
+the generated `resnet18.bpk` automatically.
 
 ### 3. Run
 
@@ -84,6 +87,7 @@ curl -X POST http://localhost:3000/predict \
 | Option | Default | Description |
 |---|---|---|
 | `-m, --model-name <NAME>` | `resnet18` | Built-in model compiled into the binary |
+| `-w, --weights <PATH>` | see below | Weight file (`.bpk`) for the built-in model |
 | `--model-path <PATH>` | | File-based Burn model: `<PATH>.bpk` + `<PATH>.json` (conflicts with `--model-name`) |
 | `-b, --backend <BACKEND>` | `cpu` | Compute backend; only backends compiled into the binary are accepted |
 | `--host <HOST>` | `127.0.0.1` | Bind address (`0.0.0.0` for all interfaces) |
@@ -93,7 +97,24 @@ curl -X POST http://localhost:3000/predict \
 | `--request-timeout-ms <MS>` | none | Inference timeout; exceeded requests get `504 INFERENCE_TIMEOUT` |
 | `-l, --log-level <LEVEL>` | `info` | `error`, `warn`, `info`, `debug`, `trace` |
 
+Without `--weights`, Furnace looks for `<name>.bpk` next to the executable, then in
+`models/`, then in the build output directory. A release install is therefore just two
+files side by side: `furnace` and `resnet18.bpk`.
+
 Set `FURNACE_ENV=production` for JSON-structured logs. `RUST_LOG` overrides the log filter.
+
+## 📦 Deploying
+
+```bash
+cargo build --release
+mkdir -p dist
+cp target/release/furnace dist/
+cp target/release/build/furnace-*/out/models/resnet18.bpk dist/
+./dist/furnace --model-name resnet18
+```
+
+If you'd rather ship a single file, build with `--features embed-weights`. The weights are
+then compiled into the binary, so it grows by the size of the model.
 
 ## 🔀 Backends
 
@@ -206,7 +227,8 @@ To serve another ONNX model:
    }
    ```
 
-   The generated `Model` exposes `from_embedded(&Device)` and `forward(...)`.
+   The generated `Model` exposes `new(&Device)` (load weights with `load_burnpack`) and
+   `forward(...)`.
 4. Add a variant to `BuiltInModel` and handle it in `from_name`, `available_models` and
    `create_model`.
 
@@ -247,8 +269,9 @@ latency-sensitive use, send batches.
 
 Other numbers:
 
-- **Startup**: ~0.4 s to healthy, including decoding the embedded weights
-- **Binary size**: ~50 MB (ResNet-18 weights embedded)
+- **Startup**: ~0.45 s to healthy, including loading the 46 MB weight file
+- **Binary size**: ~5 MB (+ 46 MB `resnet18.bpk`)
+- **Memory**: ~53 MB working set after inference, mostly the ResNet-18 weights
 
 Reproduce:
 
@@ -279,7 +302,7 @@ src/
 ├── backend.rs       # Runtime backend -> Burn Device
 ├── burn_model.rs    # File-based MLP (Burnpack)
 └── models/mod.rs    # Built-in models generated from ONNX
-build.rs             # models/*.onnx -> Rust code + embedded weights
+build.rs             # models/*.onnx -> Rust code + .bpk weights
 ```
 
 ## 🔧 Troubleshooting

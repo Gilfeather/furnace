@@ -32,6 +32,9 @@ path = "src/main.rs"
 default = ["onnx"]
 # Generate built-in models from ONNX files in models/ at build time
 onnx = ["dep:burn-onnx"]
+# Compile built-in model weights into the binary (single-file deploys).
+# Default: weights stay in a separate <name>.bpk file loaded at startup.
+embed-weights = ["onnx"]
 wgpu = ["burn/wgpu"]
 metal = ["burn/metal"]
 cuda = ["burn/cuda"]
