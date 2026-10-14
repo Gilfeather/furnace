@@ -897,6 +897,7 @@ version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5b982416cb773274e44666f8682cd7e5fde3c294cd4206ffc080e73c545ef2e"
 dependencies = [
+ "aligned-vec",
  "burn-backend",
  "burn-ir",
  "burn-std",
@@ -904,9 +905,11 @@ dependencies = [
  "gemm",
  "half",
  "libm",
+ "macerator",
  "num-traits",
  "once_cell",
  "portable-atomic",
+ "rayon",
 ]
 
 [[package]]
@@ -961,7 +964,9 @@ dependencies = [
  "burn-backend",
  "burn-ir",
  "burn-std",
+ "bytemuck",
  "const-random",
+ "itertools 0.15.0",
  "libm",
  "macerator",
  "matrixmultiply",
@@ -969,6 +974,8 @@ dependencies = [
  "num-traits",
  "paste",
  "rand 0.10.3",
+ "rayon",
+ "seq-macro",
 ]
 
 [[package]]
@@ -3069,6 +3076,7 @@ dependencies = [
  "paste",
  "pulp",
  "raw-cpuid",
+ "rayon",
  "seq-macro",
  "sysctl",
 ]
@@ -3087,6 +3095,7 @@ dependencies = [
  "num-traits",
  "paste",
  "raw-cpuid",
+ "rayon",
  "seq-macro",
 ]
 
@@ -4231,7 +4240,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f607c237553f086e7043417a51df26b2eb899d3caff94e6a67592ff992fedc7"
 dependencies = [
  "autocfg",
+ "num_cpus",
+ "once_cell",
  "rawpointer",
+ "thread-tree",
 ]
 
 [[package]]
@@ -4442,6 +4454,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "rawpointer",
+ "rayon",
 ]
 
 [[package]]
@@ -6591,6 +6604,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "thread-tree"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffbd370cb847953a25954d9f63e14824a36113f8c72eecf6eccef5dc4b45d630"
+dependencies = [
+ "crossbeam-channel",
 ]
 
 [[package]]

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `benches/compare`: ResNet-18 comparison against tract and ONNX Runtime (latency, memory,
+  startup, binary size, top-1 check on a real image). Its own Cargo workspace, so `ort` and
+  `tract` never become furnace dependencies
+
+### Changed
+- The CPU backend is multithreaded and uses SIMD: `burn` is now built with its `rayon` and
+  `simd` features, which `default-features = false` had turned off. ResNet-18 goes from
+  ~79 ms to ~50 ms per image (batch 4: ~267 ms to ~94 ms). Peak private memory rises from
+  ~33 MB to ~68 MB (per-thread buffers), and the binary grows by ~0.7 MB
+
 ## [0.4.0] - 2026-10-14
 
 Migration to Burn 0.22 and a correctness pass over the server. Performance figures in
