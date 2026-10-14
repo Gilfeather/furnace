@@ -16,30 +16,24 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
-
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-
-    - name: Cache cargo registry
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-        key: ${{ runner.os }}-cargo-audit-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Install cargo-audit
-      run: cargo install cargo-audit
+      uses: taiki-e/install-action@cargo-audit
 
     - name: Run cargo audit
-      run: cargo audit --ignore RUSTSEC-2020-0071 --ignore RUSTSEC-2023-0044
+      run: cargo audit
+
+  cargo_deny:
+    name: cargo-deny (licenses, bans, sources)
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run cargo-deny
+      uses: EmbarkStudios/cargo-deny-action@v2
+      with:
+        command: check licenses bans sources
 
   dependency_review:
     name: Dependency Review
@@ -67,33 +61,14 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
-
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v3
       with:
         languages: 'rust'
+        build-mode: none
         queries: security-and-quality
-
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-
-    - name: Download ONNX models
-      run: |
-        mkdir -p models
-        # Download ResNet-18 model if it doesn't exist
-        if [ ! -f models/resnet18.onnx ]; then
-          curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
-        fi
-
-    - name: Build project
-      run: cargo build --all-features
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
       with:
         category: "/language:rust"
-      continue-on-error: true

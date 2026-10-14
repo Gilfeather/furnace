@@ -38,31 +38,14 @@ jobs:
         generate_release_notes: true
         body: |
           ## 🔥 Furnace ${{ steps.get_version.outputs.version }}
-          
-          **Blazingly fast ML inference server powered by Rust and Burn framework**
-          
-          ## 📊 Performance
-          - **Binary Size**: 2.3MB
-          - **Inference Time**: ~0.5ms
-          - **Memory Usage**: <50MB
-          - **Startup Time**: <100ms
-          
-          ## 🚀 Quick Start
-          
-          ### Download Binary
-          Download the appropriate binary for your platform from the assets below.
-          
-          ### Using Cargo
+
+          Rust ML inference server powered by the Burn framework. Release binaries include the
+          built-in ResNet-18 model (weights embedded, no files needed at runtime).
+
           ```bash
-          cargo install furnace
+          ./furnace --model-name resnet18 --port 3000
           ```
-          
-          ### Docker
-          ```bash
-          docker pull ghcr.io/${{ github.repository }}:${{ steps.get_version.outputs.version }}
-          ```
-          
-          ## 📋 Full Changelog
+
           See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for detailed changes.
 
   build-release:
@@ -77,7 +60,7 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             asset_name: furnace-linux-x86_64-musl
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             asset_name: furnace-linux-aarch64
           - os: windows-latest
@@ -99,35 +82,28 @@ jobs:
       with:
         targets: ${{ matrix.target }}
 
-    - name: Install cross-compilation tools
-      if: matrix.target == 'aarch64-unknown-linux-gnu'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y gcc-aarch64-linux-gnu
-
     - name: Install musl tools
       if: matrix.target == 'x86_64-unknown-linux-musl'
       run: |
         sudo apt-get update
         sudo apt-get install -y musl-tools
 
-    - name: Cache cargo registry
-      uses: actions/cache@v4
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
       with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ matrix.target }}
+
+    - name: Download ResNet-18 ONNX model
+      shell: bash
+      run: |
+        mkdir -p models
+        curl -fsSL "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
 
     - name: Build release binary
-      run: cargo build --release --target ${{ matrix.target }} --all-features
-
-    - name: Strip binary (Unix)
-      if: matrix.os != 'windows-latest'
-      run: strip target/${{ matrix.target }}/release/furnace
+      run: cargo build --release --target ${{ matrix.target }}
 
     - name: Rename binary
+      shell: bash
       run: |
         mkdir -p release-assets
         cp target/${{ matrix.target }}/release/furnace${{ matrix.os == 'windows-latest' && '.exe' || '' }} release-assets/${{ matrix.asset_name }}
@@ -148,53 +124,5 @@ jobs:
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
 
-    - name: Cache cargo registry
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-        key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
-
     - name: Publish to crates.io
       run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-  docker-release:
-    name: Build and Push Docker Image
-    needs: create-release
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Login to GitHub Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.repository_owner }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ghcr.io/${{ github.repository }}
-        tags: |
-          type=ref,event=tag
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=semver,pattern={{major}}
-
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max

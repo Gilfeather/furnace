@@ -1,57 +1,28 @@
 # Basic MNIST Example
 
-## 🎯 Purpose
-
-**This example is for testing and learning purposes only.**
-
-If you already have a .mpk model file, you don't need this example - just run:
-```bash
-./furnace --model-path /path/to/your/model.mpk
-```
-
-## 🧪 When to Use This Example
-
-- ✅ **Testing Furnace functionality**
-- ✅ **Learning how Burn models work**
-- ✅ **Development and debugging**
-- ❌ **Production use** (use your trained models instead)
-
-## 🚀 Quick Start
+Creates a small, randomly initialized MLP for trying out Furnace's file-based model loading.
 
 ```bash
-# 1. Create the sample model (only needed once)
+# 1. Create the model
 cargo run --example basic_mnist_create
 
-# 2. Run inference server
-cargo run --bin furnace -- --model-path examples/basic_mnist/model.mpk --log-level debug
+# 2. Serve it
+cargo run --release --bin furnace -- --model-path examples/basic_mnist/model
 
-# 3. Test inference (in another terminal)
+# 3. Send requests
 cargo run --example basic_mnist_test
 ```
 
-## 📊 What This Example Creates
+## Model
 
-- **Model**: Simple 3-layer MLP (784 → 128 → 10)
-- **Input**: 28x28 flattened images (784 features)
-- **Output**: 10-class probabilities
-- **Format**: Burn's MessagePack (.mpk) format
-- **Size**: ~200KB (very small for testing)
+- **Architecture**: 784 → 128 (ReLU) → 10
+- **Input**: 784 floats (a flattened 28×28 image)
+- **Output**: 10 logits
+- **Weights**: random, so predictions are meaningless; the point is exercising the pipeline
 
-## 📁 Generated Files
+## Files
 
-After running `basic_mnist_create`, you'll get:
-- `examples/basic_mnist/model.mpk` - The actual model weights
-- `examples/basic_mnist/model.json` - Model metadata
+- `model.bpk`: weights in Burn's Burnpack format (written with `burn-store`)
+- `model.json`: metadata (name, layer sizes, creation time)
 
-**Note**: These files are generated at runtime and not tracked in git.
-
-## 🔄 Real-World Usage
-
-For production use, replace the example model with your trained model:
-```bash
-# Instead of the example model
-./furnace --model-path examples/basic_mnist/model.mpk
-
-# Use your trained model
-./furnace --model-path /path/to/your/trained_model.mpk
-```
+Both are generated and gitignored.
