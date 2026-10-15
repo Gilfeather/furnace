@@ -372,6 +372,8 @@ The same `models/resnet18.onnx` (resnet18-v1-7 from the ONNX Model Zoo) on furna
 Rust (resize to 256, center crop 224, ImageNet normalization). Every engine returns top-1 class
 258 (Samoyed) with the same logit, 12.42.
 
+The furnace server and wgpu rows were measured with the 0.4.0 release.
+
 Setup: AMD Ryzen 9 7940HS (8 cores / 16 threads, Radeon 780M iGPU), 30 GB RAM, Windows 11 Pro
 (build 26200), Rust 1.99.0, release builds with fat LTO. Versions: furnace 0.4.0 on Burn 0.22
 (burn-flex CPU backend), tract-onnx 0.23.8, `ort` 2.0.0-rc.14 with ONNX Runtime 1.31 (the
@@ -380,9 +382,9 @@ then 50 timed runs per batch size, one request at a time. Batch 4 is the same im
 
 | Engine | Threads | Batch 1 median / p95 | Batch 4 median / p95 | img/s (batch 1 / 4) |
 |---|---|---|---|---|
-| **furnace**, CPU | all (rayon) | 49.9 / 56.4 ms | 93.5 / 97.2 ms | 20.0 / 42.8 |
+| **furnace**, CPU | all (rayon) | 26.3 / 30.6 ms | 87.1 / 101.6 ms | 38.0 / 45.9 |
+| furnace 0.4.0 release, CPU | all (rayon) | 49.9 / 56.4 ms | 93.5 / 97.2 ms | 20.0 / 42.8 |
 | **furnace** server, HTTP binary I/O | all (rayon) | 49.4 / 58.3 ms | 95.4 / 107.1 ms | 20.2 / 41.9 |
-| furnace 0.4.0 before this change, CPU | 1 | 79.2 / 93.9 ms | 266.7 / 284.6 ms | 12.6 / 15.0 |
 | **furnace**, wgpu (Radeon 780M iGPU) | GPU | 41.4 / 46.5 ms | 137.9 / 149.2 ms | 24.2 / 29.0 |
 | tract | 1 | 47.9 / 52.5 ms | 341.3 / 376.8 ms | 20.9 / 11.7 |
 | tract | 16 | 21.9 / 25.4 ms | 214.4 / 233.9 ms | 45.6 / 18.7 |
@@ -391,7 +393,7 @@ then 50 timed runs per batch size, one request at a time. Batch 4 is the same im
 
 | Engine | Load | First inference | Peak working set | Peak private | Binary | Pure Rust |
 |---|---|---|---|---|---|---|
-| **furnace**, CPU | **1 ms** | 64 ms | **102 MB** | **68 MB** | **3.6 MB** + 46 MB `.bpk` | yes |
+| **furnace**, CPU | **1 ms** | 35 ms | **82 MB** | **49 MB** | **3.7 MB** + 46 MB `.bpk` | yes |
 | **furnace** server | 36 ms to healthy | 65 ms | 105 MB | 72 MB | 5.4 MB + 46 MB `.bpk` | yes |
 | **furnace**, wgpu | 505 ms | 234 ms | 384 MB | 373 MB | 41.1 MB + 46 MB `.bpk` | yes |
 | tract | 185 ms | 52 ms | 164 MB | 191 MB | 18.7 MB + 47 MB `.onnx` | yes |
@@ -405,45 +407,45 @@ minimal benchmark executable that links only that engine, built with the same pr
 Runtime is linked statically, but on Windows `ort` ships the DirectML build, which loads an
 18.5 MB `DirectML.dll` even on the CPU path. That DLL is included in the 41.7 MB.
 
-**ONNX Runtime is 6.8× faster than furnace at batch 1 and 3.6× faster at batch 4.** On a single
-thread it still beats furnace on all 16 threads at batch 1, though not at batch 4. tract on one
-thread is about as fast as furnace at batch 1 and faster with 16 threads, but at batch 4 furnace
-is 2.3× faster than the best tract result.
+**ONNX Runtime is 3.5× faster than furnace at batch 1 and 3.0× faster at batch 4** (down from
+6.8× and 3.6× in the 0.4.0 release). tract with 16 threads is about as fast as furnace at batch 1,
+and furnace is 2.5× faster than the best tract result at batch 4.
 furnace wins on footprint: it loads in about a millisecond, has the smallest binary, and uses
 the least memory. Over HTTP with binary bodies it adds only 1 to 3 ms to in-process inference.
 
-Why furnace is slower:
+What changed since 0.4.0 (all build-time or CPU-backend changes; the API is the same):
 
-- **Kernels.** burn-flex lowers every convolution to im2col plus a general matrix multiply
-  (the [`gemm`](https://crates.io/crates/gemm) crate), converting each layer's input from NCHW
-  to NHWC first. ONNX Runtime's MLAS has hand-written AVX2/AVX-512 convolution kernels on a
-  blocked NCHWc layout, so it skips both the im2col copy and the per-layer layout change.
-- **No graph optimization.** burn-onnx emits the ONNX graph op by op: each Conv, BatchNorm,
-  ReLU and Add is a separate pass over memory with its own output tensor. ONNX Runtime folds
-  BatchNorm into the convolution weights at load time and fuses Conv+ReLU (and Conv+Add+ReLU),
-  so ResNet-18 runs 20 fused convolutions instead of about 65 separate ops.
-- **Parallelism at batch 1.** burn-flex parallelizes over images and output tiles. With one
-  image the small late layers (7×7 and 14×14 maps) don't split well across 16 threads, which
-  is why going from batch 1 to batch 4 only doubles furnace's time.
-- **Up to this change, one thread and no SIMD.** furnace depended on `burn` with
-  `default-features = false`, which also turned off burn-flex's `rayon` and `simd` features.
-  Turning them back on made furnace 1.6× faster at batch 1 and 2.9× faster at batch 4
-  (the "0.4.0 before this change" row). The binary grows by 0.7 MB. Peak private memory goes
-  from 33 MB to 68 MB because each thread has its own im2col buffers.
+- **No per-call re-layout in convolutions.** burn-flex's generic convolution transposed every
+  weight and copied every input from NCHW to NHWC on each call: about 40% of ResNet-18's
+  convolution time, and more than the matrix multiply itself in the 512-channel layers. furnace
+  now ships a patched burn-flex (`vendor/burn-flex`, proposed upstream) that builds im2col
+  straight from NCHW in the weight's own order, so neither tensor is copied. This alone took
+  batch 1 from ~57 ms to ~27 ms.
+- **BatchNorm folded into Conv at build time.** `build/optimize.rs` rewrites each inference-mode
+  `Conv -> BatchNormalization` pair into one Conv before code generation, removing ResNet-18's
+  20 BatchNorm passes. Outputs are unchanged (same top-1 logit, 12.42); set
+  `FURNACE_NO_GRAPH_OPT=1` to build from the original graph.
+
+Why furnace is still slower:
+
+- **Kernels.** furnace still lowers convolutions to im2col plus a general matrix multiply (the
+  [`gemm`](https://crates.io/crates/gemm) crate). ONNX Runtime's MLAS uses hand-written
+  convolution kernels on a blocked NCHWc layout and never materializes im2col; that copy is
+  still about a quarter of furnace's convolution time.
+- **No operator fusion.** ReLU and the residual Add are separate passes over memory with their
+  own output tensors; ONNX Runtime fuses them into the convolution.
+- **Skinny late layers.** The 7×7 and 14×14 layers give the matrix multiply very few columns,
+  where `gemm` reaches about half the throughput it gets on the early layers.
 
 Ideas for closing the gap, roughly in order of payoff per effort:
 
-1. Fold BatchNorm into the preceding Conv weights when the `.bpk` is generated (a build-time
-   transform in `build.rs`), and fuse ReLU and the residual Add into the convolution epilogue.
-   This removes about two thirds of the passes over activations.
-2. Add a direct (non-im2col) or Winograd path for 3×3 stride-1 convolutions in burn-flex, the
-   bulk of ResNet's FLOPs, and keep activations in NHWC between layers instead of converting
-   per layer.
-3. Give single-image requests more parallelism: split output channels as well as spatial tiles.
-   The server can also gather concurrent requests into one batch, since batch 4 costs only
-   about twice as much as batch 1.
-4. For GPU hosts, the wgpu backend already beats the CPU backend at batch 1 on an integrated
-   GPU. A discrete GPU or the CUDA backend should widen that lead.
+1. Fuse ReLU and the residual Add into the convolution epilogue.
+2. A direct (non-im2col) or Winograd path for 3×3 stride-1 convolutions, the bulk of ResNet's
+   FLOPs, with weights packed once at load time.
+3. Batch concurrent requests in the server, since batch 4 costs only about three times as much
+   as batch 1.
+4. For GPU hosts, the wgpu backend; a discrete GPU or the CUDA backend should do much better
+   than the integrated GPU measured here.
 5. An optional ONNX Runtime backend (behind a Cargo feature) would give MLAS speed for users
    who accept a C++ dependency, while the default build stays pure Rust.
 

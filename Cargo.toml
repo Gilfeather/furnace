@@ -90,6 +90,8 @@ reqwest = { version = "0.13", features = ["json"] }
 tower = { version = "0.5", features = ["util"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 rand = "0.10"
+# Builds ONNX graphs for the build/optimize.rs tests (already a build dependency)
+onnx-ir = "0.22"
 
 [[bench]]
 name = "inference_benchmark"
@@ -130,3 +132,8 @@ lto = true
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# Faster 2D convolutions on the CPU backend, pending upstream review in tracel-ai/burn.
+# vendor/burn-flex is burn-flex 0.22.0 plus that patch; see vendor/README.md.
+[patch.crates-io]
+burn-flex = { path = "vendor/burn-flex" }

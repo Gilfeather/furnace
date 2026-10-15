@@ -6,6 +6,10 @@
 #[allow(dead_code)]
 mod registry;
 
+#[cfg(feature = "onnx")]
+#[path = "build/optimize.rs"]
+mod optimize;
+
 use std::fs;
 use std::path::Path;
 
@@ -16,6 +20,8 @@ const KNOWN_MODEL_CFGS: &[&str] = &["resnet18", "mnist"];
 fn main() {
     println!("cargo:rerun-if-changed=models/");
     println!("cargo:rerun-if-changed=build/registry.rs");
+    println!("cargo:rerun-if-changed=build/optimize.rs");
+    println!("cargo:rerun-if-env-changed=FURNACE_NO_GRAPH_OPT");
     for name in KNOWN_MODEL_CFGS {
         println!("cargo:rustc-check-cfg=cfg(model_{name})");
     }
@@ -47,7 +53,7 @@ fn main() {
 mod onnx {
     use super::registry::{self, Io, IoType, ModelSpec};
     use burn_onnx::{LoadStrategy, ModelGen};
-    use onnx_ir::{ArgType, DType, OnnxGraphBuilder};
+    use onnx_ir::{ArgType, DType, Message, OnnxGraphBuilder};
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -101,6 +107,8 @@ mod onnx {
         out_dir: &Path,
         embed: bool,
     ) -> Result<ModelSpec, String> {
+        let onnx_path = &optimized_graph(onnx_path, name, out_dir)?;
+
         // Check the graph's I/O first, so unsupported models are skipped before codegen
         let graph = OnnxGraphBuilder::new()
             .parse_file(onnx_path)
@@ -131,6 +139,38 @@ mod onnx {
         })
         .map_err(|_| "burn-onnx could not convert the graph (unsupported operator?)".to_string())?;
         Ok(spec)
+    }
+
+    /// Apply build-time graph optimizations and return the ONNX file to generate code from.
+    /// Set `FURNACE_NO_GRAPH_OPT=1` to generate from the original graph.
+    fn optimized_graph(onnx_path: &Path, name: &str, out_dir: &Path) -> Result<PathBuf, String> {
+        if std::env::var_os("FURNACE_NO_GRAPH_OPT").is_some() {
+            return Ok(onnx_path.to_path_buf());
+        }
+        let bytes = fs::read(onnx_path).map_err(|e| format!("could not read the file: {e}"))?;
+        let mut model = onnx_ir::ModelProto::parse_from_bytes(&bytes)
+            .map_err(|e| format!("could not parse the ONNX graph: {e}"))?;
+        let report = super::optimize::fold_conv_batchnorm(&mut model);
+        if report.folded == 0 {
+            return Ok(onnx_path.to_path_buf());
+        }
+        // `cargo build -vv` shows these; skips are expected for BN not preceded by Conv
+        eprintln!(
+            "{name}: folded {} BatchNormalization node(s) into Conv, skipped {}",
+            report.folded,
+            report.skipped.len()
+        );
+        for (node, reason) in &report.skipped {
+            eprintln!("  {name}: kept BatchNormalization '{node}': {reason}");
+        }
+        let dir = out_dir.join("optimized");
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let path = dir.join(format!("{name}.onnx"));
+        let out = model
+            .write_to_bytes()
+            .map_err(|e| format!("could not serialize the optimized graph: {e}"))?;
+        fs::write(&path, out).map_err(|e| e.to_string())?;
+        Ok(path)
     }
 
     fn io(arg: &onnx_ir::Argument) -> Io {

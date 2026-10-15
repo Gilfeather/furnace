@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- CPU inference is about 2× faster: ResNet-18 goes from ~50 ms to ~27 ms per image (batch 4:
+  ~94 ms to ~87 ms), and peak private memory drops from ~68 MB to ~49 MB. furnace now uses a
+  patched burn-flex (`vendor/burn-flex`, burn-flex 0.22.0 plus one change to
+  `src/ops/conv.rs`) whose 2D convolution builds im2col directly from NCHW input instead of
+  re-laying out the weight and input on every call. The patch is proposed upstream; the
+  vendored copy goes away once a Burn release includes it
+- Inference-mode `Conv -> BatchNormalization` pairs are folded into a single Conv at build
+  time (`build/optimize.rs`). Set `FURNACE_NO_GRAPH_OPT=1` to build from the original graph
+
 ## [0.4.0] - 2026-10-15
 
 Migration to Burn 0.22 and a correctness pass over the server. Performance figures in
