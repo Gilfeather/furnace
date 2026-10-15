@@ -5,49 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-- Any ONNX model in `models/` is servable with no hand-written Rust: `models/foo.onnx` +
-  `cargo build --release`, then `furnace --model-name foo`. `build.rs` reads each graph's
-  input and output shapes (via `onnx-ir`) and generates a model registry. Supported: one
-  `float32` input and one `float32` output, batch dimension first, other dimensions static;
-  other graphs are skipped with a `cargo:warning` that says why. Graphs exported with a
-  static batch size (e.g. 1) still accept batches, run in chunks of that size
-- `furnace --help` and unknown `--model-name` errors list the models in the build;
-  names match ignoring case, `-`, `_` and `.`
-- MNIST (ONNX Model Zoo `mnist-8`) as a second built-in model in CI and the end-to-end tests
-- `benches/compare`: ResNet-18 comparison against tract and ONNX Runtime (latency, memory,
-  startup, binary size, top-1 check on a real image). Its own Cargo workspace, so `ort` and
-  `tract` never become furnace dependencies
-- Image input behind the opt-in `image` Cargo feature: `Content-Type: image/jpeg` or
-  `image/png` with one image per request. The server applies ImageNet preprocessing (shorter
-  side to 256, bilinear; centre crop 224; ImageNet mean/std; CHW `float32`), so clients don't
-  need Python/PIL. Only models with `[3, H, W]` input accept images (others return 415);
-  undecodable images return `400 INVALID_IMAGE`
-- `examples/http_bench.rs` replaces `benches/http_bench.py` for HTTP latency
-  (`cargo run --release --example http_bench`), so the repository has no Python left
-
-### Changed
-- `BuiltInModel` is a handle into the generated registry instead of an enum
-  (`from_name`, `name`, `available_models` and `create_model` keep their signatures).
-  The hand-written `models::ResNet18` wrapper is replaced by the generated
-  `models::resnet18::Served`
-- Without `--model-name` or `--model-path`, Furnace serves the built-in model if the build
-  has exactly one (release builds: ResNet-18, as before) and otherwise asks for `--model-name`
-- The CPU backend is multithreaded and uses SIMD: `burn` is now built with its `rayon` and
-  `simd` features, which `default-features = false` had turned off. ResNet-18 goes from
-  ~79 ms to ~50 ms per image (batch 4: ~267 ms to ~94 ms). Peak private memory rises from
-  ~33 MB to ~68 MB (per-thread buffers), and the binary grows by ~0.7 MB
-
-## [0.4.0] - 2026-10-14
+## [0.4.0] - 2026-10-15
 
 Migration to Burn 0.22 and a correctness pass over the server. Performance figures in
 earlier releases were measured against a dummy fallback model and should be disregarded.
 
-Highlights: ~5 MB server binary with weights in a separate memory-mapped `.bpk` file
-(~4 MB private memory with ResNet-18 loaded), and binary request I/O (~1 ms overhead per
-ResNet-18 image vs ~6 ms for JSON).
+Highlights:
+- Any ONNX model in `models/` is servable with no hand-written Rust
+- ~5 MB server binary; weights live in a separate, memory-mapped `.bpk` file
+- ResNet-18 at ~50 ms per image on a laptop CPU (multithreaded + SIMD), compared against
+  tract and ONNX Runtime in `benches/compare`
+- Binary request I/O (~1 ms overhead per image) and optional JPEG/PNG input
+- No Python anywhere in the repository
 
 ### Changed
 - **BREAKING**: Upgraded to Burn 0.22. ONNX import moved from `burn-import` to `burn-onnx`;
@@ -74,6 +43,16 @@ ResNet-18 image vs ~6 ms for JSON).
 - A JSON body with both `input` and `inputs` is rejected with 422
 - Weight files are memory-mapped and used zero-copy by the CPU backend: private memory
   with ResNet-18 loaded drops from ~49 MB to ~4 MB
+- `BuiltInModel` is a handle into the generated registry instead of an enum
+  (`from_name`, `name`, `available_models` and `create_model` keep their signatures).
+  The hand-written `models::ResNet18` wrapper is replaced by the generated
+  `models::resnet18::Served`
+- Without `--model-name` or `--model-path`, Furnace serves the built-in model if the build
+  has exactly one (release builds: ResNet-18, as before) and otherwise asks for `--model-name`
+- The CPU backend is multithreaded and uses SIMD: `burn` is now built with its `rayon` and
+  `simd` features, which `default-features = false` had turned off. ResNet-18 goes from
+  ~79 ms to ~50 ms per image (batch 4: ~267 ms to ~94 ms). Peak private memory rises from
+  ~33 MB to ~68 MB (per-thread buffers), and the binary grows by ~0.7 MB
 
 ### Added
 - `--weights <PATH>` to load built-in model weights from any `.bpk` file (e.g. fine-tuned)
@@ -95,6 +74,25 @@ ResNet-18 image vs ~6 ms for JSON).
   exposed to browsers through CORS)
 - `Model::predict_flat` runs a batch stored in one contiguous buffer, without per-item copies
 - `request_decode/*` Criterion benchmarks and `benches/http_bench.py` for HTTP latency
+- Any ONNX model in `models/` is servable with no hand-written Rust: `models/foo.onnx` +
+  `cargo build --release`, then `furnace --model-name foo`. `build.rs` reads each graph's
+  input and output shapes (via `onnx-ir`) and generates a model registry. Supported: one
+  `float32` input and one `float32` output, batch dimension first, other dimensions static;
+  other graphs are skipped with a `cargo:warning` that says why. Graphs exported with a
+  static batch size (e.g. 1) still accept batches, run in chunks of that size
+- `furnace --help` and unknown `--model-name` errors list the models in the build;
+  names match ignoring case, `-`, `_` and `.`
+- MNIST (ONNX Model Zoo `mnist-8`) as a second built-in model in CI and the end-to-end tests
+- `benches/compare`: ResNet-18 comparison against tract and ONNX Runtime (latency, memory,
+  startup, binary size, top-1 check on a real image). Its own Cargo workspace, so `ort` and
+  `tract` never become furnace dependencies
+- Image input behind the opt-in `image` Cargo feature: `Content-Type: image/jpeg` or
+  `image/png` with one image per request. The server applies ImageNet preprocessing (shorter
+  side to 256, bilinear; centre crop 224; ImageNet mean/std; CHW `float32`), so clients don't
+  need Python/PIL. Only models with `[3, H, W]` input accept images (others return 415);
+  undecodable images return `400 INVALID_IMAGE`
+- `examples/http_bench.rs` replaces `benches/http_bench.py` for HTTP latency
+  (`cargo run --release --example http_bench`), so the repository has no Python left
 
 ### Fixed
 - Real ResNet-18 requests (~1.5–3 MB JSON) were rejected with `length limit exceeded` by
