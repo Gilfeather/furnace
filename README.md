@@ -29,6 +29,22 @@ CPU/GPU backend.
 - 🛡️ **Hardened API**: body size limit, input validation, timeouts, security headers,
   graceful shutdown
 
+## 📥 Install
+
+- **Prebuilt binaries** for Linux (x86_64, musl, aarch64), macOS (x86_64, Apple Silicon) and
+  Windows, plus `resnet18.bpk`, are on the [releases page](https://github.com/Gilfeather/furnace/releases).
+  Put the binary and the `.bpk` side by side and run `./furnace --model-name resnet18`.
+- **From crates.io** (the package is `furnace-server`; the command is `furnace`). Models are
+  compiled in at build time, so point the build at a directory of `.onnx` files:
+
+  ```bash
+  FURNACE_MODELS_DIR=/path/to/models cargo install furnace-server
+  ```
+
+  crates.io builds use upstream `burn-flex`, without the convolution patch in `vendor/`, so CPU
+  inference is slower than the release binaries until that change ships in a Burn release.
+- **From source**: see Quick Start below.
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -64,7 +80,7 @@ the generated `resnet18.bpk` automatically.
 ```
 
 ```
-INFO 🔥 Starting furnace inference server version="0.5.0"
+INFO 🔥 Starting furnace inference server version="0.6.0"
 INFO 📦 Loading model model_name=Some("resnet18") backend=cpu
 INFO ✅ Model loaded successfully model_name=resnet18 input_shape=[3, 224, 224] output_shape=[1000] backend=cpu model_type=onnx
 INFO 🚦 Concurrency limit set to 100 inferences
@@ -116,7 +132,7 @@ Set `FURNACE_ENV=production` for JSON-structured logs. `RUST_LOG` overrides the 
 cargo build --release
 mkdir -p dist
 cp target/release/furnace dist/
-cp target/release/build/furnace-*/out/models/resnet18.bpk dist/
+cp target/release/build/furnace-server-*/out/models/resnet18.bpk dist/
 ./dist/furnace --model-name resnet18
 ```
 
@@ -346,7 +362,7 @@ Tips:
 
 - `burn-onnx` supports ONNX opsets 1–24. If conversion fails, try
   [onnx-simplifier](https://github.com/daquexian/onnx-simplifier) first.
-- Inspect generated code in `target/release/build/furnace-*/out/models/`.
+- Inspect generated code in `target/release/build/furnace-server-*/out/models/`.
 
 ### File-based Burn models
 

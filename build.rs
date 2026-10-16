@@ -17,8 +17,18 @@ use std::path::Path;
 // `cfg(model_<module>)`, declared as it is emitted.
 const KNOWN_MODEL_CFGS: &[&str] = &["resnet18", "mnist"];
 
+/// Where the ONNX models to compile in live: `$FURNACE_MODELS_DIR` if set (e.g. for
+/// `cargo install`), otherwise `models/` next to this manifest.
+fn models_dir() -> std::path::PathBuf {
+    match std::env::var_os("FURNACE_MODELS_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("models"),
+    }
+}
+
 fn main() {
-    println!("cargo:rerun-if-changed=models/");
+    println!("cargo:rerun-if-changed={}", models_dir().display());
+    println!("cargo:rerun-if-env-changed=FURNACE_MODELS_DIR");
     println!("cargo:rerun-if-changed=build/registry.rs");
     println!("cargo:rerun-if-changed=build/optimize.rs");
     println!("cargo:rerun-if-env-changed=FURNACE_NO_GRAPH_OPT");
@@ -59,7 +69,8 @@ mod onnx {
 
     /// Generate code for every servable model in models/ and return their specs, sorted by name
     pub fn generate_models(out_dir: &Path) -> Vec<ModelSpec> {
-        let mut onnx_files = match fs::read_dir("models") {
+        let models_dir = super::models_dir();
+        let mut onnx_files = match fs::read_dir(&models_dir) {
             Ok(entries) => entries
                 .filter_map(|entry| {
                     let path = entry.ok()?.path();
@@ -68,7 +79,8 @@ mod onnx {
                 .collect::<Vec<_>>(),
             Err(_) => {
                 println!(
-                    "cargo:warning=models/ directory not found, no built-in models will be available"
+                    "cargo:warning={} not found, no built-in models (set FURNACE_MODELS_DIR to a directory of .onnx files)",
+                    models_dir.display()
                 );
                 return Vec::new();
             }

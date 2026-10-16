@@ -1,0 +1,50 @@
+name: Benchmark report
+description: Share benches/compare results from your hardware (ARM, Graviton, Apple Silicon, ... all welcome)
+title: "[bench] <CPU> / <OS>"
+labels: ["benchmark"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for measuring! Results from hardware we don't have (Apple Silicon, Graviton,
+        Ampere, Raspberry Pi, older x86) guide where furnace's CPU kernels need work.
+
+        ```bash
+        mkdir -p models
+        curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
+        cd benches/compare && cargo run --release
+        ```
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU
+      description: Model, cores/threads (e.g. "Apple M3 Pro, 11 cores", "AWS c7g.2xlarge (Graviton3, 8 vCPU)")
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and Rust version
+      placeholder: "macOS 15.3, rustc 1.99.0"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: furnace version or commit
+      placeholder: "v0.6.0 / abc1234"
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: benches/compare output
+      description: Paste the Markdown tables it prints.
+      render: markdown
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Thermal limits, other load on the machine, power mode, etc.
