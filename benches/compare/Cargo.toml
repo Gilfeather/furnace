@@ -21,7 +21,7 @@ default = []
 wgpu = ["furnace/wgpu"]
 
 [dependencies]
-furnace = { path = "../.." }
+furnace = { package = "furnace-server", path = "../.." }
 # No `transformers` feature: ResNet-18 does not need it and it doubles the binary
 tract-onnx = { version = "0.23.8", default-features = false }
 ort = "=2.0.0-rc.14"

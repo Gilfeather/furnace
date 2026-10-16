@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Published on crates.io as **`furnace-server`** (the `furnace` crate name belongs to another
+  project). The library and the binary are still called `furnace`
+- `FURNACE_MODELS_DIR` points the build at the directory of `.onnx` models to compile in
+  (default `models/`), so `FURNACE_MODELS_DIR=... cargo install furnace-server` works
+- The release workflow publishes to crates.io when the `CARGO_REGISTRY_TOKEN` secret is set
+- Issue template for benchmark reports (`benches/compare` results on your hardware)
+
 ### Changed
 - CPU inference is about 2× faster again: ResNet-18 goes from 27.4 ms to 13.9 ms per image
   (batch 4: 82.2 ms to 36.6 ms) on the benchmark laptop, against 6.2 ms / 20.4 ms for ONNX

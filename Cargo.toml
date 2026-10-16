@@ -1,26 +1,37 @@
 [package]
-name = "furnace"
-version = "0.5.0"
+# Published as `furnace-server` (the `furnace` crate name belongs to another project); the
+# library and the binary are both still called `furnace`.
+name = "furnace-server"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Furnace Contributors"]
-description = "🔥 High-performance Rust ML inference server powered by Burn framework"
-documentation = "https://docs.rs/furnace"
+description = "Lightweight pure-Rust HTTP inference server for ONNX models, powered by Burn"
+documentation = "https://docs.rs/furnace-server"
 homepage = "https://github.com/Gilfeather/furnace"
 repository = "https://github.com/Gilfeather/furnace"
 license = "MIT"
-keywords = ["machine-learning", "inference", "server", "rust", "burn"]
+keywords = ["machine-learning", "inference", "onnx", "server", "burn"]
 categories = ["web-programming::http-server", "science"]
 readme = "README.md"
 exclude = [
     ".github/",
+    ".kiro/",
     "docs/",
-    "*.md",
+    "/benches/compare/",
+    "/models/",
+    # crates.io builds use upstream burn-flex; [patch.crates-io] only applies in this repo
+    "/vendor/",
+    "/sample_model.*",
     ".gitignore",
-    ".dockerignore",
-    "Dockerfile",
     "deny.toml",
+    "default.nix",
+    "flake.nix",
 ]
+
+[lib]
+name = "furnace"
+path = "src/lib.rs"
 
 [[bin]]
 name = "furnace"
