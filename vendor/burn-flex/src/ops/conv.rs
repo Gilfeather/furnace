@@ -584,17 +584,24 @@ const IM2COL_TILE_ELEMS: usize = 32 * 1024;
 /// Smallest block of output channels that gets its own task.
 const MIN_CHANNEL_BLOCK: usize = 16;
 
+/// Fewest output positions per GEMM. With fewer columns the GEMM microkernel runs mostly empty.
+const MIN_TILE_POSITIONS: usize = 16;
+
 /// 2D convolution on NCHW data as im2col + GEMM.
 ///
 /// The im2col rows are ordered `(c_in, kh, kw)`, the same order as the OIHW weight, so the
 /// weight is the GEMM lhs as-is and the input needs no NHWC copy.
 ///
-/// The output of each (batch, group) is split into tiles of at most `tile_elems / col_len`
-/// output positions, and, when that gives fewer tiles than `threads`, also into blocks of
-/// output channels. Each task builds the im2col tile for its positions in a per-thread buffer
-/// and runs a single-threaded GEMM that writes its block straight into the output. Small tiles
-/// keep the GEMM's input in cache, and independent tasks parallelize better than one large
-/// multithreaded GEMM on the narrow late layers.
+/// The output of each (batch, group) is split into tiles of `tile_elems / col_len` output
+/// positions (at least [`MIN_TILE_POSITIONS`]), and, when that gives fewer tiles than `threads`,
+/// also into blocks of output channels. Each task builds the im2col tile for its positions in a
+/// per-thread buffer and runs a single-threaded GEMM that writes its block straight into the
+/// output. Small tiles keep the GEMM's input in cache, and independent tasks parallelize better
+/// than one large multithreaded GEMM on the narrow late layers.
+///
+/// When a tile of all `c_in_group` channels would exceed `tile_elems` (many input channels), the
+/// task builds and multiplies it one slice of input channels at a time, accumulating into the
+/// output block.
 #[allow(clippy::too_many_arguments)]
 fn conv2d_im2col_nchw<T>(
     x: &[T],
@@ -624,8 +631,14 @@ where
     }
 
     let images = batch * groups;
-    let tile = (tile_elems / col_len).clamp(1, spatial_out);
+    let tile = (tile_elems / col_len)
+        .max(MIN_TILE_POSITIONS)
+        .clamp(1, spatial_out);
     let tiles = spatial_out.div_ceil(tile);
+    let kernel_area = kernel_h * kernel_w;
+    // Input channels per slice of the im2col tile, so a slice stays within `tile_elems`
+    let slice_channels = (tile_elems / (kernel_area * tile)).clamp(1, c_in_group);
+    let scratch_len = slice_channels * kernel_area * tile;
     let channel_blocks = threads
         .div_ceil(images * tiles)
         .min(c_out_group.div_ceil(MIN_CHANNEL_BLOCK))
@@ -648,48 +661,57 @@ where
         let x_group = &x[(b * c_in + g * c_in_group) * in_plane..][..c_in_group * in_plane];
         let w_block = &w[(g * c_out_group + c_start) * col_len..][..m * col_len];
 
-        // Every element of the tile is written below, so a reused buffer needs no clearing
-        let col = &mut col[..col_len * n];
-        for (row_idx, row) in col.chunks_mut(n).enumerate() {
-            let c = row_idx / (kernel_h * kernel_w);
-            let kh = (row_idx / kernel_w) % kernel_h;
-            let kw = row_idx % kernel_w;
-            im2col_nchw_row(
-                row,
-                start,
-                &x_group[c * in_plane..][..in_plane],
-                [in_h, in_w],
-                out_w,
-                [kh * dilation_h, kw * dilation_w],
-                [stride_h, stride_w],
-                [pad_h, pad_w],
-            );
-        }
-
-        // out[c_start..c_start + m, start..start + n] = w_block[m, col_len] @ col[col_len, n]
         let out_offset = (b * c_out + g * c_out_group + c_start) * spatial_out + start;
-        unsafe {
-            gemm::gemm(
-                m,
-                n,
-                col_len,
-                out.add(out_offset),
-                1,
-                spatial_out as isize,
-                false,
-                w_block.as_ptr(),
-                1,
-                col_len as isize,
-                col.as_ptr(),
-                1,
-                n as isize,
-                zero,
-                T::from_elem(1.0f32),
-                false,
-                false,
-                false,
-                gemm::Parallelism::None,
-            );
+        for c_first in (0..c_in_group).step_by(slice_channels) {
+            let rows = slice_channels.min(c_in_group - c_first) * kernel_area;
+            // Every element of the slice is written below, so a reused buffer needs no clearing
+            let col = &mut col[..rows * n];
+            for (row_idx, row) in col.chunks_mut(n).enumerate() {
+                let c = c_first + row_idx / kernel_area;
+                let kh = (row_idx / kernel_w) % kernel_h;
+                let kw = row_idx % kernel_w;
+                im2col_nchw_row(
+                    row,
+                    start,
+                    &x_group[c * in_plane..][..in_plane],
+                    [in_h, in_w],
+                    out_w,
+                    [kh * dilation_h, kw * dilation_w],
+                    [stride_h, stride_w],
+                    [pad_h, pad_w],
+                );
+            }
+
+            // out[c_start..c_start + m, start..start + n] (+)=
+            //     w_block[m, c_first * kernel_area..][..rows] @ col[rows, n]
+            let accumulate = c_first > 0;
+            unsafe {
+                gemm::gemm(
+                    m,
+                    n,
+                    rows,
+                    out.add(out_offset),
+                    1,
+                    spatial_out as isize,
+                    accumulate,
+                    w_block[c_first * kernel_area..].as_ptr(),
+                    1,
+                    col_len as isize,
+                    col.as_ptr(),
+                    1,
+                    n as isize,
+                    if accumulate {
+                        T::from_elem(1.0f32)
+                    } else {
+                        zero
+                    },
+                    T::from_elem(1.0f32),
+                    false,
+                    false,
+                    false,
+                    gemm::Parallelism::None,
+                );
+            }
         }
     };
 
@@ -700,14 +722,14 @@ where
         let out = crate::ops::SendMutPtr::new(output.as_mut_ptr());
         // SAFETY: each task index maps to a distinct output block
         (0..tasks).into_par_iter().for_each(|task| {
-            with_scratch(col_len * tile, |col| unsafe {
+            with_scratch(scratch_len, |col| unsafe {
                 run_task(col, task, out.ptr_add(0))
             })
         });
     }
     #[cfg(not(feature = "rayon"))]
     {
-        let mut col = vec![zero; col_len * tile];
+        let mut col = vec![zero; scratch_len];
         for task in 0..tasks {
             run_task(&mut col, task, output.as_mut_ptr());
         }
@@ -3338,39 +3360,47 @@ mod tests {
 
     #[test]
     fn test_conv2d_im2col_nchw_tiled_matches_untiled() {
-        // Tiny im2col budgets force many position tiles, including ones that start mid-row,
-        // and more threads than tiles split the 40 output channels into blocks of 14, 14, 12
-        let (c_in, c_out, h, w) = (3, 40, 9, 11);
-        let x: Vec<f32> = (0..2 * c_in * h * w)
-            .map(|i| (i % 13) as f32 - 6.0)
-            .collect();
-        let wt: Vec<f32> = (0..c_out * c_in * 9)
-            .map(|i| (i % 7) as f32 * 0.1)
-            .collect();
-        let run = |budget, threads| {
-            conv2d_im2col_nchw(
-                &x,
-                &wt,
-                [2, c_in, h, w],
-                [c_out, c_in, 3, 3],
-                [5, 6],
-                [2, 2],
-                [1, 1],
-                [1, 1],
-                1,
-                budget,
-                threads,
-            )
-        };
-        let full = run(usize::MAX, 1);
-        for budget in [27, 27 * 4, 27 * 7, usize::MAX] {
-            for threads in [1, 64] {
-                // Tile width changes the GEMM summation order, so allow rounding differences
-                for (i, (a, e)) in run(budget, threads).iter().zip(&full).enumerate() {
-                    assert!(
-                        (a - e).abs() < 1e-4,
-                        "budget {budget}, threads {threads}, index {i}: {a} != {e}"
-                    );
+        // Small im2col budgets force 16-position tiles that start mid-row and slices of 1, 2 or 3
+        // input channels (7 or 5 channels per group: the last slice is short). More threads than
+        // tiles split the 40 output channels into blocks.
+        // (batch, c_in, c_out, groups, in_hw, out_hw, stride, padding, dilation)
+        let cases = [
+            (2, 7, 40, 1, [9, 11], [5, 6], [2, 2], [1, 1], [1, 1]),
+            (2, 10, 12, 2, [8, 9], [8, 9], [1, 1], [1, 1], [1, 1]),
+            (1, 7, 6, 1, [9, 8], [5, 6], [1, 1], [0, 1], [2, 1]),
+        ];
+        for (batch, c_in, c_out, groups, in_hw, out_hw, stride, padding, dilation) in cases {
+            let x: Vec<f32> = (0..batch * c_in * in_hw[0] * in_hw[1])
+                .map(|i| (i % 13) as f32 - 6.0)
+                .collect();
+            let wt: Vec<f32> = (0..c_out * c_in / groups * 9)
+                .map(|i| (i % 7) as f32 * 0.1)
+                .collect();
+            let run = |budget, threads| {
+                conv2d_im2col_nchw(
+                    &x,
+                    &wt,
+                    [batch, c_in, in_hw[0], in_hw[1]],
+                    [c_out, c_in / groups, 3, 3],
+                    out_hw,
+                    stride,
+                    padding,
+                    dilation,
+                    groups,
+                    budget,
+                    threads,
+                )
+            };
+            let full = run(usize::MAX, 1);
+            for budget in [9 * 16, 2 * 9 * 16, 3 * 9 * 16, usize::MAX] {
+                for threads in [1, 64] {
+                    // Tile width and slicing change the summation order: allow rounding
+                    for (i, (a, e)) in run(budget, threads).iter().zip(&full).enumerate() {
+                        assert!(
+                            (a - e).abs() < 1e-4,
+                            "groups {groups}, budget {budget}, threads {threads}, index {i}: {a} != {e}"
+                        );
+                    }
                 }
             }
         }
