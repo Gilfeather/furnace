@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-10-16
+
+About 2× faster CPU inference. The API and CLI are unchanged from 0.4.0.
 
 ### Changed
 - CPU inference is about 2× faster: ResNet-18 goes from ~50 ms to ~27 ms per image (batch 4:
@@ -16,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vendored copy goes away once a Burn release includes it
 - Inference-mode `Conv -> BatchNormalization` pairs are folded into a single Conv at build
   time (`build/optimize.rs`). Set `FURNACE_NO_GRAPH_OPT=1` to build from the original graph
+
+### Fixed
+- The new 2D convolution path in the patched burn-flex also caught 3D convolutions with depth
+  padding whose single output slice lies entirely in the padding, and returned wrong values for
+  them. It now only handles true 2D convolutions (found in upstream review)
 
 ## [0.4.0] - 2026-10-15
 
