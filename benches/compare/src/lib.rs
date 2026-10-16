@@ -10,6 +10,11 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+// The furnace server uses mimalloc (see its `main.rs`); give every engine binary the same
+// allocator so the comparison measures the engines, not the platform heap.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub const CHANNELS: usize = 3;
 pub const SIDE: usize = 224;
 pub const INPUT_LEN: usize = CHANNELS * SIDE * SIDE;

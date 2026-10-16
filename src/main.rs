@@ -9,6 +9,9 @@ use uuid::Uuid;
 use error::{CliError, Result};
 use furnace::{BackendKind, api, error, model, models::BuiltInModel};
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Debug)]
 struct CliArgs {
     model_name: Option<String>,
