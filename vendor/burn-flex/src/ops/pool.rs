@@ -29,7 +29,33 @@ macro_rules! max_pool3d_with_indices_typed {
             dilation: [usize; 3],
             ceil_mode: bool,
         ) -> (FlexTensor, FlexTensor) {
-            max_pool3d_with_indices_impl::<$T>(
+            let (output, indices) = max_pool3d_impl::<$T, true>(
+                x,
+                kernel_size,
+                stride,
+                padding,
+                dilation,
+                ceil_mode,
+                $dtype,
+                $neg_inf,
+            );
+            (output, indices.unwrap())
+        }
+    };
+}
+
+/// Generates max_pool3d typed dispatchers that skip the indices.
+macro_rules! max_pool3d_typed {
+    ($fn_name:ident, $T:ty, $dtype:expr, $neg_inf:expr) => {
+        pub fn $fn_name(
+            x: FlexTensor,
+            kernel_size: [usize; 3],
+            stride: [usize; 3],
+            padding: [usize; 3],
+            dilation: [usize; 3],
+            ceil_mode: bool,
+        ) -> FlexTensor {
+            max_pool3d_impl::<$T, false>(
                 x,
                 kernel_size,
                 stride,
@@ -39,6 +65,7 @@ macro_rules! max_pool3d_with_indices_typed {
                 $dtype,
                 $neg_inf,
             )
+            .0
         }
     };
 }
@@ -227,9 +254,10 @@ fn valid_range_maxpool(
     (start as usize, end as usize)
 }
 
-/// Generic 3D max pooling with indices implementation.
+/// Generic 3D max pooling. The flat argmax indices are only tracked and returned when
+/// `WITH_INDICES` is set.
 #[allow(clippy::too_many_arguments)]
-fn max_pool3d_with_indices_impl<T>(
+fn max_pool3d_impl<T, const WITH_INDICES: bool>(
     x: FlexTensor,
     kernel_size: [usize; 3],
     stride: [usize; 3],
@@ -238,7 +266,7 @@ fn max_pool3d_with_indices_impl<T>(
     ceil_mode: bool,
     dtype: DType,
     neg_inf: T,
-) -> (FlexTensor, FlexTensor)
+) -> (FlexTensor, Option<FlexTensor>)
 where
     T: bytemuck::Pod + Copy + PartialOrd + Send + Sync + Element + num_traits::Float,
 {
@@ -262,13 +290,19 @@ where
 
     let spatial_out = out_d * out_h * out_w;
     let x_data: &[T] = x.storage();
+    // Valid kernel offsets per output coordinate, computed once instead of per output element
+    let ranges = |out: usize, kernel: usize, stride: usize, pad: usize, dilation: usize, input| {
+        (0..out)
+            .map(|o| valid_range_maxpool(o, kernel, stride, pad, dilation, input))
+            .collect::<Vec<_>>()
+    };
+    let d_ranges = ranges(out_d, kernel_d, stride_d, pad_d, dilation_d, in_d);
+    let h_ranges = ranges(out_h, kernel_h, stride_h, pad_h, dilation_h, in_h);
+    let w_ranges = ranges(out_w, kernel_w, stride_w, pad_w, dilation_w, in_w);
     let kernel = |od: usize, oh: usize, ow: usize, x_offset: usize| {
-        let (kd_start, kd_end) =
-            valid_range_maxpool(od, kernel_d, stride_d, pad_d, dilation_d, in_d);
-        let (kh_start, kh_end) =
-            valid_range_maxpool(oh, kernel_h, stride_h, pad_h, dilation_h, in_h);
-        let (kw_start, kw_end) =
-            valid_range_maxpool(ow, kernel_w, stride_w, pad_w, dilation_w, in_w);
+        let (kd_start, kd_end) = d_ranges[od];
+        let (kh_start, kh_end) = h_ranges[oh];
+        let (kw_start, kw_end) = w_ranges[ow];
 
         let mut max_val = neg_inf;
         let mut max_idx: i64 = -1;
@@ -290,9 +324,18 @@ where
 
                     // NaN always wins, so it propagates like in PyTorch, which also
                     // reports the index of the last NaN in the window.
-                    if max_idx < 0 || val > max_val || val.is_nan() {
-                        max_val = val;
-                        max_idx = (id_base + ih_base + iw) as i64;
+                    if WITH_INDICES {
+                        if max_idx < 0 || val > max_val || val.is_nan() {
+                            max_val = val;
+                            max_idx = (id_base + ih_base + iw) as i64;
+                        }
+                    } else {
+                        // A select rather than a branch: the comparison is unpredictable
+                        max_val = if val > max_val || val.is_nan() {
+                            val
+                        } else {
+                            max_val
+                        };
                     }
                 }
             }
@@ -307,9 +350,12 @@ where
             use rayon::prelude::*;
 
             let mut output = vec![neg_inf; batch_size * channels * spatial_out];
-            let mut indices = vec![-1i64; batch_size * channels * spatial_out];
+            let mut indices =
+                WITH_INDICES.then(|| vec![-1i64; batch_size * channels * spatial_out]);
             let out_ptr = crate::ops::SendMutPtr::new(output.as_mut_ptr());
-            let idx_ptr = crate::ops::SendMutPtr::new(indices.as_mut_ptr());
+            let idx_ptr = indices
+                .as_mut()
+                .map(|indices| crate::ops::SendMutPtr::new(indices.as_mut_ptr()));
 
             // Flatten batch*channels into a single par_iter so rayon chooses
             // the right granularity instead of creating one task per channel.
@@ -328,7 +374,9 @@ where
 
                             unsafe {
                                 out_ptr.write(out_idx, max_val);
-                                idx_ptr.write(out_idx, max_idx);
+                                if let Some(idx_ptr) = &idx_ptr {
+                                    idx_ptr.write(out_idx, max_idx);
+                                }
                             }
                         }
                     }
@@ -339,7 +387,8 @@ where
         #[cfg(not(feature = "rayon"))]
         {
             let mut output = vec![neg_inf; batch_size * channels * spatial_out];
-            let mut indices = vec![-1i64; batch_size * channels * spatial_out];
+            let mut indices =
+                WITH_INDICES.then(|| vec![-1i64; batch_size * channels * spatial_out]);
 
             for b in 0..batch_size {
                 for c in 0..channels {
@@ -353,7 +402,9 @@ where
                                 let (max_val, max_idx) = kernel(od, oh, ow, x_offset);
 
                                 output[out_idx] = max_val;
-                                indices[out_idx] = max_idx;
+                                if let Some(indices) = &mut indices {
+                                    indices[out_idx] = max_idx;
+                                }
                             }
                         }
                     }
@@ -369,50 +420,22 @@ where
         Layout::contiguous(out_shape.clone()),
         dtype,
     );
-    let indices_tensor = FlexTensor::new(
-        Bytes::from_elems(indices),
-        Layout::contiguous(out_shape),
-        DType::I64,
-    );
+    let indices_tensor = indices.map(|indices| {
+        FlexTensor::new(
+            Bytes::from_elems(indices),
+            Layout::contiguous(out_shape),
+            DType::I64,
+        )
+    });
 
     (output_tensor, indices_tensor)
 }
 
-/// 3D max pooling (without returning indices) for f32.
-pub fn max_pool3d_f32(
-    x: FlexTensor,
-    kernel_size: [usize; 3],
-    stride: [usize; 3],
-    padding: [usize; 3],
-    dilation: [usize; 3],
-    ceil_mode: bool,
-) -> FlexTensor {
-    max_pool3d_with_indices_f32(x, kernel_size, stride, padding, dilation, ceil_mode).0
-}
+max_pool3d_typed!(max_pool3d_f32, f32, DType::F32, f32::NEG_INFINITY);
 
-/// 3D max pooling (without returning indices) for f64.
-pub fn max_pool3d_f64(
-    x: FlexTensor,
-    kernel_size: [usize; 3],
-    stride: [usize; 3],
-    padding: [usize; 3],
-    dilation: [usize; 3],
-    ceil_mode: bool,
-) -> FlexTensor {
-    max_pool3d_with_indices_f64(x, kernel_size, stride, padding, dilation, ceil_mode).0
-}
+max_pool3d_typed!(max_pool3d_f64, f64, DType::F64, f64::NEG_INFINITY);
 
-/// 3D max pooling (without returning indices) for f16.
-pub fn max_pool3d_f16(
-    x: FlexTensor,
-    kernel_size: [usize; 3],
-    stride: [usize; 3],
-    padding: [usize; 3],
-    dilation: [usize; 3],
-    ceil_mode: bool,
-) -> FlexTensor {
-    max_pool3d_with_indices_f16(x, kernel_size, stride, padding, dilation, ceil_mode).0
-}
+max_pool3d_typed!(max_pool3d_f16, f16, DType::F16, f16::NEG_INFINITY);
 
 /// 3D max pooling (without returning indices) for bf16.
 pub fn max_pool3d_bf16(
@@ -423,7 +446,9 @@ pub fn max_pool3d_bf16(
     dilation: [usize; 3],
     ceil_mode: bool,
 ) -> FlexTensor {
-    max_pool3d_with_indices_bf16(x, kernel_size, stride, padding, dilation, ceil_mode).0
+    let x_f32 = convert_bf16_to_f32(&x);
+    let output = max_pool3d_f32(x_f32, kernel_size, stride, padding, dilation, ceil_mode);
+    convert_f32_to_bf16(&output)
 }
 
 // ============================================================================
@@ -523,7 +548,15 @@ pub fn max_pool2d_f32(
     dilation: [usize; 2],
     ceil_mode: bool,
 ) -> FlexTensor {
-    max_pool2d_with_indices_f32(x, kernel_size, stride, padding, dilation, ceil_mode).0
+    let output = max_pool3d_f32(
+        expand_2d_to_3d(&x),
+        [1, kernel_size[0], kernel_size[1]],
+        [1, stride[0], stride[1]],
+        [0, padding[0], padding[1]],
+        [1, dilation[0], dilation[1]],
+        ceil_mode,
+    );
+    squeeze_3d_to_2d(output)
 }
 
 /// 2D max pooling (without indices) for f64.
@@ -535,7 +568,15 @@ pub fn max_pool2d_f64(
     dilation: [usize; 2],
     ceil_mode: bool,
 ) -> FlexTensor {
-    max_pool2d_with_indices_f64(x, kernel_size, stride, padding, dilation, ceil_mode).0
+    let output = max_pool3d_f64(
+        expand_2d_to_3d(&x),
+        [1, kernel_size[0], kernel_size[1]],
+        [1, stride[0], stride[1]],
+        [0, padding[0], padding[1]],
+        [1, dilation[0], dilation[1]],
+        ceil_mode,
+    );
+    squeeze_3d_to_2d(output)
 }
 
 /// 2D max pooling (without indices) for f16.
@@ -547,7 +588,15 @@ pub fn max_pool2d_f16(
     dilation: [usize; 2],
     ceil_mode: bool,
 ) -> FlexTensor {
-    max_pool2d_with_indices_f16(x, kernel_size, stride, padding, dilation, ceil_mode).0
+    let output = max_pool3d_f16(
+        expand_2d_to_3d(&x),
+        [1, kernel_size[0], kernel_size[1]],
+        [1, stride[0], stride[1]],
+        [0, padding[0], padding[1]],
+        [1, dilation[0], dilation[1]],
+        ceil_mode,
+    );
+    squeeze_3d_to_2d(output)
 }
 
 /// 2D max pooling (without indices) for bf16.
@@ -559,7 +608,15 @@ pub fn max_pool2d_bf16(
     dilation: [usize; 2],
     ceil_mode: bool,
 ) -> FlexTensor {
-    max_pool2d_with_indices_bf16(x, kernel_size, stride, padding, dilation, ceil_mode).0
+    let output = max_pool3d_bf16(
+        expand_2d_to_3d(&x),
+        [1, kernel_size[0], kernel_size[1]],
+        [1, stride[0], stride[1]],
+        [0, padding[0], padding[1]],
+        [1, dilation[0], dilation[1]],
+        ceil_mode,
+    );
+    squeeze_3d_to_2d(output)
 }
 
 // ============================================================================
@@ -596,7 +653,15 @@ pub fn max_pool1d_f32(
     dilation: usize,
     ceil_mode: bool,
 ) -> FlexTensor {
-    max_pool1d_with_indices_f32(x, kernel_size, stride, padding, dilation, ceil_mode).0
+    let output = max_pool3d_f32(
+        expand_1d_to_3d(&x),
+        [1, 1, kernel_size],
+        [1, 1, stride],
+        [0, 0, padding],
+        [1, 1, dilation],
+        ceil_mode,
+    );
+    squeeze_3d_to_1d(output)
 }
 
 // ============================================================================
