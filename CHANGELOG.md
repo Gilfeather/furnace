@@ -8,19 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- CPU inference is about 2× faster again: ResNet-18 goes from 27.4 ms to 13.2 ms per image
-  (batch 4: 82.2 ms to 39.0 ms) on the benchmark laptop, against 7.7 ms / 26.3 ms for ONNX
-  Runtime. Three changes:
-  - The server uses mimalloc (v2) as its global allocator. Windows' default heap gave every
-    large buffer back to the OS on free, which cost about a third of inference time
-  - The vendored burn-flex splits each 2D convolution into tasks of output positions × output
-    channels, each with a 128 KiB im2col tile and a single-threaded GEMM, instead of one large
-    im2col buffer and one multithreaded GEMM
-  - The vendored burn-flex no longer computes the argmax index tensor for max pooling
-- The server's peak private memory (commit charge) rises from ~72 MB to ~250 MB and its working
-  set from ~105 MB to ~175 MB, because mimalloc keeps per-thread heaps
-- `benches/compare` links mimalloc into every engine binary, so tract and ONNX Runtime are
-  measured with the same allocator
+- CPU inference is about 2× faster again: ResNet-18 goes from 27.4 ms to 13.9 ms per image
+  (batch 4: 82.2 ms to 36.6 ms) on the benchmark laptop, against 6.2 ms / 20.4 ms for ONNX
+  Runtime. Peak private memory also drops, from 49 to 46 MB in process and from ~72 to 52 MB
+  for the server. Two changes in the vendored burn-flex:
+  - Each 2D convolution is split into tasks of output positions × output channels, each filling
+    a 128 KiB im2col tile in a reused per-thread buffer and running a single-threaded GEMM,
+    instead of one large im2col buffer per call and one multithreaded GEMM
+  - Max pooling no longer computes the argmax index tensor it then discarded
 
 ## [0.5.0] - 2026-10-16
 
