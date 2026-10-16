@@ -395,28 +395,29 @@ Setup: AMD Ryzen 9 7940HS (8 cores / 16 threads, Radeon 780M iGPU), 30 GB RAM, W
 0.5.0) on Burn 0.22 (burn-flex CPU backend), tract-onnx 0.23.8, `ort` 2.0.0-rc.14 with ONNX
 Runtime 1.31 (the prebuilt binaries `ort` downloads). Each engine runs in its own process: 10
 warm-up runs, then 50 timed runs per batch size, one request at a time. Batch 4 is the same image
-four times. The table is the median of three such runs: single runs on this laptop vary by about
-±10%, and ONNX Runtime's batch 1 median ranged from 4.9 to 6.6 ms.
+four times. The table is the median of three such runs. Single runs on this laptop vary by about
+±10%, and whole sessions differ more (ONNX Runtime's batch 1 median has ranged from 4.9 to
+7.7 ms), so compare engines within the table rather than across releases.
 
 | Engine | Threads | Batch 1 median / p95 | Batch 4 median / p95 | img/s (batch 1 / 4) |
 |---|---|---|---|---|
-| **furnace**, CPU | all (rayon) | 13.9 / 16.1 ms | 36.6 / 43.0 ms | 72.0 / 109.3 |
+| **furnace**, CPU | all (rayon) | 15.0 / 15.9 ms | 40.6 / 45.8 ms | 66.8 / 98.4 |
 | furnace 0.5.0 release, CPU | all (rayon) | 26.3 / 30.6 ms | 87.1 / 101.6 ms | 38.0 / 45.9 |
 | furnace 0.4.0 release, CPU | all (rayon) | 49.9 / 56.4 ms | 93.5 / 97.2 ms | 20.0 / 42.8 |
-| **furnace** server, HTTP binary I/O | all (rayon) | 13.7 / 17.5 ms | 38.8 / 42.6 ms | 73.1 / 103.0 |
+| **furnace** server, HTTP binary I/O | all (rayon) | 17.4 / 20.3 ms | 42.3 / 44.9 ms | 57.4 / 94.6 |
 | **furnace**, wgpu (Radeon 780M iGPU) | GPU | 41.4 / 46.5 ms | 137.9 / 149.2 ms | 24.2 / 29.0 |
-| tract | 1 | 45.5 / 49.1 ms | 326.0 / 353.3 ms | 22.0 / 12.3 |
-| tract | 16 | 18.2 / 20.4 ms | 204.5 / 213.2 ms | 54.8 / 19.6 |
-| ONNX Runtime | default (per physical core) | **6.2 / 7.5 ms** | **20.4 / 25.7 ms** | **160.1 / 196.5** |
-| ONNX Runtime | 1 | 26.6 / 28.2 ms | 101.3 / 105.1 ms | 37.5 / 39.5 |
+| tract | 1 | 45.7 / 52.6 ms | 325.9 / 352.3 ms | 21.9 / 12.3 |
+| tract | 16 | 19.4 / 20.5 ms | 204.7 / 232.0 ms | 51.6 / 19.5 |
+| ONNX Runtime | default (per physical core) | **7.4 / 8.2 ms** | **24.9 / 26.9 ms** | **134.4 / 160.7** |
+| ONNX Runtime | 1 | 27.2 / 28.6 ms | 105.8 / 111.1 ms | 36.7 / 37.8 |
 
 | Engine | Load | First inference | Peak working set | Peak private | Binary | Pure Rust |
 |---|---|---|---|---|---|---|
-| **furnace**, CPU | **1 ms** | 28 ms | **80 MB** | **46 MB** | **3.7 MB** + 46 MB `.bpk` | yes |
-| **furnace** server | 26 ms to healthy | 28 ms | 81 MB | 52 MB | 5.5 MB + 46 MB `.bpk` | yes |
+| **furnace**, CPU | **1 ms** | 24 ms | **79 MB** | **48 MB** | **3.7 MB** + 46 MB `.bpk` | yes |
+| **furnace** server | 32 ms to healthy | 42 ms | 80 MB | 50 MB | 5.5 MB + 46 MB `.bpk` | yes |
 | **furnace**, wgpu | 505 ms | 234 ms | 384 MB | 373 MB | 41.1 MB + 46 MB `.bpk` | yes |
-| tract (16 threads) | 175 ms | 21 ms | 166 MB | 194 MB | 18.7 MB + 47 MB `.onnx` | yes |
-| ONNX Runtime | 122 ms | 8 ms | 151 MB | 137 MB | 41.7 MB + 47 MB `.onnx` | no (C++) |
+| tract (16 threads) | 182 ms | 20 ms | 166 MB | 194 MB | 18.7 MB + 47 MB `.onnx` | yes |
+| ONNX Runtime | 145 ms | 8 ms | 150 MB | 137 MB | 41.7 MB + 47 MB `.onnx` | no (C++) |
 
 *Load* is reading the model until it is ready to run; for the server it is the time from
 spawning the process to the first successful `/healthz`. *Peak private* is the peak commit
@@ -426,12 +427,12 @@ minimal benchmark executable that links only that engine, built with the same pr
 Runtime is linked statically, but on Windows `ort` ships the DirectML build, which loads an
 18.5 MB `DirectML.dll` even on the CPU path. That DLL is included in the 41.7 MB.
 
-**ONNX Runtime is 2.2× faster than furnace at batch 1 and 1.8× faster at batch 4** (3.5× and
-3.0× in 0.5.0). furnace beats tract with 16 threads at batch 1 and is 5.6× faster at batch 4.
+**ONNX Runtime is 2.0× faster than furnace at batch 1 and 1.6× faster at batch 4** (3.5× and
+3.0× in 0.5.0). furnace beats tract with 16 threads at batch 1 and is 5× faster at batch 4.
 furnace loads in about a millisecond, has the smallest binary, and uses the least memory. Over
 HTTP with binary bodies it adds 1 to 3 ms to in-process inference.
 
-What changed since 0.5.0 (the API is the same; both changes are in the vendored burn-flex):
+What changed since 0.5.0 (the API is the same; all changes are in the vendored burn-flex):
 
 - **Convolutions split into cache-sized tasks.** The patched burn-flex used to build one im2col
   buffer per convolution (up to 16 MiB) and hand it to one multithreaded GEMM. Allocating,
@@ -440,36 +441,45 @@ What changed since 0.5.0 (the API is the same; both changes are in the vendored 
   Each convolution is now split into tasks of output positions × output channels; every task
   fills a 128 KiB im2col tile in a per-thread scratch buffer that is reused across calls, and
   runs a single-threaded GEMM on it. Batch 1 went from 27.4 ms to about 14 ms.
+- **Wide convolutions sliced over input channels.** With 512 input channels, a 128 KiB tile held
+  only 7 output positions, too few for the GEMM microkernel. Tiles now keep at least 16 positions
+  and are built and multiplied one slice of input channels at a time. ResNet-18's three
+  512-channel layers went from 13.9 ms to 8.9 ms single-threaded and from 3.4 ms to 2.85 ms on
+  16 threads; in the same session the full benchmark moved from 15.5 to 15.0 ms (batch 1) and
+  from 43.6 to 40.6 ms (batch 4).
 - **Max pooling without indices.** burn-flex computed (and threw away) the argmax index tensor
   on every max pool. Skipping it makes ResNet-18's max pool about 40% faster (0.8 to 0.5 ms).
 
-Both burn-flex changes are proposed upstream and live in `vendor/burn-flex` until a Burn release
+The burn-flex changes are proposed upstream and live in `vendor/burn-flex` until a Burn release
 includes them.
 
 Where the time goes now (batch 1, profiled build): convolutions about 11 ms (im2col and GEMM
 together), max pool 0.5 ms, the separate bias pass 0.4 ms, ReLU and the residual Add 0.45 ms
-combined, everything else under 0.3 ms. So operator fusion would save little; the convolutions
-are what separates furnace from ONNX Runtime:
+combined, everything else under 0.3 ms. So operator fusion would save little. Both furnace and
+ONNX Runtime get about 4× faster from 1 to 16 threads; the gap is per-core speed (about 50 ms
+single-threaded for furnace, 27 ms for ONNX Runtime):
 
-- **GEMM throughput.** The [`gemm`](https://crates.io/crates/gemm) crate runs ResNet-18's
-  convolution shapes at about 100 to 120 GFLOP/s per core, and furnace reaches about 380 GFLOP/s
-  on all cores. ONNX Runtime's MLAS uses hand-written convolution kernels on a blocked NCHWc
-  layout and never materializes im2col.
-- **Arithmetic.** 3×3 stride-1 convolutions are 3.0 of ResNet-18's 3.6 GFLOP. A Winograd
-  transform would cut their multiplies by 2.25× to 4×, but it needs the transformed weights cached
-  between calls, which burn-flex has no place for yet.
+- **No im2col in ONNX Runtime.** MLAS runs convolutions directly on a channel-blocked (NCHWc)
+  layout with weights packed once, near the core's peak FMA rate. furnace still copies each
+  input window into an im2col tile before the GEMM.
+- **The GEMM itself is not the problem.** The [`gemm`](https://crates.io/crates/gemm) crate runs
+  ResNet-18's shapes at 110 to 137 GFLOP/s on one core, about 80% of peak; hand-written AVX2 and
+  AVX-512 microkernels with pre-packed weights did not beat it.
+- **Winograd helps less than its FLOP count suggests.** F(2×2, 3×3) and F(4×4, 3×3) prototypes
+  were 1.45× faster single-threaded on the 3×3 layers, but at batch 1 with 16 threads the
+  Winograd GEMMs are too small to parallelize well. Only the 512-channel layers gained clearly
+  (about 1 ms in total), and those are the layers whose transformed weights cost the most memory
+  (about +50 MB, more than furnace's whole peak today).
 
 Ideas for closing the gap, roughly in order of payoff per effort:
 
-1. A Winograd path for 3×3 stride-1 convolutions, with the transformed weights cached per weight
-   tensor (memory grows by up to 4× for the layers it covers).
-2. Batch concurrent requests in the server, since batch 4 costs only about three times as much
+1. A direct 3×3 convolution on a channel-blocked layout with weights packed once, as MLAS does.
+2. Batch concurrent requests in the server, since batch 4 costs only about 2.7 times as much
    as batch 1.
-3. A direct convolution kernel on a blocked layout, as MLAS does.
+3. An opt-in Winograd F(2×2, 3×3) path for wide, small-spatial layers, for users who can spend
+   the memory.
 4. For GPU hosts, the wgpu backend; a discrete GPU or the CUDA backend should do much better
    than the integrated GPU measured here.
-5. An optional ONNX Runtime backend (behind a Cargo feature) would give MLAS speed for users
-   who accept a C++ dependency, while the default build stays pure Rust.
 
 Reproduce (the harness is its own Cargo workspace, so `ort` and `tract` never become furnace
 dependencies):

@@ -16,13 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Issue template for benchmark reports (`benches/compare` results on your hardware)
 
 ### Changed
-- CPU inference is about 2× faster again: ResNet-18 goes from 27.4 ms to 13.9 ms per image
-  (batch 4: 82.2 ms to 36.6 ms) on the benchmark laptop, against 6.2 ms / 20.4 ms for ONNX
-  Runtime. Peak private memory also drops, from 49 to 46 MB in process and from ~72 to 52 MB
-  for the server. Two changes in the vendored burn-flex:
+- CPU inference is about 2× faster again: ResNet-18 goes from 27.4 ms to about 14-15 ms per
+  image at batch 1 and from 82.2 ms to about 40 ms at batch 4 on the benchmark laptop. Peak
+  private memory also drops, from 49 to 46-48 MB in process and from ~72 to ~50 MB for the
+  server. Three changes in the vendored burn-flex:
   - Each 2D convolution is split into tasks of output positions × output channels, each filling
     a 128 KiB im2col tile in a reused per-thread buffer and running a single-threaded GEMM,
     instead of one large im2col buffer per call and one multithreaded GEMM
+  - Convolutions with many input channels build and multiply their im2col tiles one slice of
+    input channels at a time, so every GEMM gets at least 16 output positions. ResNet-18's
+    512-channel layers run 36% faster single-threaded (13.9 to 8.9 ms) and ~16% faster on
+    16 threads
   - Max pooling no longer computes the argmax index tensor it then discarded
 
 ## [0.5.0] - 2026-10-16
