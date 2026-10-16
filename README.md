@@ -20,7 +20,7 @@ CPU/GPU backend.
 - 🔀 **Runtime backend selection**: `--backend cpu|wgpu|metal|cuda` (Burn 0.22 `Device` API)
 - 📦 **Bring your own ONNX model**: drop `foo.onnx` in `models/`, rebuild, run
   `furnace --model-name foo`. No hand-written Rust
-- 🖼️ **ResNet-18 out of the box**: ImageNet classifier, ~13 ms per image on a laptop CPU
+- 🖼️ **ResNet-18 out of the box**: ImageNet classifier, ~14 ms per image on a laptop CPU
 - ⚡ **Binary I/O**: send raw `float32` (`application/octet-stream`) instead of JSON; ~1 ms of
   request overhead per ResNet-18 image
 - 📷 **Image input** (opt-in `--features image`): POST a JPEG or PNG and the server does the
@@ -379,28 +379,28 @@ Setup: AMD Ryzen 9 7940HS (8 cores / 16 threads, Radeon 780M iGPU), 30 GB RAM, W
 0.5.0) on Burn 0.22 (burn-flex CPU backend), tract-onnx 0.23.8, `ort` 2.0.0-rc.14 with ONNX
 Runtime 1.31 (the prebuilt binaries `ort` downloads). Each engine runs in its own process: 10
 warm-up runs, then 50 timed runs per batch size, one request at a time. Batch 4 is the same image
-four times. Every engine binary uses mimalloc as its global allocator, like the furnace server.
-Run-to-run variation on this laptop is about ±10%.
+four times. The table is the median of three such runs: single runs on this laptop vary by about
+±10%, and ONNX Runtime's batch 1 median ranged from 4.9 to 6.6 ms.
 
 | Engine | Threads | Batch 1 median / p95 | Batch 4 median / p95 | img/s (batch 1 / 4) |
 |---|---|---|---|---|
-| **furnace**, CPU | all (rayon) | 13.2 / 16.1 ms | 39.0 / 43.1 ms | 75.7 / 102.5 |
+| **furnace**, CPU | all (rayon) | 13.9 / 16.1 ms | 36.6 / 43.0 ms | 72.0 / 109.3 |
 | furnace 0.5.0 release, CPU | all (rayon) | 26.3 / 30.6 ms | 87.1 / 101.6 ms | 38.0 / 45.9 |
 | furnace 0.4.0 release, CPU | all (rayon) | 49.9 / 56.4 ms | 93.5 / 97.2 ms | 20.0 / 42.8 |
-| **furnace** server, HTTP binary I/O | all (rayon) | 13.2 / 14.9 ms | 41.2 / 61.3 ms | 75.5 / 97.1 |
+| **furnace** server, HTTP binary I/O | all (rayon) | 13.7 / 17.5 ms | 38.8 / 42.6 ms | 73.1 / 103.0 |
 | **furnace**, wgpu (Radeon 780M iGPU) | GPU | 41.4 / 46.5 ms | 137.9 / 149.2 ms | 24.2 / 29.0 |
-| tract | 1 | 40.4 / 43.8 ms | 334.1 / 358.8 ms | 24.7 / 12.0 |
-| tract | 16 | 13.2 / 15.6 ms | 115.2 / 130.0 ms | 75.7 / 34.7 |
-| ONNX Runtime | default (per physical core) | **7.7 / 8.4 ms** | **26.3 / 27.1 ms** | **130.0 / 152.1** |
-| ONNX Runtime | 1 | 27.3 / 29.3 ms | 131.6 / 134.6 ms | 36.6 / 30.4 |
+| tract | 1 | 45.5 / 49.1 ms | 326.0 / 353.3 ms | 22.0 / 12.3 |
+| tract | 16 | 18.2 / 20.4 ms | 204.5 / 213.2 ms | 54.8 / 19.6 |
+| ONNX Runtime | default (per physical core) | **6.2 / 7.5 ms** | **20.4 / 25.7 ms** | **160.1 / 196.5** |
+| ONNX Runtime | 1 | 26.6 / 28.2 ms | 101.3 / 105.1 ms | 37.5 / 39.5 |
 
 | Engine | Load | First inference | Peak working set | Peak private | Binary | Pure Rust |
 |---|---|---|---|---|---|---|
-| **furnace**, CPU | **1 ms** | 25 ms | **112 MB** | **108 MB** | **3.8 MB** + 46 MB `.bpk` | yes |
-| **furnace** server | 36 ms to healthy | 26 ms | 171 MB | 244 MB | 5.5 MB + 46 MB `.bpk` | yes |
+| **furnace**, CPU | **1 ms** | 28 ms | **80 MB** | **46 MB** | **3.7 MB** + 46 MB `.bpk` | yes |
+| **furnace** server | 26 ms to healthy | 28 ms | 81 MB | 52 MB | 5.5 MB + 46 MB `.bpk` | yes |
 | **furnace**, wgpu | 505 ms | 234 ms | 384 MB | 373 MB | 41.1 MB + 46 MB `.bpk` | yes |
-| tract (16 threads) | 149 ms | 17 ms | 218 MB | 263 MB | 18.6 MB + 47 MB `.onnx` | yes |
-| ONNX Runtime | 181 ms | 8 ms | 169 MB | 170 MB | 41.8 MB + 47 MB `.onnx` | no (C++) |
+| tract (16 threads) | 175 ms | 21 ms | 166 MB | 194 MB | 18.7 MB + 47 MB `.onnx` | yes |
+| ONNX Runtime | 122 ms | 8 ms | 151 MB | 137 MB | 41.7 MB + 47 MB `.onnx` | no (C++) |
 
 *Load* is reading the model until it is ready to run; for the server it is the time from
 spawning the process to the first successful `/healthz`. *Peak private* is the peak commit
@@ -408,29 +408,22 @@ charge, i.e. memory that belongs to this process alone. furnace memory-maps its 
 46 MB of weights count towards the working set but not towards private memory. *Binary* is a
 minimal benchmark executable that links only that engine, built with the same profile. ONNX
 Runtime is linked statically, but on Windows `ort` ships the DirectML build, which loads an
-18.5 MB `DirectML.dll` even on the CPU path. That DLL is included in the 41.8 MB.
+18.5 MB `DirectML.dll` even on the CPU path. That DLL is included in the 41.7 MB.
 
-**ONNX Runtime is 1.7× faster than furnace at batch 1 and 1.5× faster at batch 4** (down from
-3.5× and 3.0× in 0.5.0). tract with 16 threads matches furnace at batch 1, and furnace is 3× faster
-than tract at batch 4. furnace still loads in about a millisecond and has the smallest binary.
-Over HTTP with binary bodies it adds 1 to 4 ms to in-process inference.
+**ONNX Runtime is 2.2× faster than furnace at batch 1 and 1.8× faster at batch 4** (3.5× and
+3.0× in 0.5.0). furnace beats tract with 16 threads at batch 1 and is 5.6× faster at batch 4.
+furnace loads in about a millisecond, has the smallest binary, and uses the least memory. Over
+HTTP with binary bodies it adds 1 to 3 ms to in-process inference.
 
-The price of the faster allocator is committed memory: mimalloc keeps per-thread heaps, so the
-server's peak private memory rose from 72 MB to about 250 MB (working set 105 MB to about
-175 MB), most of it committed but rarely touched.
+What changed since 0.5.0 (the API is the same; both changes are in the vendored burn-flex):
 
-What changed since 0.5.0 (the API is the same):
-
-- **mimalloc as the global allocator.** Windows' default heap returns every large block to the
-  OS when it is freed and page-faults it back in on the next allocation. A ResNet-18 forward pass
-  frees several multi-megabyte buffers per convolution, and that churn was a third of CPU
-  inference time: batch 1 went from 27.4 ms to 18.2 ms with no other change.
 - **Convolutions split into cache-sized tasks.** The patched burn-flex used to build one im2col
-  buffer per convolution (up to 16 MiB) and hand it to one multithreaded GEMM, which scaled
-  poorly on the 14×14 and 7×7 layers. Each convolution is now split into tasks of output
-  positions × output channels; every task builds a 128 KiB im2col tile in a reused per-thread
-  buffer and runs a single-threaded GEMM on it. Batch 1 went from 18.2 ms to about 13.5 ms,
-  batch 4 from 63.5 ms to about 40 ms.
+  buffer per convolution (up to 16 MiB) and hand it to one multithreaded GEMM. Allocating,
+  zeroing and freeing that buffer was expensive on Windows, whose heap returns large blocks to
+  the OS and page-faults them back in, and the GEMM scaled poorly on the 14×14 and 7×7 layers.
+  Each convolution is now split into tasks of output positions × output channels; every task
+  fills a 128 KiB im2col tile in a per-thread scratch buffer that is reused across calls, and
+  runs a single-threaded GEMM on it. Batch 1 went from 27.4 ms to about 14 ms.
 - **Max pooling without indices.** burn-flex computed (and threw away) the argmax index tensor
   on every max pool. Skipping it makes ResNet-18's max pool about 40% faster (0.8 to 0.5 ms).
 
@@ -517,9 +510,10 @@ Other numbers:
 - **Startup**: ~40 ms from launch to a healthy `/healthz`, including mapping the 46 MB weight
   file. On Windows, a client that polls the port before the server listens can see ~0.5 s
   instead: a connect to a closed port retries for about that long before it fails.
-- **Binary size**: ~5.4 MB (+ 46 MB `resnet18.bpk`)
-- **Memory**: ~59 MB working set and ~21 MB private memory after 3 `/predict` calls (single
-  threaded before this release: ~52 MB and ~4 MB; the difference is per-thread buffers). The
+- **Binary size**: ~5.5 MB (+ 46 MB `resnet18.bpk`)
+- **Memory**: ~60 MB working set and ~25 MB private memory after 3 batch-1 `/predict` calls; the
+  peak during the batch-4 benchmark above is 81 MB and 52 MB. (The single-threaded build used
+  ~52 MB and ~4 MB; the difference is per-thread buffers.) The
   weight file is memory-mapped and tensors use its pages directly, so the 46 MB of ResNet-18
   weights are shared, file-backed pages that the OS can drop and reload under pressure and
   that multiple server processes share. In the single-threaded build, reading the weights into
