@@ -637,7 +637,7 @@ where
     //
     // SAFETY: `out` must point to the output buffer, and no other task may write the same
     // block concurrently.
-    let run_task = |col: &mut Vec<T>, task: usize, out: *mut T| {
+    let run_task = |col: &mut [T], task: usize, out: *mut T| {
         let image = task / (tiles * channel_blocks);
         let start = (task / channel_blocks) % tiles * tile;
         let c_start = task % channel_blocks * block;
@@ -649,9 +649,6 @@ where
         let w_block = &w[(g * c_out_group + c_start) * col_len..][..m * col_len];
 
         // Every element of the tile is written below, so a reused buffer needs no clearing
-        if col.len() < col_len * n {
-            col.resize(col_len * n, zero);
-        }
         let col = &mut col[..col_len * n];
         for (row_idx, row) in col.chunks_mut(n).enumerate() {
             let c = row_idx / (kernel_h * kernel_w);
@@ -702,20 +699,46 @@ where
         use rayon::prelude::*;
         let out = crate::ops::SendMutPtr::new(output.as_mut_ptr());
         // SAFETY: each task index maps to a distinct output block
-        (0..tasks)
-            .into_par_iter()
-            .for_each_init(Vec::new, |col, task| unsafe {
+        (0..tasks).into_par_iter().for_each(|task| {
+            with_scratch(col_len * tile, |col| unsafe {
                 run_task(col, task, out.ptr_add(0))
-            });
+            })
+        });
     }
     #[cfg(not(feature = "rayon"))]
     {
-        let mut col = Vec::new();
+        let mut col = vec![zero; col_len * tile];
         for task in 0..tasks {
             run_task(&mut col, task, output.as_mut_ptr());
         }
     }
     output
+}
+
+/// Runs `f` on a scratch buffer of `len` elements whose contents are unspecified.
+///
+/// With `std`, each thread keeps one buffer and reuses it across calls, so the convolution tasks
+/// neither allocate nor zero memory once the buffer has grown to the largest tile.
+#[cfg(all(feature = "rayon", feature = "std"))]
+fn with_scratch<T: bytemuck::Pod, R>(len: usize, f: impl FnOnce(&mut [T]) -> R) -> R {
+    use core::cell::RefCell;
+
+    std::thread_local! {
+        // u64 words, so the buffer is aligned for every element type
+        static SCRATCH: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    }
+    SCRATCH.with_borrow_mut(|buf| {
+        let words = (len * core::mem::size_of::<T>()).div_ceil(8);
+        if buf.len() < words {
+            buf.resize(words, 0);
+        }
+        f(&mut bytemuck::cast_slice_mut::<u64, T>(&mut buf[..words])[..len])
+    })
+}
+
+#[cfg(all(feature = "rayon", not(feature = "std")))]
+fn with_scratch<T: bytemuck::Pod, R>(len: usize, f: impl FnOnce(&mut [T]) -> R) -> R {
+    f(&mut vec![T::zeroed(); len])
 }
 
 /// Fill one im2col row for output positions `start..start + row.len()`: the input plane value
