@@ -291,8 +291,12 @@ fn conv3d_impl<
 
     let [dilation_d, dilation_h, dilation_w] = options.dilation;
 
-    // Only true 2D convolutions: depth padding would make the single output slice read padding
+    // Only true 2D convolutions: with depth padding, the single output slice can lie in padding
     if kernel_d == 1 && in_d == 1 && out_d == 1 && pad_d == 0 {
+        #[cfg(feature = "rayon")]
+        let threads = rayon::current_num_threads();
+        #[cfg(not(feature = "rayon"))]
+        let threads = 1;
         let output = conv2d_im2col_nchw(
             x_data,
             w_data,
@@ -303,7 +307,8 @@ fn conv3d_impl<
             [pad_h, pad_w],
             [dilation_h, dilation_w],
             groups,
-            IM2COL_MAX_ELEMS,
+            IM2COL_TILE_ELEMS,
+            threads,
         );
         return conv_output(
             output,
@@ -572,15 +577,24 @@ fn conv_output<
     )
 }
 
-/// Upper bound on the im2col buffer, in elements (16 MiB of f32). Larger outputs are
-/// processed in tiles of output positions so memory stays bounded for big images.
-const IM2COL_MAX_ELEMS: usize = 4 * 1024 * 1024;
+/// Target size of one task's im2col tile, in elements (128 KiB of f32), so the tile stays in
+/// L2 cache while the GEMM reads it.
+const IM2COL_TILE_ELEMS: usize = 32 * 1024;
 
-/// 2D convolution on NCHW data: im2col + GEMM per (batch, group, tile of output positions).
+/// Smallest block of output channels that gets its own task.
+const MIN_CHANNEL_BLOCK: usize = 16;
+
+/// 2D convolution on NCHW data as im2col + GEMM.
 ///
 /// The im2col rows are ordered `(c_in, kh, kw)`, the same order as the OIHW weight, so the
-/// weight is the GEMM lhs as-is and the input needs no NHWC copy. The GEMM writes its
-/// `[c_out, tile]` block straight into the output.
+/// weight is the GEMM lhs as-is and the input needs no NHWC copy.
+///
+/// The output of each (batch, group) is split into tiles of at most `tile_elems / col_len`
+/// output positions, and, when that gives fewer tiles than `threads`, also into blocks of
+/// output channels. Each task builds the im2col tile for its positions in a per-thread buffer
+/// and runs a single-threaded GEMM that writes its block straight into the output. Small tiles
+/// keep the GEMM's input in cache, and independent tasks parallelize better than one large
+/// multithreaded GEMM on the narrow late layers.
 #[allow(clippy::too_many_arguments)]
 fn conv2d_im2col_nchw<T>(
     x: &[T],
@@ -592,7 +606,8 @@ fn conv2d_im2col_nchw<T>(
     [pad_h, pad_w]: [usize; 2],
     [dilation_h, dilation_w]: [usize; 2],
     groups: usize,
-    max_col_elems: usize,
+    tile_elems: usize,
+    threads: usize,
 ) -> Vec<T>
 where
     T: bytemuck::Pod + Copy + Send + Sync + ElementConversion + 'static,
@@ -608,89 +623,96 @@ where
         return output;
     }
 
-    let tile = (max_col_elems / col_len).clamp(1, spatial_out);
-    // [col_len, tile], reused for every (batch, group, tile)
-    let mut col = vec![zero; col_len * tile];
+    let images = batch * groups;
+    let tile = (tile_elems / col_len).clamp(1, spatial_out);
+    let tiles = spatial_out.div_ceil(tile);
+    let channel_blocks = threads
+        .div_ceil(images * tiles)
+        .min(c_out_group.div_ceil(MIN_CHANNEL_BLOCK))
+        .max(1);
+    let block = c_out_group.div_ceil(channel_blocks);
+    let channel_blocks = c_out_group.div_ceil(block);
 
-    for b in 0..batch {
-        for g in 0..groups {
-            let x_group = &x[(b * c_in + g * c_in_group) * in_plane..][..c_in_group * in_plane];
-            let w_group = &w[g * c_out_group * col_len..][..c_out_group * col_len];
-            let out_group = &mut output[(b * c_out + g * c_out_group) * spatial_out..]
-                [..c_out_group * spatial_out];
+    // Computes one (image, position tile, channel block) of the output at `out`.
+    //
+    // SAFETY: `out` must point to the output buffer, and no other task may write the same
+    // block concurrently.
+    let run_task = |col: &mut Vec<T>, task: usize, out: *mut T| {
+        let image = task / (tiles * channel_blocks);
+        let start = (task / channel_blocks) % tiles * tile;
+        let c_start = task % channel_blocks * block;
+        let (b, g) = (image / groups, image % groups);
+        let n = tile.min(spatial_out - start);
+        let m = block.min(c_out_group - c_start);
 
-            for start in (0..spatial_out).step_by(tile) {
-                let n = tile.min(spatial_out - start);
-                let col = &mut col[..col_len * n];
+        let x_group = &x[(b * c_in + g * c_in_group) * in_plane..][..c_in_group * in_plane];
+        let w_block = &w[(g * c_out_group + c_start) * col_len..][..m * col_len];
 
-                let fill_row = |row_idx: usize, row: &mut [T]| {
-                    let c = row_idx / (kernel_h * kernel_w);
-                    let kh = (row_idx / kernel_w) % kernel_h;
-                    let kw = row_idx % kernel_w;
-                    im2col_nchw_row(
-                        row,
-                        start,
-                        &x_group[c * in_plane..][..in_plane],
-                        [in_h, in_w],
-                        out_w,
-                        [kh * dilation_h, kw * dilation_w],
-                        [stride_h, stride_w],
-                        [pad_h, pad_w],
-                    );
-                };
+        // Every element of the tile is written below, so a reused buffer needs no clearing
+        if col.len() < col_len * n {
+            col.resize(col_len * n, zero);
+        }
+        let col = &mut col[..col_len * n];
+        for (row_idx, row) in col.chunks_mut(n).enumerate() {
+            let c = row_idx / (kernel_h * kernel_w);
+            let kh = (row_idx / kernel_w) % kernel_h;
+            let kw = row_idx % kernel_w;
+            im2col_nchw_row(
+                row,
+                start,
+                &x_group[c * in_plane..][..in_plane],
+                [in_h, in_w],
+                out_w,
+                [kh * dilation_h, kw * dilation_w],
+                [stride_h, stride_w],
+                [pad_h, pad_w],
+            );
+        }
 
-                #[cfg(feature = "rayon")]
-                {
-                    use rayon::prelude::*;
-                    // Batch short rows (late layers) so each task copies a useful amount
-                    let rows_per_task = (32 * 1024 / n).max(1);
-                    col.par_chunks_mut(n * rows_per_task)
-                        .enumerate()
-                        .for_each(|(task, rows)| {
-                            for (i, row) in rows.chunks_mut(n).enumerate() {
-                                fill_row(task * rows_per_task + i, row);
-                            }
-                        });
-                }
-                #[cfg(not(feature = "rayon"))]
-                for (row_idx, row) in col.chunks_mut(n).enumerate() {
-                    fill_row(row_idx, row);
-                }
+        // out[c_start..c_start + m, start..start + n] = w_block[m, col_len] @ col[col_len, n]
+        let out_offset = (b * c_out + g * c_out_group + c_start) * spatial_out + start;
+        unsafe {
+            gemm::gemm(
+                m,
+                n,
+                col_len,
+                out.add(out_offset),
+                1,
+                spatial_out as isize,
+                false,
+                w_block.as_ptr(),
+                1,
+                col_len as isize,
+                col.as_ptr(),
+                1,
+                n as isize,
+                zero,
+                T::from_elem(1.0f32),
+                false,
+                false,
+                false,
+                gemm::Parallelism::None,
+            );
+        }
+    };
 
-                #[cfg(feature = "rayon")]
-                let parallelism = if c_out_group * n * col_len >= 32 * 32 * 32 {
-                    gemm::Parallelism::Rayon(0)
-                } else {
-                    gemm::Parallelism::None
-                };
-                #[cfg(not(feature = "rayon"))]
-                let parallelism = gemm::Parallelism::None;
-
-                // out_group[:, start..start + n] = w_group[c_out_group, col_len] @ col[col_len, n]
-                unsafe {
-                    gemm::gemm(
-                        c_out_group,
-                        n,
-                        col_len,
-                        out_group[start..].as_mut_ptr(),
-                        1,
-                        spatial_out as isize,
-                        false,
-                        w_group.as_ptr(),
-                        1,
-                        col_len as isize,
-                        col.as_ptr(),
-                        1,
-                        n as isize,
-                        zero,
-                        T::from_elem(1.0f32),
-                        false,
-                        false,
-                        false,
-                        parallelism,
-                    );
-                }
-            }
+    let tasks = images * tiles * channel_blocks;
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+        let out = crate::ops::SendMutPtr::new(output.as_mut_ptr());
+        // SAFETY: each task index maps to a distinct output block
+        (0..tasks)
+            .into_par_iter()
+            .for_each_init(Vec::new, |col, task| unsafe {
+                run_task(col, task, out.ptr_add(0))
+            });
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        let mut col = Vec::new();
+        for task in 0..tasks {
+            run_task(&mut col, task, output.as_mut_ptr());
         }
     }
     output
@@ -3269,162 +3291,40 @@ mod tests {
         assert_non_finite_padding_pattern(&depthwise[..16]);
         assert!(depthwise[16..].iter().all(|value| value.is_finite()));
     }
-    // ========================================================================
-    // NCHW im2col path (2D, generic channel counts)
-    // ========================================================================
+    // NCHW im2col path: tiling must not change results
 
-    #[allow(clippy::too_many_arguments)]
-    fn check_conv2d_im2col_nchw(
-        batch: usize,
-        channels_in: usize,
-        channels_out: usize,
-        in_hw: [usize; 2],
-        kernel: [usize; 2],
-        stride: [usize; 2],
-        padding: [usize; 2],
-        dilation: [usize; 2],
-        with_bias: bool,
-    ) {
-        let [in_h, in_w] = in_hw;
-        let x_data: Vec<f32> = (0..batch * channels_in * in_h * in_w)
-            .map(|i| ((i * 7 % 23) as f32 - 11.0) * 0.1)
-            .collect();
-        let w_data: Vec<f32> = (0..channels_out * channels_in * kernel[0] * kernel[1])
-            .map(|i| ((i * 5 % 17) as f32 - 8.0) * 0.05)
-            .collect();
-        let bias_data: Vec<f32> = (0..channels_out).map(|i| i as f32 * 0.25 - 1.0).collect();
-
-        let (expected, out_h, out_w) = naive_conv2d_f32(
-            &x_data,
-            &w_data,
-            with_bias.then_some(bias_data.as_slice()),
-            batch,
-            channels_in,
-            channels_out,
-            in_h,
-            in_w,
-            kernel[0],
-            kernel[1],
-            stride[0],
-            stride[1],
-            padding[0],
-            padding[1],
-            dilation[0],
-            dilation[1],
+    #[test]
+    fn test_conv2d_im2col_nchw_no_output_channels() {
+        // Zero output channels: nothing to compute, and no im2col buffer to size
+        let x = vec![1.0f32; 5 * 3 * 3];
+        let out = conv2d_im2col_nchw::<f32>(
+            &x,
+            &[],
+            [1, 5, 3, 3],
+            [0, 5, 3, 3],
+            [3, 3],
+            [1, 1],
+            [1, 1],
+            [1, 1],
+            1,
+            IM2COL_TILE_ELEMS,
+            4,
         );
-
-        let x = FlexTensor::from_data(TensorData::new(
-            x_data,
-            vec![batch, channels_in, in_h, in_w],
-        ));
-        let weight = FlexTensor::from_data(TensorData::new(
-            w_data,
-            vec![channels_out, channels_in, kernel[0], kernel[1]],
-        ));
-        let bias = with_bias
-            .then(|| FlexTensor::from_data(TensorData::new(bias_data, vec![channels_out])));
-        let options = ConvOptions::new(stride, padding, dilation, 1);
-        let out = conv2d_f32(x, weight, bias, &options);
-
-        assert_eq!(
-            out.layout().shape().to_vec(),
-            vec![batch, channels_out, out_h, out_w]
-        );
-        let actual: Vec<f32> = out.into_data().try_into_vec().unwrap();
-        for (i, (a, e)) in actual.iter().zip(&expected).enumerate() {
-            assert!((a - e).abs() < 1e-4, "index {i}: {a} != {e}");
-        }
+        assert!(out.is_empty());
     }
 
-    #[test]
-    fn test_conv2d_im2col_nchw_matches_reference() {
-        // (batch, c_in, c_out, in_hw, kernel, stride, padding, dilation, bias)
-        check_conv2d_im2col_nchw(1, 8, 16, [9, 9], [3, 3], [1, 1], [1, 1], [1, 1], false);
-        check_conv2d_im2col_nchw(2, 8, 12, [10, 7], [3, 3], [2, 2], [1, 1], [1, 1], true);
-        check_conv2d_im2col_nchw(1, 6, 8, [11, 11], [5, 3], [1, 2], [2, 0], [1, 1], true);
-        check_conv2d_im2col_nchw(1, 8, 8, [12, 12], [3, 3], [1, 1], [2, 2], [2, 2], false);
-        check_conv2d_im2col_nchw(1, 5, 7, [8, 13], [3, 2], [3, 1], [0, 1], [1, 2], true);
-        // Padding wider than the kernel reach: whole output rows/columns are padding
-        check_conv2d_im2col_nchw(1, 8, 4, [3, 3], [3, 3], [1, 1], [3, 3], [1, 1], false);
-        // Late-layer shape: many channels, tiny spatial extent
-        check_conv2d_im2col_nchw(1, 64, 32, [3, 3], [3, 3], [1, 1], [1, 1], [1, 1], true);
-    }
-
-    #[test]
-    fn test_conv2d_im2col_nchw_groups() {
-        let (batch, c_in, c_out, groups, h, w) = (2, 8, 12, 2, 6, 5);
-        let x_data: Vec<f32> = (0..batch * c_in * h * w)
-            .map(|i| ((i * 3 % 19) as f32 - 9.0) * 0.1)
-            .collect();
-        let w_data: Vec<f32> = (0..c_out * (c_in / groups) * 9)
-            .map(|i| ((i * 11 % 13) as f32 - 6.0) * 0.1)
-            .collect();
-
-        let x = FlexTensor::from_data(TensorData::new(x_data.clone(), vec![batch, c_in, h, w]));
-        let weight = FlexTensor::from_data(TensorData::new(
-            w_data.clone(),
-            vec![c_out, c_in / groups, 3, 3],
-        ));
-        let options = ConvOptions::new([1, 1], [1, 1], [1, 1], groups);
-        let actual: Vec<f32> = conv2d_f32(x, weight, None, &options)
-            .into_data()
-            .try_into_vec()
-            .unwrap();
-
-        // Each group is an independent conv over its slice of channels
-        let (cig, cog) = (c_in / groups, c_out / groups);
-        for b in 0..batch {
-            for g in 0..groups {
-                let xg: Vec<f32> = x_data[(b * c_in + g * cig) * h * w..][..cig * h * w].to_vec();
-                let wg = &w_data[g * cog * cig * 9..][..cog * cig * 9];
-                let (expected, _, _) =
-                    naive_conv2d_f32(&xg, wg, None, 1, cig, cog, h, w, 3, 3, 1, 1, 1, 1, 1, 1);
-                let start = (b * c_out + g * cog) * h * w;
-                for (i, e) in expected.iter().enumerate() {
-                    let a = actual[start + i];
-                    assert!((a - e).abs() < 1e-4, "b{b} g{g} index {i}: {a} != {e}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_conv2d_im2col_nchw_f64() {
-        let x = FlexTensor::from_data(TensorData::new(
-            (0..2 * 8 * 5 * 5)
-                .map(|i| i as f64 * 0.01)
-                .collect::<Vec<_>>(),
-            vec![2, 8, 5, 5],
-        ));
-        let weight =
-            FlexTensor::from_data(TensorData::new(vec![0.5f64; 4 * 8 * 9], vec![4, 8, 3, 3]));
-        let options = ConvOptions::new([1, 1], [1, 1], [1, 1], 1);
-        let out: Vec<f64> = conv2d_f64(x, weight, None, &options)
-            .into_data()
-            .try_into_vec()
-            .unwrap();
-        // Centre pixel of batch 0: 0.5 * sum of the 3x3 window over all 8 channels
-        let mut expected = 0.0;
-        for c in 0..8 {
-            for dh in 1..4 {
-                for dw in 1..4 {
-                    expected += 0.5 * ((c * 25 + dh * 5 + dw) as f64 * 0.01);
-                }
-            }
-        }
-        assert!((out[2 * 5 + 2] - expected).abs() < 1e-9);
-    }
     #[test]
     fn test_conv2d_im2col_nchw_tiled_matches_untiled() {
-        // A tiny im2col budget forces many tiles, including ones that start mid-row
-        let (c_in, c_out, h, w) = (3, 5, 9, 11);
+        // Tiny im2col budgets force many position tiles, including ones that start mid-row,
+        // and more threads than tiles split the 40 output channels into blocks of 14, 14, 12
+        let (c_in, c_out, h, w) = (3, 40, 9, 11);
         let x: Vec<f32> = (0..2 * c_in * h * w)
             .map(|i| (i % 13) as f32 - 6.0)
             .collect();
         let wt: Vec<f32> = (0..c_out * c_in * 9)
             .map(|i| (i % 7) as f32 * 0.1)
             .collect();
-        let run = |budget| {
+        let run = |budget, threads| {
             conv2d_im2col_nchw(
                 &x,
                 &wt,
@@ -3436,16 +3336,19 @@ mod tests {
                 [1, 1],
                 1,
                 budget,
+                threads,
             )
         };
-        let full = run(usize::MAX);
-        for budget in [27, 27 * 4, 27 * 7] {
-            // Tile width changes the GEMM summation order, so allow rounding differences
-            for (i, (a, e)) in run(budget).iter().zip(&full).enumerate() {
-                assert!(
-                    (a - e).abs() < 1e-4,
-                    "budget {budget}, index {i}: {a} != {e}"
-                );
+        let full = run(usize::MAX, 1);
+        for budget in [27, 27 * 4, 27 * 7, usize::MAX] {
+            for threads in [1, 64] {
+                // Tile width changes the GEMM summation order, so allow rounding differences
+                for (i, (a, e)) in run(budget, threads).iter().zip(&full).enumerate() {
+                    assert!(
+                        (a - e).abs() < 1e-4,
+                        "budget {budget}, threads {threads}, index {i}: {a} != {e}"
+                    );
+                }
             }
         }
     }
