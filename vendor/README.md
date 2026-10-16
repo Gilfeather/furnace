@@ -2,12 +2,14 @@
 
 ## burn-flex
 
-`burn-flex` 0.22.0 (Burn's CPU backend) with one patch to `src/ops/conv.rs`: 2D convolutions
-build im2col directly from the NCHW input in the weight's own `(c_in, kh, kw)` order, instead of
-re-laying out the weight and the input on every call. ResNet-18 on CPU goes from ~57 ms to
-~27 ms per image.
+`burn-flex` 0.22.0 (Burn's CPU backend) with one patched file, `src/ops/conv.rs`. 2D
+convolutions build im2col directly from the NCHW input in the weight's own `(c_in, kh, kw)`
+order, instead of re-laying out the weight and the input on every call. The work is split into
+small tasks (a tile of output positions by a block of output channels), each building its own
+cache-sized im2col tile and running a single-threaded GEMM. ResNet-18 on CPU goes from ~57 ms
+to ~14 ms per image (together with mimalloc in the server).
 
-The patch is proposed upstream in tracel-ai/burn. Once a Burn release includes it, delete this
+The changes are proposed upstream in tracel-ai/burn. Once a Burn release includes them, delete this
 directory and the `[patch.crates-io]` entries in `Cargo.toml` and `benches/compare/Cargo.toml`.
 
 To check the vendored copy against upstream:
