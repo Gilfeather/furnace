@@ -76,12 +76,6 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # Error Handling
 thiserror = "2.0"
 
-# Global allocator for the server binary. Windows' default heap returns every large block
-# (activations, GEMM packing buffers) to the OS on free and page-faults it back in on the
-# next allocation; on ResNet-18 that costs ~4 ms per image. v2 because v3 commits about
-# twice as much memory once every rayon worker allocates.
-mimalloc = { version = "0.1", features = ["v2"] }
-
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 
