@@ -291,7 +291,8 @@ fn conv3d_impl<
 
     let [dilation_d, dilation_h, dilation_w] = options.dilation;
 
-    if kernel_d == 1 && in_d == 1 && out_d == 1 {
+    // Only true 2D convolutions: depth padding would make the single output slice read padding
+    if kernel_d == 1 && in_d == 1 && out_d == 1 && pad_d == 0 {
         let output = conv2d_im2col_nchw(
             x_data,
             w_data,

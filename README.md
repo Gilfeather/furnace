@@ -64,7 +64,7 @@ the generated `resnet18.bpk` automatically.
 ```
 
 ```
-INFO 🔥 Starting furnace inference server version="0.4.0"
+INFO 🔥 Starting furnace inference server version="0.5.0"
 INFO 📦 Loading model model_name=Some("resnet18") backend=cpu
 INFO ✅ Model loaded successfully model_name=resnet18 input_shape=[3, 224, 224] output_shape=[1000] backend=cpu model_type=onnx
 INFO 🚦 Concurrency limit set to 100 inferences
@@ -375,7 +375,7 @@ Rust (resize to 256, center crop 224, ImageNet normalization). Every engine retu
 The furnace server and wgpu rows were measured with the 0.4.0 release.
 
 Setup: AMD Ryzen 9 7940HS (8 cores / 16 threads, Radeon 780M iGPU), 30 GB RAM, Windows 11 Pro
-(build 26200), Rust 1.99.0, release builds with fat LTO. Versions: furnace 0.4.0 on Burn 0.22
+(build 26200), Rust 1.99.0, release builds with fat LTO. Versions: furnace 0.5.0 on Burn 0.22
 (burn-flex CPU backend), tract-onnx 0.23.8, `ort` 2.0.0-rc.14 with ONNX Runtime 1.31 (the
 prebuilt binaries `ort` downloads). Each engine runs in its own process: 10 warm-up runs,
 then 50 timed runs per batch size, one request at a time. Batch 4 is the same image four times.
