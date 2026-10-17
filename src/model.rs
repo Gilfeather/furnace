@@ -434,6 +434,12 @@ impl Model {
     }
 
     /// One forward pass over validated input; the error is the failure message
+    /// Continue `previous`'s statistics, so a reloaded model's counters do not restart at zero
+    pub fn adopt_stats(&self, previous: &Model) {
+        let carried = previous.get_stats();
+        *self.stats.lock().unwrap_or_else(|e| e.into_inner()) = carried;
+    }
+
     /// Run one all-zero input through the model without touching the statistics, so the first
     /// real request does not pay for lazy initialization (weight transforms, buffer pools,
     /// page faults on the memory-mapped weights). Returns how long it took.

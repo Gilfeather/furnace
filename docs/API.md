@@ -6,10 +6,12 @@ The same API as an OpenAPI 3 spec: [openapi.json](openapi.json).
 | Endpoint | Purpose |
 |---|---|
 | `GET /healthz` (alias `/health`) | Liveness: the process is up |
-| `GET /readyz` | Readiness: the warm-up inference has run |
+| `GET /readyz` | Readiness: every model's warm-up inference has run |
 | `GET /metrics` | Request, error and latency counters |
 | `GET /model/info` | Input and output shapes, backend, per-model statistics |
 | `POST /predict` | Inference: JSON, raw `float32`, or (with `--features image`) a JPEG/PNG |
+| `GET /models`, `GET /models/{model}`, `POST /models/{model}/predict` | The same, per model, when serving several |
+| `POST /admin/models/{model}/reload` | Reload a model without downtime (with `--admin-token`) |
 | `/v2/...` | The same inference over the KServe / Triton Open Inference Protocol |
 
 ## `GET /healthz` (alias `GET /health`)
@@ -259,6 +261,53 @@ inp.set_data_from_numpy(x)
 logits = client.infer("resnet18", [inp]).as_numpy("output")
 ```
 
+## Several models
+
+`--model-name resnet18,mnist` (or the option repeated, or `name = ["resnet18", "mnist"]` in the
+config file) serves both from one process, sharing the threads and the
+`--max-concurrent-requests` limit; each model has its own batching queue. `--model-path` can be
+repeated the same way. The first model is the default: `/predict` and `/model/info` use it.
+
+```bash
+curl localhost:3000/models
+# {"default_model":"resnet18","models":[{"name":"resnet18","ready":true,"input_shape":[3,224,224],...},
+#                                       {"name":"mnist","ready":true,"input_shape":[1,28,28],...}]}
+curl -X POST localhost:3000/models/mnist/predict -H 'Content-Type: application/json' -d @mnist.json
+curl localhost:3000/models/mnist              # as /model/info
+```
+
+`/models/{model}/predict` takes everything `/predict` does. The v2 protocol (HTTP and gRPC)
+addresses the models by name. `/metrics` reports totals and a `models` list; the Prometheus
+format labels the per-model series with `model="..."`.
+
+## Reloading a model
+
+With `--admin-token <TOKEN>` (or `FURNACE_ADMIN_TOKEN`, which keeps it out of the process list;
+at least 16 characters), the server accepts:
+
+```bash
+curl -X POST localhost:3000/admin/models/resnet18/reload -H "Authorization: Bearer $TOKEN"
+# {"model":"resnet18","weights":null,"reload_ms":15.0,"warm_up_ms":14.3,"timestamp":"..."}
+
+# New weights, e.g. after fine-tuning
+curl -X POST localhost:3000/admin/models/resnet18/reload -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"weights": "/srv/models/resnet18-v2.bpk"}'
+```
+
+The new model is loaded and warmed up next to the serving one, then swapped in; requests already
+running finish on the previous model, so none fail or wait. The model must keep its name and
+input and output shapes, and its statistics carry over. If loading fails, the previous model
+keeps serving and the response says why. `weights` is a `.bpk` file for a built-in model, or
+another model path for a `--model-path` model; the path is read on the server.
+
+| Status | `code` | Cause |
+|---|---|---|
+| 404 | `ADMIN_API_DISABLED` | Started without `--admin-token` |
+| 401 | `UNAUTHORIZED` | Missing or wrong `Authorization: Bearer` token |
+| 404 | `MODEL_NOT_FOUND` | No such model |
+| 409 | `RELOAD_IN_PROGRESS` | The model is being reloaded already |
+| 422 | `RELOAD_FAILED` | Loading or warming up failed; the previous model is still serving |
+
 ## Request IDs and logs
 
 Every response, errors included, has an `X-Request-Id` header. Send your own (1-128 visible
@@ -292,6 +341,7 @@ Errors share one shape:
 | 400 | `INPUT_VALIDATION_FAILED` | Wrong number of values (or bytes, for binary input) for the model |
 | 400 | `INVALID_INPUT_VALUE` | NaN or infinite value |
 | 400 | `BATCH_TOO_LARGE` | More than 1000 items |
+| 404 | `MODEL_NOT_FOUND` | `/models/{model}/...` names a model the server does not serve |
 | 413 | `INVALID_REQUEST` | Body larger than `--max-body-mb` |
 | 503 | `SERVER_BUSY` | All `--max-concurrent-requests` slots in use; retry later |
 | 504 | `INFERENCE_TIMEOUT` | Exceeded `--request-timeout-ms` |

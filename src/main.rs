@@ -1,8 +1,9 @@
 use clap::{Arg, ArgGroup, Command};
 use std::ffi::OsString;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{Level, error, info, warn};
 use uuid::Uuid;
@@ -16,9 +17,12 @@ static ALLOCATOR: furnace::allocator::BlockCache = furnace::allocator::BlockCach
 
 #[derive(Debug)]
 struct CliArgs {
-    model_name: Option<String>,
-    model_path: Option<PathBuf>,
+    /// Built-in models to serve; the first is the default one
+    model_names: Vec<String>,
+    /// File-based models to serve (instead of built-in ones)
+    model_paths: Vec<PathBuf>,
     weights: Option<PathBuf>,
+    admin_token: Option<String>,
     host: String,
     port: u16,
     backend: BackendKind,
@@ -48,6 +52,7 @@ fn build_cli() -> Command {
             furnace --model-name resnet18 --port 3000\n  \
             furnace --model-name resnet18 --weights ./resnet18-finetuned.bpk\n  \
             furnace --model-name resnet18 --backend wgpu --host 0.0.0.0\n  \
+            furnace --model-name resnet18,mnist --admin-token \"$TOKEN\"\n  \
             furnace --model-path ./sample_model --max-concurrent-requests 8\n  \
             furnace --config furnace.toml --port 8080",
         )
@@ -67,8 +72,11 @@ fn build_cli() -> Command {
                 .long("model-name")
                 .short('m')
                 .value_name("NAME")
+                .action(clap::ArgAction::Append)
+                .value_delimiter(',')
                 .help(format!(
-                    "Built-in model compiled into the binary from models/<NAME>.onnx (default: the only one, if there is just one). {}",
+                    "Built-in model compiled into the binary from models/<NAME>.onnx (default: the only one, if there is just one). \
+                    Several (comma-separated or repeated) are served side by side, the first by /predict. {}",
                     BuiltInModel::describe_available()
                 )),
         )
@@ -76,7 +84,11 @@ fn build_cli() -> Command {
             Arg::new("model-path")
                 .long("model-path")
                 .value_name("PATH")
-                .help("File-based Burn model: <PATH>.bpk weights + <PATH>.json metadata")
+                .action(clap::ArgAction::Append)
+                .help(
+                    "File-based Burn model: <PATH>.bpk weights + <PATH>.json metadata; repeat to \
+                    serve several, the first by /predict",
+                )
                 .value_parser(clap::value_parser!(PathBuf)),
         )
         .arg(
@@ -85,7 +97,7 @@ fn build_cli() -> Command {
                 .short('w')
                 .value_name("PATH")
                 .help(
-                    "Weight file (.bpk) for the built-in model \
+                    "Weight file (.bpk) for the built-in model, when serving one \
                      [default: <exe dir>/<name>.bpk, then models/<name>.bpk]",
                 )
                 .value_parser(clap::value_parser!(PathBuf))
@@ -201,6 +213,16 @@ fn build_cli() -> Command {
                 .value_parser(clap::value_parser!(u16)),
         )
         .arg(
+            Arg::new("admin-token")
+                .long("admin-token")
+                .value_name("TOKEN")
+                .help(format!(
+                    "Enable the admin API (POST /admin/models/{{model}}/reload) for requests with \
+                    'Authorization: Bearer <TOKEN>'. Also read from ${ADMIN_TOKEN_ENV}, which \
+                    keeps it out of the process list"
+                )),
+        )
+        .arg(
             Arg::new("threads")
                 .long("threads")
                 .value_name("N")
@@ -292,20 +314,39 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
         .into());
     }
 
-    let model_path = matches.get_one::<PathBuf>("model-path").cloned();
-    let model_name = match (matches.get_one::<String>("model-name"), &model_path) {
-        (Some(name), _) => Some(
-            BuiltInModel::from_name(name)
-                .map_err(|e| CliError::InvalidArgument {
-                    arg: "model-name".to_string(),
-                    value: name.clone(),
-                    reason: e.to_string(),
-                })?
-                .name()
-                .to_string(),
-        ),
-        // Neither a name nor a path: serve the built-in model if there is exactly one
-        (None, None) => Some(
+    let model_paths: Vec<PathBuf> = matches
+        .get_many::<PathBuf>("model-path")
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+    let mut model_names = Vec::new();
+    for name in matches
+        .get_many::<String>("model-name")
+        .into_iter()
+        .flatten()
+    {
+        let name = BuiltInModel::from_name(name)
+            .map_err(|e| CliError::InvalidArgument {
+                arg: "model-name".to_string(),
+                value: name.clone(),
+                reason: e.to_string(),
+            })?
+            .name()
+            .to_string();
+        if model_names.contains(&name) {
+            return Err(CliError::InvalidArgument {
+                arg: "model-name".to_string(),
+                value: name,
+                reason: "given twice".to_string(),
+            }
+            .into());
+        }
+        model_names.push(name);
+    }
+    // Neither a name nor a path: serve the built-in model if there is exactly one
+    if model_names.is_empty() && model_paths.is_empty() {
+        model_names.push(
             BuiltInModel::default_model()
                 .map_err(|e| CliError::InvalidArgument {
                     arg: "model-name".to_string(),
@@ -314,15 +355,45 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
                 })?
                 .name()
                 .to_string(),
-        ),
-        (None, Some(_)) => None,
-    };
+        );
+    }
+
+    let weights = matches.get_one::<PathBuf>("weights").cloned();
+    if let Some(weights) = &weights
+        && model_names.len() > 1
+    {
+        return Err(CliError::InvalidArgument {
+            arg: "weights".to_string(),
+            value: weights.display().to_string(),
+            reason: "applies to a single built-in model; with several, reload one with new \
+                weights through the admin API instead"
+                .to_string(),
+        }
+        .into());
+    }
+
+    let admin_token = matches
+        .get_one::<String>("admin-token")
+        .cloned()
+        .or_else(|| std::env::var(ADMIN_TOKEN_ENV).ok())
+        .filter(|token| !token.is_empty());
+    if let Some(token) = &admin_token
+        && token.len() < 16
+    {
+        return Err(CliError::InvalidArgument {
+            arg: "admin-token".to_string(),
+            value: "<hidden>".to_string(),
+            reason: "must be at least 16 characters".to_string(),
+        }
+        .into());
+    }
 
     Ok((
         CliArgs {
-            model_name,
-            model_path,
-            weights: matches.get_one::<PathBuf>("weights").cloned(),
+            model_names,
+            model_paths,
+            weights,
+            admin_token,
             host,
             port,
             backend,
@@ -441,47 +512,57 @@ async fn main() -> Result<()> {
 
     info!(
         session_id = %session_id,
-        model_name = ?args.model_name,
-        model_path = ?args.model_path,
+        model_names = ?args.model_names,
+        model_paths = ?args.model_paths,
         weights = ?args.weights,
         backend = %args.backend,
-        "📦 Loading model"
+        "📦 Loading models"
     );
 
     // Model loading (including embedded weight decoding) is blocking work
-    let backend = args.backend;
-    let model_name = args.model_name.clone();
-    let model_path = args.model_path.clone();
-    let weights = args.weights.clone();
-    let loaded = tokio::task::spawn_blocking(move || match (model_path, model_name) {
-        (Some(path), _) => model::load_model_with_backend(&path, backend),
-        (None, Some(name)) => {
-            model::load_built_in_model_with_backend(&name, backend, weights.as_deref())
-        }
-        (None, None) => unreachable!("parse_args defaults the model name"),
+    let reloaders = reloaders(&args);
+    let loaded = tokio::task::spawn_blocking(move || {
+        reloaders
+            .into_iter()
+            .map(|reload| {
+                reload(None).map(|model| api::ServedModel {
+                    model,
+                    reload: Some(reload),
+                })
+            })
+            .collect::<furnace::error::Result<Vec<_>>>()
     })
     .await
     .expect("model loading task panicked");
 
-    let model = match loaded {
-        Ok(model) => {
-            let model_info = model.get_info();
-            info!(
-                session_id = %session_id,
-                model_name = %model_info.name,
-                input_shape = ?model_info.input_spec.shape,
-                output_shape = ?model_info.output_spec.shape,
-                backend = %model_info.backend,
-                model_type = %model_info.model_type,
-                "✅ Model loaded successfully"
-            );
-            model
-        }
+    let models = match loaded {
+        Ok(models) => models,
         Err(e) => {
             error!(session_id = %session_id, error = %e, "❌ Failed to load model");
             std::process::exit(1);
         }
     };
+    let mut names = Vec::new();
+    for served in &models {
+        let model_info = served.model.get_info();
+        if names.contains(&model_info.name) {
+            error!(session_id = %session_id, "❌ Two models are named '{}'", model_info.name);
+            std::process::exit(1);
+        }
+        names.push(model_info.name.clone());
+        info!(
+            session_id = %session_id,
+            model_name = %model_info.name,
+            input_shape = ?model_info.input_spec.shape,
+            output_shape = ?model_info.output_spec.shape,
+            backend = %model_info.backend,
+            model_type = %model_info.model_type,
+            "✅ Model loaded successfully"
+        );
+    }
+    if args.admin_token.is_some() {
+        info!("🔑 Admin API enabled: POST /admin/models/{{model}}/reload");
+    }
 
     let server_config = api::ServerConfig {
         host: args.host.clone(),
@@ -495,6 +576,7 @@ async fn main() -> Result<()> {
             workers: args.batch_workers,
         },
         grpc_port: args.grpc_port,
+        admin_token: args.admin_token.clone(),
     };
 
     info!(
@@ -510,12 +592,41 @@ async fn main() -> Result<()> {
         "🚀 Starting HTTP server"
     );
 
-    if let Err(e) = api::start_server_with_config(server_config, model).await {
+    if let Err(e) = api::start_server_with_models(server_config, models).await {
         error!(session_id = %session_id, error = %e, "❌ Server failed to start");
         std::process::exit(1);
     }
 
     Ok(())
+}
+
+/// Environment variable read for `--admin-token`
+const ADMIN_TOKEN_ENV: &str = "FURNACE_ADMIN_TOKEN";
+
+/// One loader per model to serve. Called with `None` it loads the model as configured; the
+/// admin API calls it again to reload, possibly with a new weight file.
+fn reloaders(args: &CliArgs) -> Vec<api::Reloader> {
+    let backend = args.backend;
+    let built_in = args.model_names.iter().map(|name| {
+        let name = name.clone();
+        let weights = args.weights.clone();
+        Arc::new(move |new_weights: Option<&Path>| {
+            model::load_built_in_model_with_backend(
+                &name,
+                backend,
+                new_weights.or(weights.as_deref()),
+            )
+        }) as api::Reloader
+    });
+    let files = args.model_paths.iter().map(|path| {
+        let path = path.clone();
+        Arc::new(move |new_weights: Option<&Path>| match new_weights {
+            // A file model is a .bpk/.json pair; a new path names another pair
+            Some(other) => model::load_model_with_backend(other, backend),
+            None => model::load_model_with_backend(&path, backend),
+        }) as api::Reloader
+    });
+    built_in.chain(files).collect()
 }
 
 #[cfg(test)]

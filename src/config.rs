@@ -36,17 +36,36 @@ pub struct Server {
     pub log_level: Option<String>,
     pub threads: Option<u64>,
     pub grpc_port: Option<u16>,
+    /// Prefer the `FURNACE_ADMIN_TOKEN` environment variable over writing it here
+    pub admin_token: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSection {
-    /// Built-in model (`--model-name`)
-    pub name: Option<String>,
-    /// File-based Burn model (`--model-path`)
-    pub path: Option<PathBuf>,
+    /// Built-in model or models (`--model-name`)
+    pub name: Option<OneOrMany<String>>,
+    /// File-based Burn model or models (`--model-path`)
+    pub path: Option<OneOrMany<PathBuf>>,
     pub weights: Option<PathBuf>,
     pub backend: Option<String>,
+}
+
+/// `"a"` or `["a", "b"]`
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum OneOrMany<T> {
+    One(T),
+    Many(Vec<T>),
+}
+
+impl<T> OneOrMany<T> {
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        match self {
+            Self::One(one) => std::slice::from_ref(one).iter(),
+            Self::Many(many) => many.iter(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -93,10 +112,15 @@ impl ConfigFile {
         push("--log-level", s.log_level.clone());
         push("--threads", s.threads.map(|v| v.to_string()));
         push("--grpc-port", s.grpc_port.map(|v| v.to_string()));
+        push("--admin-token", s.admin_token.clone());
         let m = &self.model;
         if with_model {
-            push("--model-name", m.name.clone());
-            push("--model-path", m.path.as_deref().map(path_string));
+            for name in m.name.iter().flat_map(OneOrMany::iter) {
+                push("--model-name", Some(name.clone()));
+            }
+            for path in m.path.iter().flat_map(OneOrMany::iter) {
+                push("--model-path", Some(path_string(path)));
+            }
         }
         push("--weights", m.weights.as_deref().map(path_string));
         push("--backend", m.backend.clone());
@@ -204,6 +228,17 @@ mod tests {
             "--max-body-mb",
             "5"
         ])));
+    }
+
+    #[test]
+    fn several_models() {
+        let config = ConfigFile::parse("[model]\nname = [\"a\", \"b\"]\n").unwrap();
+        assert_eq!(
+            config.to_args(true),
+            args(&["--model-name", "a", "--model-name", "b"])
+        );
+        let config = ConfigFile::parse("[model]\npath = \"m\"\n").unwrap();
+        assert_eq!(config.to_args(true), args(&["--model-path", "m"]));
     }
 
     #[test]

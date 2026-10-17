@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a ResNet-18 JSON request drops from about 4.7 ms to about 2.2 ms
 
 ### Added
+- Several models from one process: `--model-name resnet18,mnist` (or repeated, or a list in the
+  config file; `--model-path` can repeat too). `GET /models` lists them,
+  `POST /models/{model}/predict` and `GET /models/{model}` address one, and the v2 protocol
+  serves each by name. `/predict` and `/model/info` use the first. Metrics are per model
+  (`model` label in Prometheus, a `models` list in the JSON)
+- Reloading a model without downtime: `POST /admin/models/{model}/reload`, optionally with new
+  `weights`, enabled by `--admin-token` (or `FURNACE_ADMIN_TOKEN`). The new model is loaded and
+  warmed up beside the serving one and swapped in; requests in flight finish on the old one,
+  and a failed reload leaves the old one serving
 - `GET /metrics` serves the Prometheus text format to scrapers (requests that accept `text/plain`
   or `application/openmetrics-text`), with request and inference latency histograms; the JSON
   gains estimated p50/p95/p99 latencies and `ready`
