@@ -5,12 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-10-17
+
+No changes to furnace itself; release pipeline only.
+
+### Changed
+- crates.io releases are published through Trusted Publishing (OIDC) instead of a stored token
+- GitHub Actions moved to their Node 24 runtimes (checkout v5, cache v5, action-gh-release v3,
+  codecov-action v5, dependency-review-action v5, codeql-action v4)
+
 ## [0.6.0] - 2026-10-17
 
 About 2× faster CPU inference again, and the first release on crates.io (as `furnace-server`).
 The API and CLI are unchanged from 0.5.0.
 
 ### Added
+- Security Audit checks RustSec advisories with `cargo deny check advisories` over the resolved
+  dependency graph (all features and targets), with no ignored advisories
 - Published on crates.io as **`furnace-server`** (the `furnace` crate name belongs to another
   project). The library and the binary are still called `furnace`
 - `FURNACE_MODELS_DIR` points the build at the directory of `.onnx` models to compile in
@@ -31,6 +42,10 @@ The API and CLI are unchanged from 0.5.0.
     512-channel layers run 36% faster single-threaded (13.9 to 8.9 ms) and ~16% faster on
     16 threads
   - Max pooling no longer computes the argmax index tensor it then discarded
+
+### Removed
+- `burn-store`'s PyTorch `.pt` reader (and its `zip` dependency), which furnace never used; it
+  only reads Burnpack weights
 
 ## [0.5.0] - 2026-10-16
 

@@ -2924,7 +2924,7 @@ checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
 name = "furnace-server"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "axum",
  "burn",
