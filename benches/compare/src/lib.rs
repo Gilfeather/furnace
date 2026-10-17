@@ -18,7 +18,7 @@ pub const CLASSES: usize = 1000;
 /// ImageNet class 258 ("Samoyed"), the expected top-1 for PyTorch Hub's `dog.jpg`
 pub const EXPECTED_TOP1: usize = 258;
 /// What the furnace rows run: the furnace checkout this harness sits in
-pub const FURNACE_VERSION: &str = "furnace 0.6.1, Burn 0.22";
+pub const FURNACE_VERSION: &str = "furnace 0.7.0, Burn 0.22";
 
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
