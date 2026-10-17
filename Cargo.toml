@@ -24,6 +24,8 @@ exclude = [
     "/vendor/",
     "/sample_model.*",
     ".gitignore",
+    "/Dockerfile",
+    ".dockerignore",
     "deny.toml",
     "default.nix",
     "flake.nix",
@@ -89,6 +91,9 @@ thiserror = "2.0"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
+toml = "1"
+num_cpus = "1"
+rayon = "1"
 
 [build-dependencies]
 burn-onnx = { version = "0.22", optional = true }

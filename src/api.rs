@@ -1149,6 +1149,87 @@ mod tests {
         assert_eq!(response.headers()[X_FRAME_OPTIONS], "DENY");
     }
 
+    /// Every field of `value` is in the `name` schema of docs/openapi.json, and every field the
+    /// schema requires is in `value`
+    fn assert_matches_schema(spec: &serde_json::Value, name: &str, value: &serde_json::Value) {
+        let schema = &spec["components"]["schemas"][name];
+        let properties = schema["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("no schema {name}"));
+        let fields = value
+            .as_object()
+            .unwrap_or_else(|| panic!("{name}: not an object"));
+        for field in fields.keys() {
+            assert!(
+                properties.contains_key(field),
+                "{name}: the server sends `{field}`, the spec does not list it"
+            );
+        }
+        for required in schema["required"].as_array().into_iter().flatten() {
+            let required = required.as_str().unwrap();
+            assert!(
+                fields.contains_key(required),
+                "{name}: the spec requires `{required}`, the server does not send it"
+            );
+        }
+    }
+
+    /// docs/openapi.json describes the routes and the responses the server actually sends
+    #[tokio::test]
+    async fn test_openapi_spec_matches_server() {
+        let spec: serde_json::Value =
+            serde_json::from_str(include_str!("../docs/openapi.json")).unwrap();
+        assert_eq!(spec["info"]["version"], env!("CARGO_PKG_VERSION"));
+        let paths: std::collections::BTreeSet<&str> = spec["paths"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            paths,
+            ["/health", "/healthz", "/metrics", "/model/info", "/predict"].into()
+        );
+
+        let app = test_app();
+        let get = |path: &'static str| {
+            let app = app.clone();
+            let request = Request::builder().uri(path).body(Body::empty()).unwrap();
+            async move {
+                let (status, body) = send(app, request).await;
+                assert_eq!(status, StatusCode::OK, "{path}");
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+            }
+        };
+        for path in ["/healthz", "/health"] {
+            assert_matches_schema(&spec, "HealthResponse", &get(path).await);
+        }
+
+        let single = serde_json::json!({ "input": vec![0.5; 784] }).to_string();
+        let (status, body) = send(app.clone(), predict_request(single)).await;
+        assert_eq!(status, StatusCode::OK);
+        let single: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_matches_schema(&spec, "PredictResponse", &single);
+        let batch = serde_json::json!({ "inputs": vec![vec![0.5; 784]; 2] }).to_string();
+        let (status, body) = send(app.clone(), predict_request(batch)).await;
+        assert_eq!(status, StatusCode::OK);
+        let batch: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_matches_schema(&spec, "PredictResponse", &batch);
+
+        let bad = serde_json::json!({ "input": vec![0.5; 3] }).to_string();
+        let (status, body) = send(app.clone(), predict_request(bad)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_matches_schema(&spec, "ErrorResponse", &error);
+
+        assert_matches_schema(&spec, "MetricsResponse", &get("/metrics").await);
+        let info = get("/model/info").await;
+        assert_matches_schema(&spec, "ModelInfoResponse", &info);
+        assert_matches_schema(&spec, "ModelInfo", &info["model_info"]);
+        assert_matches_schema(&spec, "ModelStats", &info["stats"]);
+        assert_matches_schema(&spec, "TensorSpec", &info["model_info"]["input_spec"]);
+    }
+
     #[tokio::test]
     async fn test_request_id_echoed_or_generated() {
         let with_id = |id: &str| {

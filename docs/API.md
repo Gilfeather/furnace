@@ -1,6 +1,7 @@
 # HTTP API
 
 All endpoints are on the address given by `--host` and `--port` (default `127.0.0.1:3000`).
+The same API as an OpenAPI 3 spec: [openapi.json](openapi.json).
 
 | Endpoint | Purpose |
 |---|---|
@@ -179,6 +180,21 @@ batch.
 thread, and up to `--max-concurrent-requests` of them run side by side, competing for the
 cores, so under heavy load some requests take far longer than others. See
 [`PERFORMANCE.md`](PERFORMANCE.md#concurrent-load) for measurements.
+
+## Request IDs and logs
+
+Every response, errors included, has an `X-Request-Id` header. Send your own (1-128 visible
+ASCII characters, e.g. a trace ID from your gateway) and it comes back unchanged; otherwise the
+server generates a UUID. The server's log lines for a request run inside a `request` span with
+that ID, its method and its path:
+
+```
+INFO request{id=trace-42 method=POST path=/predict}: Prediction completed in 8.10ms, batch size: 1
+```
+
+`--log-level` sets the overall level. `RUST_LOG` takes precedence and can set levels per module,
+e.g. `RUST_LOG=info,furnace::batching=debug`. `FURNACE_ENV=production` writes JSON lines, with
+the span's fields in each line.
 
 ## Errors
 

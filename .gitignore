@@ -110,8 +110,6 @@ secrets/
 tmp/
 cache/
 
-# Docker
-.dockerignore
 docker-compose.override.yml
 
 # Backup files

@@ -1,4 +1,5 @@
 use clap::{Arg, ArgGroup, Command};
+use std::ffi::OsString;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -7,7 +8,7 @@ use tracing::{Level, error, info, warn};
 use uuid::Uuid;
 
 use error::{CliError, Result};
-use furnace::{BackendKind, api, error, model, models::BuiltInModel};
+use furnace::{BackendKind, api, config, error, model, models::BuiltInModel};
 
 // Freed operator outputs are reused instead of returned to the OS (see `furnace::allocator`)
 #[global_allocator]
@@ -28,11 +29,15 @@ struct CliArgs {
     batch_timeout_us: u64,
     batch_workers: usize,
     log_level: String,
+    threads: Option<usize>,
 }
 
 fn build_cli() -> Command {
     let backends = BackendKind::available_names();
     Command::new("furnace")
+        // A later occurrence of an option wins, so the command line overrides the config file,
+        // whose options are placed first (see `furnace::config`)
+        .args_override_self(true)
         .about("🔥 High-performance Rust ML inference server powered by Burn framework")
         .version(env!("CARGO_PKG_VERSION"))
         .long_about(
@@ -42,7 +47,19 @@ fn build_cli() -> Command {
             furnace --model-name resnet18 --port 3000\n  \
             furnace --model-name resnet18 --weights ./resnet18-finetuned.bpk\n  \
             furnace --model-name resnet18 --backend wgpu --host 0.0.0.0\n  \
-            furnace --model-path ./sample_model --max-concurrent-requests 8",
+            furnace --model-path ./sample_model --max-concurrent-requests 8\n  \
+            furnace --config furnace.toml --port 8080",
+        )
+        .arg(
+            Arg::new("config")
+                .long("config")
+                .value_name("PATH")
+                .value_parser(clap::value_parser!(PathBuf))
+                .help(format!(
+                    "Read options from a TOML file (see furnace.example.toml); options given on \
+                    the command line override it. Also read from ${}",
+                    furnace::config::CONFIG_ENV
+                )),
         )
         .arg(
             Arg::new("model-name")
@@ -50,7 +67,7 @@ fn build_cli() -> Command {
                 .short('m')
                 .value_name("NAME")
                 .help(format!(
-                    "Built-in model compiled into the binary from models/<NAME>.onnx                      (default: the only one, if there is just one). {}",
+                    "Built-in model compiled into the binary from models/<NAME>.onnx (default: the only one, if there is just one). {}",
                     BuiltInModel::describe_available()
                 )),
         )
@@ -173,6 +190,16 @@ fn build_cli() -> Command {
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
+            Arg::new("threads")
+                .long("threads")
+                .value_name("N")
+                .help(
+                    "Threads for inference (default: one per physical core, or \
+                    $RAYON_NUM_THREADS)",
+                )
+                .value_parser(clap::value_parser!(u64).range(1..=4096)),
+        )
+        .arg(
             Arg::new("log-level")
                 .long("log-level")
                 .short('l')
@@ -184,7 +211,19 @@ fn build_cli() -> Command {
 }
 
 fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
-    let matches = build_cli().get_matches();
+    let given: Vec<OsString> = std::env::args_os().collect();
+    let (program, given) = given.split_first().expect("program name");
+    let mut argv = vec![program.clone()];
+    if let Some(path) = config::config_path(given) {
+        let file = config::ConfigFile::load(&path).map_err(|reason| CliError::InvalidArgument {
+            arg: "config".to_string(),
+            value: path.display().to_string(),
+            reason,
+        })?;
+        argv.extend(file.to_args(!config::picks_model(given)));
+    }
+    argv.extend(given.iter().cloned());
+    let matches = build_cli().get_matches_from(argv);
 
     let mut deprecated = Vec::new();
     if matches.get_flag("enable-kernel-fusion") {
@@ -283,6 +322,7 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
             batch_timeout_us: *matches.get_one::<u64>("batch-timeout-us").unwrap(),
             batch_workers: *matches.get_one::<u64>("batch-workers").unwrap() as usize,
             log_level: matches.get_one::<String>("log-level").unwrap().clone(),
+            threads: matches.get_one::<u64>("threads").map(|&n| n as usize),
         },
         deprecated,
     ))
@@ -379,6 +419,8 @@ async fn main() -> Result<()> {
         version = env!("CARGO_PKG_VERSION"),
         "🔥 Starting furnace inference server"
     );
+    let threads = furnace::threads::init(args.threads);
+    info!("🧵 {threads} inference threads");
     for flag in deprecated {
         warn!(
             "{flag} is deprecated and has no effect (Burn 0.22 configures fusion/autotune at build time)"
