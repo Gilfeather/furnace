@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-18
+
+Furnace grows from a fast model server into a production one. KServe and Triton clients work
+against it unchanged, over HTTP and gRPC. One process serves several models and swaps them
+without downtime. It can require API keys, rate-limit clients and speak TLS, mutual TLS
+included, still in pure Rust. Existing command lines and requests work as before.
+
 ### Security
 - TLS, in pure Rust (feature `tls`, on in the release binaries and the Docker image):
   `--tls-cert` and `--tls-key` serve HTTPS, and gRPC over TLS; `--tls-client-ca` requires

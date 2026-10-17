@@ -2754,6 +2754,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
 
 [[package]]
+name = "fast-float2"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6e8948ce679d00a02a94739ea185595dca7118ed04feb991127e443bd3d761f"
+
+[[package]]
 name = "fastbloom"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2898,7 +2904,7 @@ dependencies = [
 
 [[package]]
 name = "furnace-server"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "axum",
  "burn",
@@ -2907,12 +2913,16 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "fast-float2",
  "memmap2",
+ "num_cpus",
  "onnx-ir",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "toml",
  "tower",
  "tower-http",
  "tracing",

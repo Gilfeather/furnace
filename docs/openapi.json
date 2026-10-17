@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Furnace inference server",
-    "version": "0.7.0",
+    "version": "0.8.0",
     "description": "HTTP API of the Furnace inference server. Prose reference with examples: docs/API.md.",
     "license": {
       "name": "MIT"
