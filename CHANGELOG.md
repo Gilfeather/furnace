@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `GET /metrics` serves the Prometheus text format to scrapers (requests that accept `text/plain`
+  or `application/openmetrics-text`), with request and inference latency histograms; the JSON
+  gains estimated p50/p95/p99 latencies and `ready`
+- `GET /readyz` for readiness probes: 503 until a warm-up inference, run in the background at
+  startup, has initialized the model; `/healthz` stays the liveness probe
+
 ## [0.7.0] - 2026-10-18
 
 CPU inference is about 2× faster again, and the server batches concurrent requests. Over HTTP,
