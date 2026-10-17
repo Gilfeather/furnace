@@ -1111,7 +1111,6 @@ dependencies = [
  "half",
  "hashbrown 0.16.1",
  "memmap2",
- "pytorch-reader",
  "regex",
  "safetensors 0.8.0",
  "textdistance",
@@ -5252,21 +5251,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
-name = "pytorch-reader"
-version = "0.22.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef8eb685aa4d3083844a8960f5cfd397a4892f56ac0f4e3265ee2f9b7022824e"
-dependencies = [
- "byteorder",
- "crc32fast",
- "num-traits",
- "serde",
- "tar",
- "thiserror 2.0.21",
- "zip 8.6.0",
-]
-
-[[package]]
 name = "qoi"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6342,7 +6326,7 @@ dependencies = [
  "safetensors 0.3.3",
  "thiserror 1.0.69",
  "torch-sys",
- "zip 0.6.6",
+ "zip",
 ]
 
 [[package]]
@@ -6610,7 +6594,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ureq 2.12.1",
- "zip 0.6.6",
+ "zip",
 ]
 
 [[package]]
@@ -7155,12 +7139,6 @@ checksum = "a21cdb0fc8f85c98b1ec812bc4cd69faf6c0fa2fc17d44ea3c2cdd38dc08e999"
 dependencies = [
  "nom 8.0.0",
 ]
-
-[[package]]
-name = "typed-path"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
 
 [[package]]
 name = "typeid"
@@ -8164,19 +8142,6 @@ dependencies = [
  "sha1",
  "time",
  "zstd",
-]
-
-[[package]]
-name = "zip"
-version = "8.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
-dependencies = [
- "crc32fast",
- "flate2",
- "indexmap",
- "memchr",
- "typed-path",
 ]
 
 [[package]]
