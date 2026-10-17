@@ -9,6 +9,10 @@ use uuid::Uuid;
 use error::{CliError, Result};
 use furnace::{BackendKind, api, error, model, models::BuiltInModel};
 
+// Freed operator outputs are reused instead of returned to the OS (see `furnace::allocator`)
+#[global_allocator]
+static ALLOCATOR: furnace::allocator::BlockCache = furnace::allocator::BlockCache::new();
+
 #[derive(Debug)]
 struct CliArgs {
     model_name: Option<String>,

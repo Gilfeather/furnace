@@ -6,6 +6,10 @@ use furnace::BackendKind;
 use furnace::model::load_built_in_model_with_backend;
 use furnace_compare::{Args, FURNACE_VERSION, bench_in_process};
 
+// The same allocator as the furnace server binary
+#[global_allocator]
+static ALLOCATOR: furnace::allocator::BlockCache = furnace::allocator::BlockCache::new();
+
 fn main() {
     let args = Args::parse("backend");
     let backend_name = args.extra.clone().unwrap_or_else(|| "cpu".to_string());
