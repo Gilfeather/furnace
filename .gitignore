@@ -104,6 +104,9 @@ perf.data*
 *.crt
 *.cert
 secrets/
+# ...except the test-only certificates the TLS tests use (see tests/fixtures/tls/generate.sh)
+!tests/fixtures/tls/*.crt
+!tests/fixtures/tls/*.key
 
 # Local development
 .local/

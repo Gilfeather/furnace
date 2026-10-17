@@ -72,17 +72,17 @@ jobs:
       if: matrix.rust == 'stable'
       run: |
         cargo clippy --all-targets -- -D warnings
-        cargo clippy --all-targets --features "image grpc" -- -D warnings
+        cargo clippy --all-targets --features "image grpc tls" -- -D warnings
 
     - name: Type check
       if: matrix.check-only
-      run: cargo check --all-targets --features "image grpc"
+      run: cargo check --all-targets --features "image grpc tls"
 
     # With the optional image input; the default build's only extra test is its 415. Examples and
     # benches are left to clippy above, which type-checks them without an optimized build.
     - name: Run tests
       if: ${{ !matrix.check-only }}
-      run: cargo test --profile ci --lib --bins --tests --features "image grpc"
+      run: cargo test --profile ci --lib --bins --tests --features "image grpc tls"
 
   gpu-features:
     name: Check GPU backend features

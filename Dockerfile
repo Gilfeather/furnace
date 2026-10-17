@@ -6,7 +6,7 @@
 #
 #   docker run --rm -p 3000:3000 -p 8001:8001 furnace   # HTTP on 3000, gRPC on 8001
 #
-# Build arguments: FEATURES (Cargo features, default "grpc"; e.g. "grpc image"; without "grpc",
+# Build arguments: FEATURES (Cargo features, default "grpc tls"; e.g. "grpc tls image"; without "grpc",
 # drop `--grpc-port` from the ENTRYPOINT), and MODELS_DIR (default "models").
 #
 # The binary links against glibc rather than musl: musl's allocator makes multithreaded
@@ -15,7 +15,7 @@
 FROM rust:1.99-slim-bookworm AS build
 WORKDIR /src
 COPY . .
-ARG FEATURES="grpc"
+ARG FEATURES="grpc tls"
 ARG MODELS_DIR=models
 RUN set -eu; \
     FURNACE_MODELS_DIR="/src/${MODELS_DIR}" \

@@ -32,6 +32,8 @@ engines and how to reproduce: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
   (`--features image`).
 - **Production basics**: request size limits, input validation, backpressure (`503`),
   timeouts (`504`), `/metrics`, graceful shutdown.
+- **Security**: HTTPS and mutual TLS with certificate reload, in pure Rust (`--features tls`);
+  API keys; per-client rate limits.
 
 ## Install
 
@@ -135,6 +137,8 @@ server's log lines for that request. Full reference, including errors:
 | `--admin-token <TOKEN>` | none | Enable the reload API for this bearer token (also `FURNACE_ADMIN_TOKEN`) |
 | `--api-key <KEY>` | none | Require a key on everything but health probes; repeatable (also `FURNACE_API_KEYS`) ([details](docs/API.md#api-keys-and-rate-limiting)) |
 | `--rate-limit <PER_SECOND>` / `--rate-limit-burst <N>` | none | Per-client request rate (by API key, else IP address); beyond it, `429` |
+| `--tls-cert <PEM>` / `--tls-key <PEM>` | none | Serve HTTPS and gRPC over TLS; reloaded when the files change ([details](docs/API.md#tls)) |
+| `--tls-client-ca <PEM>` | none | Mutual TLS: only clients with a certificate from this CA |
 | `-l, --log-level <LEVEL>` | `info` | `RUST_LOG` sets per-module levels; `FURNACE_ENV=production` switches to JSON logs |
 | `--config <PATH>` | | Read options from a TOML file (also `FURNACE_CONFIG`); the command line overrides it. See [`furnace.example.toml`](furnace.example.toml) |
 

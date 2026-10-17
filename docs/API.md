@@ -308,6 +308,49 @@ another model path for a `--model-path` model; the path is read on the server.
 | 409 | `RELOAD_IN_PROGRESS` | The model is being reloaded already |
 | 422 | `RELOAD_FAILED` | Loading or warming up failed; the previous model is still serving |
 
+## TLS
+
+Built with `--features tls` (the release binaries and the Docker image are), the server speaks
+HTTPS, and gRPC over TLS on `--grpc-port`, with a PEM certificate and key:
+
+```bash
+furnace --tls-cert /etc/furnace/tls.crt --tls-key /etc/furnace/tls.key
+curl --cacert ca.crt https://localhost:3000/healthz
+```
+
+Add `--tls-client-ca ca.crt` for mutual TLS: then only clients presenting a certificate signed by
+that CA can connect at all, over HTTP and gRPC alike.
+
+```bash
+furnace --tls-cert tls.crt --tls-key tls.key --tls-client-ca ca.crt
+curl --cacert ca.crt --cert client.crt --key client.key https://localhost:3000/healthz
+```
+
+The files are checked every 10 seconds, and a changed certificate is used for new connections
+without a restart, so renewals by cert-manager or certbot just work. If the new files do not
+load (e.g. caught half-written), the error is logged and the previous certificate stays.
+
+The TLS stack is pure Rust like the rest of Furnace: rustls for the protocol, and a small crypto
+provider of our own over [RustCrypto](https://github.com/RustCrypto) primitives
+([src/tls/provider.rs](../src/tls/provider.rs)). It is deliberately narrow:
+
+| | Supported |
+|---|---|
+| Protocol | TLS 1.3 |
+| Ciphers | AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305 |
+| Key exchange | X25519, P-256, P-384 |
+| Keys and client certificates | ECDSA P-256, ECDSA P-384, Ed25519 (PKCS#8 or SEC1 PEM) |
+
+RSA keys are refused with a clear error: the pure-Rust RSA implementation has an unfixed timing
+side channel (RUSTSEC-2023-0071). Issue an ECDSA P-256 certificate instead; every CA,
+cert-manager (`privateKey.algorithm: ECDSA`) and Let's Encrypt (`--key-type ecdsa`) can. Prefer
+P-256 over Ed25519 for the server certificate: Windows' TLS stack, and so clients built on it,
+do not accept Ed25519 certificates.
+
+With `tritonclient.grpc`, connect with `ssl=True` and the CA (and, for mutual TLS, the client
+key and certificate): `InferenceServerClient(url="host:8001", ssl=True,
+root_certificates="ca.crt", private_key="client.key", certificate_chain="client.crt")`.
+
 ## API keys and rate limiting
 
 With `--api-key <KEY>` (repeat it for several keys, or set `FURNACE_API_KEYS=key1,key2`, which

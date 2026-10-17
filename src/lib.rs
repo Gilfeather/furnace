@@ -13,6 +13,8 @@ pub mod models;
 pub mod preprocess;
 pub mod telemetry;
 pub mod threads;
+#[cfg(feature = "tls")]
+pub mod tls;
 pub mod types;
 pub mod weights;
 
