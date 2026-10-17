@@ -80,7 +80,7 @@ the generated `resnet18.bpk` automatically.
 ```
 
 ```
-INFO 🔥 Starting furnace inference server version="0.6.0"
+INFO 🔥 Starting furnace inference server version="0.6.1"
 INFO 📦 Loading model model_name=Some("resnet18") backend=cpu
 INFO ✅ Model loaded successfully model_name=resnet18 input_shape=[3, 224, 224] output_shape=[1000] backend=cpu model_type=onnx
 INFO 🚦 Concurrency limit set to 100 inferences
