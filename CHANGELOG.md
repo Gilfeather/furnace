@@ -5,13 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Changed
-- The direct and Winograd convolutions now also run on aarch64 (Apple Silicon, AWS Graviton,
-  Ampere and other ARM CPUs) with NEON microkernels; ARM used the slower im2col path before
-- CI runs the vendored burn-flex tests and clippy on x86_64 and aarch64 runners
-
 ## [0.7.0] - 2026-10-18
 
 CPU inference is about 2× faster again, and the server batches concurrent requests. Over HTTP,
@@ -23,7 +16,7 @@ instead of 1.9 s. Existing API calls and CLI options work as before.
 - ResNet-18 goes from about 15 ms to 8.0 ms per image at batch 1, and from 40.6 ms to 25.1 ms
   at batch 4 (ONNX Runtime: 7.1 and 25.3 ms) on the benchmark laptop. Single-threaded, it goes
   from 47 ms to about 32 ms. Changes in the vendored burn-flex, for `f32` convolutions without
-  groups or dilation on x86_64 with AVX2 or AVX-512:
+  groups or dilation on x86_64 with AVX2 or AVX-512 and on aarch64 with NEON:
   - Direct convolution without im2col: the input is copied once into a zero-padded buffer (split
     into phase planes for strides above 1), and `std::arch` microkernels read every kernel tap
     as a plain vector load
@@ -32,6 +25,9 @@ instead of 1.9 s. Existing API calls and CLI options work as before.
     never served stale
   - Work buffers are reused from a small pool
   - 2D max pooling runs as two separable passes
+- Apple Silicon, AWS Graviton, Ampere and other ARM CPUs get the same convolutions through NEON
+  microkernels (in 0.6 they used the im2col path)
+- CI runs the vendored burn-flex tests and clippy on x86_64 and aarch64 runners
 - The server uses a new global allocator, `furnace::allocator::BlockCache`, that keeps freed
   blocks of 256 KiB and up (at most 128 MiB) for reuse, instead of returning them to the OS and
   page-faulting them back in on every pass. It takes about 15% off batch-1 latency
