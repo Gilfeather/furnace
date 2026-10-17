@@ -21,7 +21,7 @@ jobs:
       version: ${{ steps.get_version.outputs.version }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Get version from tag
       id: get_version
@@ -29,7 +29,7 @@ jobs:
 
     - name: Create Release
       id: create_release
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: ${{ github.ref }}
         name: Release ${{ github.ref }}
@@ -78,7 +78,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -112,14 +112,14 @@ jobs:
         cp target/${{ matrix.target }}/release/furnace${{ matrix.os == 'windows-latest' && '.exe' || '' }} release-assets/${{ matrix.asset_name }}
 
     - name: Upload Release Asset
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         files: release-assets/${{ matrix.asset_name }}
 
     # Weights are platform-independent; publish them once
     - name: Upload ResNet-18 weights
       if: matrix.target == 'x86_64-unknown-linux-gnu'
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         files: target/${{ matrix.target }}/release/build/furnace-server-*/out/models/resnet18.bpk
 
@@ -127,21 +127,24 @@ jobs:
     name: Publish to crates.io
     needs: [create-release, build-release]
     runs-on: ubuntu-latest
+    # crates.io Trusted Publishing: the workflow exchanges its OIDC token for a short-lived
+    # crates.io token, so no long-lived registry token is stored in the repository
+    permissions:
+      contents: read
+      id-token: write
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
 
-    # The crate is published without models; `cargo install` users compile their own in with
-    # FURNACE_MODELS_DIR. Skips (with a notice) until the repository has the secret.
+    - name: Authenticate with crates.io
+      id: auth
+      uses: rust-lang/crates-io-auth-action@v1
+
+    # Published without models; `cargo install` users compile their own in with FURNACE_MODELS_DIR
     - name: Publish furnace-server
       env:
-        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      run: |
-        if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
-          echo "::notice::CARGO_REGISTRY_TOKEN is not set; skipping crates.io publish"
-          exit 0
-        fi
-        cargo publish --locked
+        CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      run: cargo publish --locked
