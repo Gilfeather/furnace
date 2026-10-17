@@ -10,6 +10,7 @@ The same API as an OpenAPI 3 spec: [openapi.json](openapi.json).
 | `GET /metrics` | Request, error and latency counters |
 | `GET /model/info` | Input and output shapes, backend, per-model statistics |
 | `POST /predict` | Inference: JSON, raw `float32`, or (with `--features image`) a JPEG/PNG |
+| `/v2/...` | The same inference over the KServe / Triton Open Inference Protocol |
 
 ## `GET /healthz` (alias `GET /health`)
 
@@ -203,6 +204,39 @@ batch.
 thread, and up to `--max-concurrent-requests` of them run side by side, competing for the
 cores, so under heavy load some requests take far longer than others. See
 [`PERFORMANCE.md`](PERFORMANCE.md#concurrent-load) for measurements.
+
+## Open Inference Protocol (KServe / Triton v2)
+
+The server also speaks the [Open Inference Protocol](https://github.com/kserve/open-inference-protocol)
+over HTTP, so clients written for NVIDIA Triton or KServe work unchanged:
+
+| Endpoint | |
+|---|---|
+| `GET /v2` | Server metadata (`extensions: ["binary_tensor_data"]`) |
+| `GET /v2/health/live`, `GET /v2/health/ready` | Liveness, readiness (same as `/healthz`, `/readyz`) |
+| `GET /v2/models/{model}[/versions/1]` | Model metadata: input `input`, output `output`, FP32, batch dimension `-1` |
+| `GET /v2/models/{model}[/versions/1]/ready` | Model readiness |
+| `POST /v2/models/{model}[/versions/1]/infer` | Inference |
+
+`{model}` is the served model's name (`resnet18`) and its only version is `1`. Inference takes
+one `FP32` tensor named `input` with shape `[batch, ...]` (or the item shape alone), with `data`
+flat or nested, and goes through the same batching, limits, timeout and metrics as
+`/predict`. Triton's binary tensor data extension, which `tritonclient.http` uses by default, is
+supported in both directions.
+
+```python
+import numpy as np
+import tritonclient.http as httpclient
+
+client = httpclient.InferenceServerClient(url="localhost:3000")
+x = np.random.rand(2, 3, 224, 224).astype(np.float32)
+inp = httpclient.InferInput("input", list(x.shape), "FP32")
+inp.set_data_from_numpy(x)
+result = client.infer("resnet18", [inp])
+logits = result.as_numpy("output")     # shape (2, 1000)
+```
+
+Errors are `{"error": "..."}` (with Furnace's `code`, `details` and `timestamp` alongside).
 
 ## Request IDs and logs
 
