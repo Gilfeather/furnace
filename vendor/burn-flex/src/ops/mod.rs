@@ -97,7 +97,7 @@ pub mod comparison;
 #[macro_use]
 mod conv_common;
 pub mod conv;
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod conv_direct;
 pub mod conv_transpose;
 pub mod cumulative;
@@ -118,14 +118,14 @@ pub mod pool;
 mod qtensor;
 pub mod reduce;
 pub mod repeat_dim;
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod scratch;
 pub mod slice;
 pub mod sort;
 mod transaction;
 pub mod unary;
 pub mod unfold;
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod weight_cache;
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod winograd;

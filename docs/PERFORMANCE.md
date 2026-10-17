@@ -77,7 +77,8 @@ convolutions and pooling, vendored in [`vendor/burn-flex`](../vendor/README.md):
   AVX-512 microkernels written with `std::arch` broadcast the weights from their original
   layout. The block shape is picked per layer to waste the fewest vector lanes.
 - **Winograd F(2x2, 3x3)** for the 3x3 layers of up to 128 channels, which needs 2.25× fewer
-  multiplications. The transformed filters are computed once and cached. Wider layers stay
+  multiplications. On ARM it runs on NEON microkernels; the direct convolution stays x86-only,
+  because on ARM the `gemm` crate's im2col path is faster. The transformed filters are computed once and cached. Wider layers stay
   direct: their transformed filters no longer fit in cache.
 - **Max pooling** in two separable passes, without computing argmax indices it would discard.
 - **Reused allocations.** Each operator allocates its output, and system allocators return

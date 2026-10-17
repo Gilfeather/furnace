@@ -127,45 +127,48 @@ unsafe impl GlobalAlloc for BlockCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ptr::NonNull;
+
+    /// `cache.alloc`, failing the test instead of handing out a null pointer
+    fn alloc(cache: &BlockCache, layout: Layout) -> NonNull<u8> {
+        NonNull::new(unsafe { cache.alloc(layout) }).expect("allocation failed")
+    }
+
+    fn alloc_zeroed(cache: &BlockCache, layout: Layout) -> NonNull<u8> {
+        NonNull::new(unsafe { cache.alloc_zeroed(layout) }).expect("allocation failed")
+    }
 
     #[test]
     fn reuses_freed_large_blocks() {
         let cache = BlockCache::new();
         let layout = Layout::from_size_align(MIN_SIZE, 64).unwrap();
+        let a = alloc(&cache, layout);
         unsafe {
-            let a = cache.alloc(layout);
-            assert!(!a.is_null(), "allocation failed");
-            a.write_bytes(7, layout.size());
-            cache.dealloc(a, layout);
-            let b = cache.alloc_zeroed(layout);
-            assert!(!b.is_null(), "allocation failed");
-            assert_eq!(a, b, "the freed block is handed out again");
-            assert!(
-                std::slice::from_raw_parts(b, layout.size())
-                    .iter()
-                    .all(|&x| x == 0)
-            );
-            // A different size does not get it
-            let other = Layout::from_size_align(MIN_SIZE + 64, 64).unwrap();
-            cache.dealloc(b, layout);
-            let c = cache.alloc(other);
-            assert!(!c.is_null(), "allocation failed");
-            assert_ne!(c, b);
-            cache.dealloc(c, other);
-            assert_eq!(cache.alloc(layout), b);
-            cache.dealloc(b, layout);
+            a.as_ptr().write_bytes(7, layout.size());
+            cache.dealloc(a.as_ptr(), layout);
         }
+        let b = alloc_zeroed(&cache, layout);
+        assert_eq!(a, b, "the freed block is handed out again");
+        let zeroed = unsafe { std::slice::from_raw_parts(b.as_ptr(), layout.size()) };
+        assert!(zeroed.iter().all(|&x| x == 0));
+
+        // A different size does not get it
+        let other = Layout::from_size_align(MIN_SIZE + 64, 64).unwrap();
+        unsafe { cache.dealloc(b.as_ptr(), layout) };
+        let c = alloc(&cache, other);
+        assert_ne!(c, b);
+        unsafe { cache.dealloc(c.as_ptr(), other) };
+        let d = alloc(&cache, layout);
+        assert_eq!(d, b);
+        unsafe { cache.dealloc(d.as_ptr(), layout) };
     }
 
     #[test]
     fn small_allocations_bypass_the_cache() {
         let cache = BlockCache::new();
         let layout = Layout::from_size_align(1024, 8).unwrap();
-        unsafe {
-            let a = cache.alloc(layout);
-            assert!(!a.is_null(), "allocation failed");
-            cache.dealloc(a, layout);
-        }
+        let a = alloc(&cache, layout);
+        unsafe { cache.dealloc(a.as_ptr(), layout) };
         assert_eq!(cache.cache.lock().unwrap().bytes, 0);
     }
 }

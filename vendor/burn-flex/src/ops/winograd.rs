@@ -1,4 +1,5 @@
-//! Winograd F(2x2, 3x3) convolution for `f32` on x86_64 (AVX-512 or AVX2 + FMA): 3x3 kernels,
+//! Winograd F(2x2, 3x3) convolution for `f32` on x86_64 (AVX-512 or AVX2 + FMA) and aarch64
+//! (NEON): 3x3 kernels,
 //! stride 1, no dilation, `groups == 1`.
 //!
 //! Each 2x2 block of outputs (a tile) is computed from a 4x4 block of input as
@@ -250,17 +251,24 @@ struct InputGeometry {
 unsafe fn input_transform(isa: Isa, g: &InputGeometry, src: &[f32], v: *mut f32, ci: usize) {
     unsafe {
         match isa {
+            #[cfg(target_arch = "x86_64")]
             Isa::Avx512 => input_transform_avx512(g, src, v, ci),
+            #[cfg(target_arch = "x86_64")]
             Isa::Avx2 => input_transform_avx2(g, src, v, ci),
+            // NEON is the aarch64 baseline: the plain body already vectorizes for it
+            #[cfg(target_arch = "aarch64")]
+            Isa::Neon => input_transform_body(g, src, v, ci),
         }
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 unsafe fn input_transform_avx512(g: &InputGeometry, src: &[f32], v: *mut f32, ci: usize) {
     unsafe { input_transform_body(g, src, v, ci) }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn input_transform_avx2(g: &InputGeometry, src: &[f32], v: *mut f32, ci: usize) {
     unsafe { input_transform_body(g, src, v, ci) }
@@ -354,12 +362,17 @@ unsafe fn output_transform(
 ) {
     unsafe {
         match isa {
+            #[cfg(target_arch = "x86_64")]
             Isa::Avx512 => output_transform_avx512(m, dims, rows, t0, tiles, out_size, bias, out),
+            #[cfg(target_arch = "x86_64")]
             Isa::Avx2 => output_transform_avx2(m, dims, rows, t0, tiles, out_size, bias, out),
+            #[cfg(target_arch = "aarch64")]
+            Isa::Neon => output_transform_body(m, dims, rows, t0, tiles, out_size, bias, out),
         }
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 #[allow(clippy::too_many_arguments)]
 unsafe fn output_transform_avx512(
@@ -375,6 +388,7 @@ unsafe fn output_transform_avx512(
     unsafe { output_transform_body(m, dims, rows, t0, tiles, out_size, bias, out) }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[allow(clippy::too_many_arguments)]
 unsafe fn output_transform_avx2(
@@ -508,13 +522,6 @@ mod tests {
 
     #[test]
     fn matches_reference() {
-        let mut isas = Vec::new();
-        if std::is_x86_feature_detected!("avx512f") {
-            isas.push(Isa::Avx512);
-        }
-        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
-            isas.push(Isa::Avx2);
-        }
         // (batch, c_in, in_h, in_w, c_out, pad, bias)
         let cases = [
             (1, 4, 8, 8, 8, 1, true),
@@ -542,7 +549,7 @@ mod tests {
                 [p, p],
             );
             let filters = Filters::new(&w, c_out, c_in);
-            for &isa in &isas {
+            for isa in Isa::supported() {
                 for threads in [1, 5] {
                     let got = conv2d_winograd_with(
                         isa,

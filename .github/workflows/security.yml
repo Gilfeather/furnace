@@ -64,7 +64,23 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v5
 
+    # Pull requests skip the vendored Burn backend (about 40k lines, mostly upstream code), which
+    # takes the analysis from about 16 minutes to a few. Pushes to main and the daily run still
+    # scan everything, vendor included.
+    - name: Initialize CodeQL (pull request)
+      if: github.event_name == 'pull_request'
+      uses: github/codeql-action/init@v4
+      with:
+        languages: 'rust'
+        build-mode: none
+        queries: security-and-quality
+        config: |
+          paths-ignore:
+            - vendor
+            - benches/compare
+
     - name: Initialize CodeQL
+      if: github.event_name != 'pull_request'
       uses: github/codeql-action/init@v4
       with:
         languages: 'rust'

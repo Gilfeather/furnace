@@ -25,6 +25,10 @@ instead of 1.9 s. Existing API calls and CLI options work as before.
     never served stale
   - Work buffers are reused from a small pool
   - 2D max pooling runs as two separable passes
+- On ARM (Apple Silicon, AWS Graviton, Ampere), the Winograd convolutions run on NEON
+  microkernels, 1.15-1.5x faster than the im2col path on a Neoverse CI runner. The direct
+  convolution stays x86-only: on ARM, burn-flex's im2col path is faster than it
+- CI runs the vendored burn-flex tests and clippy on x86_64 and aarch64 runners
 - The server uses a new global allocator, `furnace::allocator::BlockCache`, that keeps freed
   blocks of 256 KiB and up (at most 128 MiB) for reuse, instead of returning them to the OS and
   page-faulting them back in on every pass. It takes about 15% off batch-1 latency

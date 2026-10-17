@@ -299,8 +299,8 @@ fn conv3d_impl<
         let threads = 1;
 
         // f32 without groups or dilation: direct convolution, no im2col (x86_64 with AVX2 or
-        // AVX-512)
-        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        // AVX-512, aarch64 with NEON)
+        #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
         if core::any::TypeId::of::<T>() == core::any::TypeId::of::<f32>()
             && groups == 1
             && dilation_h == 1
@@ -3428,6 +3428,62 @@ mod tests {
             4,
         );
         assert!(out.is_empty());
+    }
+
+    /// Single-threaded throughput of the im2col path on ResNet-18 shapes, as a baseline for the
+    /// direct kernels' `throughput` test:
+    /// `cargo test --release --lib throughput -- --ignored --nocapture --test-threads 1`
+    #[test]
+    #[ignore]
+    fn throughput_im2col() {
+        // (name, c_in, size, c_out, k, stride, pad)
+        let shapes = [
+            ("conv1 7x7/2", 3, 224, 64, 7, 2, 3),
+            ("layer1 3x3 64", 64, 56, 64, 3, 1, 1),
+            ("layer2 3x3 128", 128, 28, 128, 3, 1, 1),
+            ("layer3 3x3 256", 256, 14, 256, 3, 1, 1),
+            ("layer4 3x3 512", 512, 7, 512, 3, 1, 1),
+            ("down 1x1/2 256", 256, 14, 512, 1, 2, 0),
+        ];
+        for (name, c_in, size, c_out, k, s, p) in shapes {
+            let out = (size + 2 * p - k) / s + 1;
+            let x: Vec<f32> = (0..c_in * size * size)
+                .map(|i| (i % 13) as f32 * 0.1)
+                .collect();
+            let w: Vec<f32> = (0..c_out * c_in * k * k)
+                .map(|i| (i % 7) as f32 * 0.1)
+                .collect();
+            let run = || {
+                conv2d_im2col_nchw(
+                    &x,
+                    &w,
+                    [1, c_in, size, size],
+                    [c_out, c_in, k, k],
+                    [out, out],
+                    [s, s],
+                    [p, p],
+                    [1, 1],
+                    1,
+                    IM2COL_TILE_ELEMS,
+                    1,
+                )
+            };
+            for _ in 0..3 {
+                core::hint::black_box(run());
+            }
+            let flops = 2.0 * (c_out * out * out * c_in * k * k) as f64;
+            let iters = ((2e9 / flops) as usize).clamp(3, 2000);
+            let start = std::time::Instant::now();
+            for _ in 0..iters {
+                core::hint::black_box(run());
+            }
+            let secs = start.elapsed().as_secs_f64() / iters as f64;
+            std::println!(
+                "im2col {name:16} {:8.3} ms {:6.1} GFLOP/s",
+                secs * 1e3,
+                flops / secs / 1e9
+            );
+        }
     }
 
     #[test]

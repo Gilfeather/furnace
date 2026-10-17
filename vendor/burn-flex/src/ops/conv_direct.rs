@@ -1,4 +1,5 @@
-//! Direct 2D convolution for `f32` on x86_64 (AVX-512 or AVX2 + FMA), without im2col.
+//! Direct 2D convolution for `f32` on x86_64 (AVX-512 or AVX2 + FMA) and aarch64 (NEON),
+//! without im2col.
 //!
 //! The input is copied once into a zero-padded buffer. With stride `s > 1` the buffer is split
 //! into phase planes by row and column remainder (`s_h * s_w` of them at most), which turns the
@@ -20,43 +21,88 @@ const MAX_STRIDE: usize = 4;
 
 #[derive(Clone, Copy)]
 pub(super) enum Isa {
+    #[cfg(target_arch = "x86_64")]
     Avx512,
+    #[cfg(target_arch = "x86_64")]
     Avx2,
+    /// Part of the aarch64 baseline, so always available there
+    #[cfg(target_arch = "aarch64")]
+    Neon,
 }
 
 impl Isa {
+    /// The widest instruction set this CPU supports
     pub(super) fn detect() -> Option<Self> {
-        if std::is_x86_feature_detected!("avx512f") {
-            Some(Self::Avx512)
-        } else if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
-            Some(Self::Avx2)
-        } else {
-            None
+        Self::supported().into_iter().next()
+    }
+
+    /// Every instruction set this CPU supports, widest first
+    pub(super) fn supported() -> Vec<Self> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let mut isas = Vec::new();
+            if std::is_x86_feature_detected!("avx512f") {
+                isas.push(Self::Avx512);
+            }
+            if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+                isas.push(Self::Avx2);
+            }
+            isas
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            alloc::vec![Self::Neon]
         }
     }
 
     #[cfg(test)]
     pub(super) fn name(self) -> &'static str {
         match self {
+            #[cfg(target_arch = "x86_64")]
             Self::Avx512 => "avx512",
+            #[cfg(target_arch = "x86_64")]
             Self::Avx2 => "avx2",
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => "neon",
+        }
+    }
+
+    /// Whether the direct convolution is faster than burn-flex's im2col + GEMM path. On NEON
+    /// it is not: on a Neoverse CI runner the `gemm` crate's packed kernels run ResNet-18's
+    /// shapes at about 40 GFLOP/s single-threaded and these microkernels at about 31, so NEON
+    /// only uses them inside Winograd, which is 1.15-1.5x faster than im2col there.
+    pub(super) fn direct_beats_im2col(self) -> bool {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx512 | Self::Avx2 => true,
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => false,
         }
     }
 
     /// `f32` lanes per vector register
     pub(super) fn lanes(self) -> usize {
         match self {
+            #[cfg(target_arch = "x86_64")]
             Self::Avx512 => 16,
+            #[cfg(target_arch = "x86_64")]
             Self::Avx2 => 8,
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => 4,
         }
     }
 
     /// Microkernel shapes as (output channels, vectors of positions), widest first. Each keeps
-    /// its accumulators, input vectors and broadcast within the vector registers.
+    /// its accumulators, input vectors and broadcast within the vector registers (32 for
+    /// AVX-512 and NEON, 16 for AVX2).
     fn shapes(self) -> &'static [(usize, usize)] {
         match self {
+            #[cfg(target_arch = "x86_64")]
             Self::Avx512 => &[(8, 3), (12, 2), (16, 1)],
+            #[cfg(target_arch = "x86_64")]
             Self::Avx2 => &[(6, 2), (12, 1)],
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => &[(6, 4), (8, 3), (12, 2)],
         }
     }
 }
@@ -128,8 +174,8 @@ impl Geometry {
 }
 
 /// `f32` 2D convolution with `groups == 1` and no dilation, or `None` when this CPU has neither
-/// AVX-512 nor AVX2 + FMA or the stride is larger than [`MAX_STRIDE`]. The output is NCHW and
-/// includes the bias.
+/// AVX-512 nor AVX2 + FMA (on NEON, im2col is faster) or the stride is larger than
+/// [`MAX_STRIDE`]. The output is NCHW and includes the bias.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn conv2d_direct_f32(
     x: &[f32],
@@ -146,6 +192,9 @@ pub(crate) fn conv2d_direct_f32(
         return None;
     }
     let isa = Isa::detect()?;
+    if !isa.direct_beats_im2col() {
+        return None;
+    }
     Some(conv2d_direct_with(
         isa,
         x,
@@ -482,15 +531,20 @@ pub(super) unsafe fn run_kernel(isa: Isa, mr: usize, nv: usize, a: Args) {
         };
     }
     match isa {
+        #[cfg(target_arch = "x86_64")]
         Isa::Avx512 => call!(avx512, 8 x 3, 12 x 2, 16 x 1, 1 x 3, 1 x 2, 1 x 1),
+        #[cfg(target_arch = "x86_64")]
         Isa::Avx2 => call!(avx2, 6 x 2, 12 x 1, 1 x 2, 1 x 1),
+        #[cfg(target_arch = "aarch64")]
+        Isa::Neon => call!(neon, 6 x 4, 8 x 3, 12 x 2, 1 x 4, 1 x 3, 1 x 2),
     }
 }
 
 macro_rules! microkernel {
-    ($module:ident, $feature:literal, $lanes:literal, $zero:ident, $load:ident, $store:ident, $set1:ident, $fma:ident) => {
+    ($module:ident, $arch:literal, $feature:literal, $lanes:literal, $import:item, $zero:path, $load:path, $store:path, $set1:path, $fma:path) => {
+        #[cfg(target_arch = $arch)]
         mod $module {
-            use core::arch::x86_64::*;
+            $import
 
             /// `out[r][v * lanes..]` = sum over `ci` and taps of `w[r * k_total + k]` times the
             /// input vectors at `b + ci * cs + tap + v * lanes`, for `MR` rows (row stride
@@ -542,8 +596,10 @@ macro_rules! microkernel {
 
 microkernel!(
     avx512,
+    "x86_64",
     "avx512f",
     16,
+    use core::arch::x86_64::*;,
     _mm512_setzero_ps,
     _mm512_loadu_ps,
     _mm512_storeu_ps,
@@ -552,14 +608,69 @@ microkernel!(
 );
 microkernel!(
     avx2,
+    "x86_64",
     "avx2,fma",
     8,
+    use core::arch::x86_64::*;,
     _mm256_setzero_ps,
     _mm256_loadu_ps,
     _mm256_storeu_ps,
     _mm256_set1_ps,
     _mm256_fmadd_ps
 );
+microkernel!(
+    neon,
+    "aarch64",
+    "neon",
+    4,
+    use super::neon_ops::*;,
+    zero,
+    load,
+    store,
+    set1,
+    fma
+);
+
+/// NEON intrinsics with the argument order of the x86 ones the microkernel is written against
+#[cfg(target_arch = "aarch64")]
+mod neon_ops {
+    use core::arch::aarch64::*;
+
+    #[inline]
+    #[target_feature(enable = "neon")]
+    pub(super) fn zero() -> float32x4_t {
+        vdupq_n_f32(0.0)
+    }
+
+    /// # Safety
+    /// `p` must be valid for reading 4 `f32`s.
+    #[inline]
+    #[target_feature(enable = "neon")]
+    pub(super) unsafe fn load(p: *const f32) -> float32x4_t {
+        unsafe { vld1q_f32(p) }
+    }
+
+    /// # Safety
+    /// `p` must be valid for writing 4 `f32`s.
+    #[inline]
+    #[target_feature(enable = "neon")]
+    pub(super) unsafe fn store(p: *mut f32, v: float32x4_t) {
+        unsafe { vst1q_f32(p, v) }
+    }
+
+    #[inline]
+    #[target_feature(enable = "neon")]
+    pub(super) fn set1(x: f32) -> float32x4_t {
+        vdupq_n_f32(x)
+    }
+
+    /// `a * b + c`, like `_mm*_fmadd_ps`
+    #[inline]
+    #[target_feature(enable = "neon")]
+    pub(super) fn fma(a: float32x4_t, b: float32x4_t, c: float32x4_t) -> float32x4_t {
+        vfmaq_f32(c, a, b)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -620,14 +731,7 @@ mod tests {
 
     /// Instruction sets this CPU can run, so every microkernel is checked where possible
     fn supported() -> Vec<Isa> {
-        let mut isas = Vec::new();
-        if std::is_x86_feature_detected!("avx512f") {
-            isas.push(Isa::Avx512);
-        }
-        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
-            isas.push(Isa::Avx2);
-        }
-        isas
+        Isa::supported()
     }
 
     #[test]
