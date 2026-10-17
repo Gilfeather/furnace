@@ -152,8 +152,15 @@ GPU backends are Cargo features: `--features wgpu` (Vulkan, DX12, Metal), `metal
 
 ### Docker
 
-The [`Dockerfile`](Dockerfile) compiles every model in `models/` into a small image (distroless,
-non-root, ~80 MB with ResNet-18's weights):
+Each release publishes an image with ResNet-18 and MNIST built in, for x86_64 and ARM64:
+
+```bash
+docker run --rm -p 3000:3000 ghcr.io/gilfeather/furnace:latest            # serves resnet18
+docker run --rm -p 3000:3000 ghcr.io/gilfeather/furnace:latest --model-name mnist
+```
+
+To compile in your own models, build from the [`Dockerfile`](Dockerfile) (distroless, non-root,
+~80 MB with ResNet-18's weights):
 
 ```bash
 docker build -t furnace .

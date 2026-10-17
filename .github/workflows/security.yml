@@ -9,6 +9,12 @@ on:
   pull_request:
     branches: [ main ]
 
+
+# A newer push to the same branch or pull request makes an older run of this workflow redundant
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   security_audit:
     name: Security Audit

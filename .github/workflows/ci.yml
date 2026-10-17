@@ -13,6 +13,12 @@ env:
   # Second built-in model for the end-to-end tests: different shapes, 26 KB
   MNIST_URL: https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx
 
+
+# A newer push to the same branch or pull request makes an older run of this workflow redundant
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Test Suite

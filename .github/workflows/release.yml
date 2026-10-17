@@ -25,7 +25,7 @@ jobs:
 
     - name: Get version from tag
       id: get_version
-      run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
 
     - name: Create Release
       id: create_release
@@ -148,3 +148,83 @@ jobs:
       env:
         CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
       run: cargo publish --locked
+
+  # Container image on GitHub Container Registry: ghcr.io/<owner>/furnace:<version> and :latest,
+  # for linux/amd64 and linux/arm64. Each architecture builds natively on its own runner (no
+  # emulation), then one manifest list joins them under the shared tags.
+  docker-image:
+    name: Docker image (${{ matrix.arch }})
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Download ONNX models
+      run: |
+        mkdir -p models
+        curl -fsSL "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
+        curl -fsSL "https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx" -o models/mnist.onnx
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v4
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Image name
+      id: image
+      run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+    - name: Build and push
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.image.outputs.name }}:${{ needs.create-release.outputs.version }}-${{ matrix.arch }}
+        labels: |
+          org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          org.opencontainers.image.version=${{ needs.create-release.outputs.version }}
+          org.opencontainers.image.licenses=MIT
+
+  docker-manifest:
+    name: Docker image (multi-arch tags)
+    needs: [create-release, docker-image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v4
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Tag the version and latest
+      env:
+        VERSION: ${{ needs.create-release.outputs.version }}
+      run: |
+        image="ghcr.io/${GITHUB_REPOSITORY,,}"
+        docker buildx imagetools create \
+          -t "$image:$VERSION" -t "$image:latest" \
+          "$image:$VERSION-amd64" "$image:$VERSION-arm64"
+        docker buildx imagetools inspect "$image:$VERSION"

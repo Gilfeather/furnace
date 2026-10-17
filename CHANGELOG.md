@@ -52,7 +52,9 @@ instead of 1.9 s. Existing API calls and CLI options work as before.
 - `--threads <N>` sets the inference threads (also `RAYON_NUM_THREADS`, or `[server] threads`)
 - Every response has an `X-Request-Id`: the client's (1-128 visible ASCII characters) or a
   generated UUID. The server's log lines for the request carry it in a `request` span
-- A `Dockerfile`: every model in `models/` compiled in, on a distroless non-root image
+- A `Dockerfile`: every model in `models/` compiled in, on a distroless non-root image. Each
+  release publishes `ghcr.io/gilfeather/furnace:<version>` and `:latest` (linux/amd64 and
+  linux/arm64, with ResNet-18 and MNIST); the image there had not been updated since 2025-07
 - `docs/openapi.json`, an OpenAPI 3 spec of the HTTP API, checked against the server's actual
   responses by a test
 - Dynamic batching in the server. Up to `--batch-workers` forward passes (default 4) run at
