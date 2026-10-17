@@ -118,6 +118,13 @@ strip = true
 debug = false
 overflow-checks = false
 
+# CI test builds: release optimizations (ResNet-18 stays fast in tests) without the whole-program
+# LTO and single codegen unit, which make every test binary take minutes to link
+[profile.ci]
+inherits = "release"
+lto = false
+codegen-units = 16
+
 [profile.release.build-override]
 opt-level = 3
 codegen-units = 1

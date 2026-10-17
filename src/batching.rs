@@ -202,7 +202,10 @@ impl Worker {
         // a panicking model drops the replies, failing only this batch's requests.
         match catch_unwind(AssertUnwindSafe(|| self.model.predict_many(inputs))) {
             Ok(results) => {
-                for ((reply, _permit), result) in replies.into_iter().zip(results) {
+                for ((reply, permit), result) in replies.into_iter().zip(results) {
+                    // Free the slot before answering, so a client that reads /metrics right
+                    // after its response never sees its own request still in flight
+                    drop(permit);
                     // The request may have timed out and stopped listening
                     let _ = reply.send(result);
                 }
@@ -588,8 +591,7 @@ mod tests {
         assert_eq!(s.slots.available_permits(), available - 2);
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
-        // The worker drops each permit right after sending its reply
-        settle().await;
+        // The worker frees each permit before sending its reply
         assert_eq!(s.slots.available_permits(), available);
     }
 

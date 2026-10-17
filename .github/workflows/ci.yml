@@ -67,7 +67,7 @@ jobs:
 
     # With the optional image input; the default build's only extra test is its 415
     - name: Run tests
-      run: cargo test --release --all-targets --features image
+      run: cargo test --profile ci --all-targets --features image
 
   gpu-features:
     name: Check GPU backend features
@@ -152,7 +152,7 @@ jobs:
         [ -f models/mnist.onnx ] || curl -fsSL "$MNIST_URL" -o models/mnist.onnx
 
     - name: Generate code coverage
-      run: cargo llvm-cov --release --workspace --lcov --output-path lcov.info
+      run: cargo llvm-cov --profile ci --workspace --lcov --output-path lcov.info
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v5
