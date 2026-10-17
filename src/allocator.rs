@@ -134,9 +134,11 @@ mod tests {
         let layout = Layout::from_size_align(MIN_SIZE, 64).unwrap();
         unsafe {
             let a = cache.alloc(layout);
+            assert!(!a.is_null(), "allocation failed");
             a.write_bytes(7, layout.size());
             cache.dealloc(a, layout);
             let b = cache.alloc_zeroed(layout);
+            assert!(!b.is_null(), "allocation failed");
             assert_eq!(a, b, "the freed block is handed out again");
             assert!(
                 std::slice::from_raw_parts(b, layout.size())
@@ -147,6 +149,7 @@ mod tests {
             let other = Layout::from_size_align(MIN_SIZE + 64, 64).unwrap();
             cache.dealloc(b, layout);
             let c = cache.alloc(other);
+            assert!(!c.is_null(), "allocation failed");
             assert_ne!(c, b);
             cache.dealloc(c, other);
             assert_eq!(cache.alloc(layout), b);
@@ -160,6 +163,7 @@ mod tests {
         let layout = Layout::from_size_align(1024, 8).unwrap();
         unsafe {
             let a = cache.alloc(layout);
+            assert!(!a.is_null(), "allocation failed");
             cache.dealloc(a, layout);
         }
         assert_eq!(cache.cache.lock().unwrap().bytes, 0);
