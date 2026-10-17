@@ -25,6 +25,7 @@ struct CliArgs {
     admin_token: Option<String>,
     api_keys: Vec<String>,
     rate_limit: Option<furnace::access::RateLimit>,
+    tls: Option<api::TlsSettings>,
     host: String,
     port: u16,
     backend: BackendKind,
@@ -254,6 +255,32 @@ fn build_cli() -> Command {
                 .requires("rate-limit"),
         )
         .arg(
+            Arg::new("tls-cert")
+                .long("tls-cert")
+                .value_name("PEM")
+                .help(
+                    "Serve HTTPS (and gRPC over TLS) with this PEM certificate chain; reloaded                     when the file changes (builds with the `tls` feature)",
+                )
+                .value_parser(clap::value_parser!(PathBuf))
+                .requires("tls-key"),
+        )
+        .arg(
+            Arg::new("tls-key")
+                .long("tls-key")
+                .value_name("PEM")
+                .help("PEM private key for --tls-cert: ECDSA P-256 / P-384 or Ed25519")
+                .value_parser(clap::value_parser!(PathBuf))
+                .requires("tls-cert"),
+        )
+        .arg(
+            Arg::new("tls-client-ca")
+                .long("tls-client-ca")
+                .value_name("PEM")
+                .help("Mutual TLS: require client certificates signed by these PEM CA certificates")
+                .value_parser(clap::value_parser!(PathBuf))
+                .requires("tls-cert"),
+        )
+        .arg(
             Arg::new("threads")
                 .long("threads")
                 .value_name("N")
@@ -429,6 +456,17 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
     api_keys.sort();
     api_keys.dedup();
 
+    let tls = matches
+        .get_one::<PathBuf>("tls-cert")
+        .map(|cert| api::TlsSettings {
+            cert: cert.clone(),
+            key: matches
+                .get_one::<PathBuf>("tls-key")
+                .cloned()
+                .expect("--tls-cert requires --tls-key"),
+            client_ca: matches.get_one::<PathBuf>("tls-client-ca").cloned(),
+        });
+
     let rate_limit = match matches.get_one::<f64>("rate-limit").copied() {
         None => None,
         Some(per_second) if per_second.is_finite() && per_second > 0.0 => {
@@ -469,6 +507,7 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
             admin_token,
             api_keys,
             rate_limit,
+            tls,
             host,
             port,
             backend,
@@ -654,6 +693,7 @@ async fn main() -> Result<()> {
         admin_token: args.admin_token.clone(),
         api_keys: args.api_keys.clone(),
         rate_limit: args.rate_limit,
+        tls: args.tls.clone(),
     };
 
     info!(

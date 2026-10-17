@@ -15,6 +15,9 @@ log_level = "info"              # error, warn, info, debug or trace
 # api_keys = ["..."]            # require one of these keys; prefer $FURNACE_API_KEYS
 # rate_limit = 50               # requests/s per client (API key, or IP address), beyond which 429
 # rate_limit_burst = 100        # requests a client may send at once (default: rate_limit)
+# tls_cert = "/etc/furnace/tls.crt"      # HTTPS and gRPC over TLS (`tls` feature); reloaded on change
+# tls_key = "/etc/furnace/tls.key"       # ECDSA P-256 / P-384 or Ed25519
+# tls_client_ca = "/etc/furnace/ca.crt"  # mutual TLS: only clients with a certificate from this CA
 
 [model]
 name = "resnet18"               # built-in model compiled from models/<name>.onnx

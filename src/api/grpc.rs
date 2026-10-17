@@ -37,19 +37,51 @@ pub(super) fn server(
         .max_encoding_message_size(max_message_bytes)
 }
 
-/// Serve gRPC on `addr` until `shutdown` resolves
+/// TLS configurations for gRPC, when the `tls` feature is on
+#[cfg(feature = "tls")]
+pub(super) type GrpcTls = Option<Arc<crate::tls::TlsConfigs>>;
+#[cfg(not(feature = "tls"))]
+pub(super) type GrpcTls = Option<std::convert::Infallible>;
+
+/// Serve gRPC on `addr`, over TLS when `tls` is given, until `shutdown` resolves
 pub(super) async fn serve(
     state: AppState,
     addr: SocketAddr,
     max_message_bytes: usize,
+    tls: GrpcTls,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::result::Result<(), String> {
-    info!("✅ gRPC (Open Inference Protocol) on {addr}");
-    tonic::transport::Server::builder()
-        .add_service(server(state, max_message_bytes))
-        .serve_with_shutdown(addr, shutdown)
-        .await
-        .map_err(|e| format!("gRPC server error: {e}"))
+    let service = server(state, max_message_bytes);
+    match tls {
+        #[cfg(feature = "tls")]
+        Some(configs) => {
+            use tokio_stream::StreamExt as _;
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
+                .map_err(|e| format!("Failed to bind gRPC to {addr}: {e}"))?;
+            info!("✅ gRPC (Open Inference Protocol) over TLS on {addr}");
+            let connections = tokio_stream::wrappers::ReceiverStream::new(crate::tls::accept(
+                listener,
+                configs,
+                crate::tls::Protocols::Grpc,
+            ))
+            .map(Ok::<_, std::io::Error>);
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming_shutdown(connections, shutdown)
+                .await
+        }
+        #[cfg(not(feature = "tls"))]
+        Some(never) => match never {},
+        None => {
+            info!("✅ gRPC (Open Inference Protocol) on {addr}");
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_shutdown(addr, shutdown)
+                .await
+        }
+    }
+    .map_err(|e| format!("gRPC server error: {e}"))
 }
 
 impl Service {
@@ -345,6 +377,58 @@ mod tests {
             "{}",
             status.message()
         );
+    }
+
+    /// The gRPC service over the pure-Rust TLS, with mutual TLS, reached by a tonic client
+    #[cfg(feature = "tls")]
+    #[tokio::test]
+    async fn over_tls() {
+        use crate::tls::{Protocols, TlsConfigs, accept, tests::client_config, tests::settings};
+        use tokio_stream::StreamExt as _;
+
+        let configs = TlsConfigs::load(settings("server-p256", true)).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connections =
+            tokio_stream::wrappers::ReceiverStream::new(accept(listener, configs, Protocols::Grpc))
+                .map(Ok::<_, std::io::Error>);
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(server(test_app_state(), 64 << 20))
+                .serve_with_incoming(connections),
+        );
+
+        let connect = |certificate: Option<&'static str>| async move {
+            let tls = tokio_rustls::TlsConnector::from(Arc::new(client_config(certificate, b"h2")));
+            let connector = tower::service_fn(move |_: axum::http::Uri| {
+                let tls = tls.clone();
+                async move {
+                    let tcp = tokio::net::TcpStream::connect(addr).await?;
+                    let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+                    let stream = tls.connect(name, tcp).await?;
+                    Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+                }
+            });
+            let channel = tonic::transport::Endpoint::from_static("http://localhost")
+                .connect_with_connector(connector)
+                .await?;
+            Ok::<_, tonic::transport::Error>(GrpcInferenceServiceClient::new(channel))
+        };
+
+        let mut client = connect(Some("client")).await.unwrap();
+        let response = client
+            .model_infer(request(vec![1, 784], Some(vec![0.5; 784]), None))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.outputs[0].shape, [1, 10]);
+
+        // Without a client certificate the call fails, whether at connect or on the first call
+        let refused = match connect(None).await {
+            Err(_) => true,
+            Ok(mut client) => client.server_live(pb::ServerLiveRequest {}).await.is_err(),
+        };
+        assert!(refused);
     }
 
     fn request(

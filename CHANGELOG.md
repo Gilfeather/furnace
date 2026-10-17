@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- TLS, in pure Rust (feature `tls`, on in the release binaries and the Docker image):
+  `--tls-cert` and `--tls-key` serve HTTPS, and gRPC over TLS; `--tls-client-ca` requires
+  client certificates (mutual TLS). Certificates are reloaded without a restart when the files
+  change, and a renewal that fails to load keeps the previous one. rustls runs the protocol with
+  a small crypto provider over RustCrypto primitives: TLS 1.3, AES-GCM and ChaCha20-Poly1305,
+  X25519 / P-256 / P-384, ECDSA and Ed25519 keys. RSA keys are refused (RUSTSEC-2023-0071)
 - API keys: with `--api-key` (repeatable, or `FURNACE_API_KEYS`), every route except the health
   probes needs `Authorization: Bearer <key>` or `X-API-Key: <key>`, over HTTP and gRPC alike;
   otherwise `401` / `UNAUTHENTICATED`

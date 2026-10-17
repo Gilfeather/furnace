@@ -284,6 +284,42 @@ pub struct ServerConfig {
     pub api_keys: Vec<String>,
     /// Per-client rate limit; clients are their API key, or their IP address without keys
     pub rate_limit: Option<RateLimit>,
+    /// Serve HTTPS (and gRPC over TLS) instead of plain text; needs the `tls` feature
+    pub tls: Option<TlsSettings>,
+}
+
+/// `--tls-cert`, `--tls-key` and `--tls-client-ca`
+#[derive(Debug, Clone, PartialEq)]
+pub struct TlsSettings {
+    /// PEM certificate chain, the server's certificate first
+    pub cert: std::path::PathBuf,
+    /// PEM private key (ECDSA P-256 / P-384 or Ed25519)
+    pub key: std::path::PathBuf,
+    /// PEM CA certificates; when set, clients must present a certificate they signed
+    pub client_ca: Option<std::path::PathBuf>,
+}
+
+/// The peer address of a connection, plain or TLS, for the rate limit
+#[derive(Debug, Clone, Copy)]
+pub struct ClientAddr(pub std::net::SocketAddr);
+
+impl
+    axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, tokio::net::TcpListener>>
+    for ClientAddr
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, tokio::net::TcpListener>) -> Self {
+        Self(*stream.remote_addr())
+    }
+}
+
+#[cfg(feature = "tls")]
+impl
+    axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, crate::tls::TlsListener>>
+    for ClientAddr
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, crate::tls::TlsListener>) -> Self {
+        Self(*stream.remote_addr())
+    }
 }
 
 impl Default for ServerConfig {
@@ -300,6 +336,7 @@ impl Default for ServerConfig {
             admin_token: None,
             api_keys: Vec::new(),
             rate_limit: None,
+            tls: None,
         }
     }
 }
@@ -563,8 +600,8 @@ async fn guard(State(state): State<AppState>, request: Request, next: Next) -> R
         let key = presented_key(header("authorization"), header(API_KEY_HEADER));
         let ip = request
             .extensions()
-            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .map(|info| info.0.ip());
+            .get::<axum::extract::ConnectInfo<ClientAddr>>()
+            .map(|info| info.0.0.ip());
         state.access.admit(key, ip, !path.starts_with("/admin/"))
     };
     match verdict {
@@ -671,12 +708,36 @@ pub async fn start_server_with_models(
         info!("📦 Dynamic batching off");
     }
 
+    #[cfg(feature = "tls")]
+    let tls = match &config.tls {
+        Some(settings) => {
+            let configs = crate::tls::TlsConfigs::load(settings.clone())
+                .map_err(|e| ApiError::ServerStartup(format!("TLS: {e}")))?;
+            configs.watch();
+            info!("🔐 TLS 1.3 with {}", crate::tls::describe(settings));
+            Some(configs)
+        }
+        None => None,
+    };
+    #[cfg(not(feature = "tls"))]
+    if config.tls.is_some() {
+        return Err(ApiError::ServerStartup(
+            "--tls-cert needs a build with the `tls` feature".to_string(),
+        )
+        .into());
+    }
+
     let bind_addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
         .map_err(|e| ApiError::ServerStartup(format!("Failed to bind to {bind_addr}: {e}")))?;
 
-    info!("✅ Server running on http://{}", bind_addr);
+    let scheme = if config.tls.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+    info!("✅ Server running on {scheme}://{bind_addr}");
 
     // One signal stops both servers
     let (stop, stopped) = tokio::sync::watch::channel(false);
@@ -694,13 +755,17 @@ pub async fn start_server_with_models(
         let state = state.clone();
         let max_message_bytes = config.max_body_bytes;
         let shutdown = wait_for_stop(stopped.clone());
+        #[cfg(feature = "tls")]
+        let tls = tls.clone();
+        #[cfg(not(feature = "tls"))]
+        let tls = None;
         tokio::spawn(async move {
             let addr = tokio::net::lookup_host(&addr)
                 .await
                 .ok()
                 .and_then(|mut addrs| addrs.next())
                 .ok_or_else(|| format!("cannot resolve {addr}"))?;
-            grpc::serve(state, addr, max_message_bytes, shutdown).await
+            grpc::serve(state, addr, max_message_bytes, tls, shutdown).await
         })
     });
     #[cfg(not(feature = "grpc"))]
@@ -724,13 +789,27 @@ pub async fn start_server_with_models(
         );
     }
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(wait_for_stop(stopped))
-    .await
-    .map_err(|e| ApiError::ServerStartup(format!("Server error: {e}")))?;
+    let make_service = app.into_make_service_with_connect_info::<ClientAddr>();
+    #[cfg(feature = "tls")]
+    let served = match tls {
+        Some(configs) => {
+            let listener = crate::tls::TlsListener::new(listener, configs)
+                .map_err(|e| ApiError::ServerStartup(format!("TLS listener: {e}")))?;
+            axum::serve(listener, make_service)
+                .with_graceful_shutdown(wait_for_stop(stopped))
+                .await
+        }
+        None => {
+            axum::serve(listener, make_service)
+                .with_graceful_shutdown(wait_for_stop(stopped))
+                .await
+        }
+    };
+    #[cfg(not(feature = "tls"))]
+    let served = axum::serve(listener, make_service)
+        .with_graceful_shutdown(wait_for_stop(stopped))
+        .await;
+    served.map_err(|e| ApiError::ServerStartup(format!("Server error: {e}")))?;
 
     #[cfg(feature = "grpc")]
     if let Some(grpc) = grpc {

@@ -42,6 +42,9 @@ pub struct Server {
     pub api_keys: Option<Vec<String>>,
     pub rate_limit: Option<f64>,
     pub rate_limit_burst: Option<u32>,
+    pub tls_cert: Option<PathBuf>,
+    pub tls_key: Option<PathBuf>,
+    pub tls_client_ca: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -124,6 +127,12 @@ impl ConfigFile {
         push(
             "--rate-limit-burst",
             s.rate_limit_burst.map(|v| v.to_string()),
+        );
+        push("--tls-cert", s.tls_cert.as_deref().map(path_string));
+        push("--tls-key", s.tls_key.as_deref().map(path_string));
+        push(
+            "--tls-client-ca",
+            s.tls_client_ca.as_deref().map(path_string),
         );
         let m = &self.model;
         if with_model {
