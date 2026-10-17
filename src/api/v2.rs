@@ -88,43 +88,50 @@ async fn live() -> StatusCode {
 }
 
 async fn ready(State(state): State<AppState>) -> StatusCode {
-    if state.ready.load(Ordering::Acquire) {
+    if state.ready() {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     }
 }
 
-/// The v2 error response for a path naming an unknown model or version
-fn check_model(state: &ServerState, path: &ModelPath) -> std::result::Result<(), Box<Response>> {
-    model_name_error(state, &path.model, path.version.as_deref().unwrap_or(""))
-        .map_or(Ok(()), |message| {
-            Err(Box::new(v2_error(StatusCode::NOT_FOUND, &message)))
-        })
+/// The model the path names, or the v2 error response for an unknown model or version
+fn check_model(
+    state: &ServerState,
+    path: &ModelPath,
+) -> std::result::Result<Arc<ModelSlot>, Box<Response>> {
+    resolve_model(state, &path.model, path.version.as_deref().unwrap_or(""))
+        .map_err(|message| Box::new(v2_error(StatusCode::NOT_FOUND, &message)))
 }
 
-/// Why `model` / `version` is not the served model (an empty version means any), if it is not.
+/// The served model named `model` (an empty `version` means any), or why there is none.
 /// Shared with the gRPC transport.
-pub(super) fn model_name_error(state: &ServerState, model: &str, version: &str) -> Option<String> {
-    let name = &state.model.get_info().name;
-    if model != name {
-        return Some(format!(
-            "Unknown model '{model}'; this server serves '{name}'"
+pub(super) fn resolve_model(
+    state: &ServerState,
+    model: &str,
+    version: &str,
+) -> std::result::Result<Arc<ModelSlot>, String> {
+    let Some(slot) = state.slot(model) else {
+        return Err(format!(
+            "Unknown model '{model}'; this server serves {}",
+            state.model_names().join(", ")
         ));
-    }
+    };
     if !version.is_empty() && version != MODEL_VERSION {
-        return Some(format!(
-            "Unknown version '{version}' of model '{name}'; the only version is {MODEL_VERSION}"
+        return Err(format!(
+            "Unknown version '{version}' of model '{model}'; the only version is {MODEL_VERSION}"
         ));
     }
-    None
+    Ok(slot.clone())
 }
 
 async fn model_metadata(State(state): State<AppState>, Path(path): Path<ModelPath>) -> Response {
-    if let Err(response) = check_model(&state, &path) {
-        return *response;
-    }
-    let info = state.model.get_info();
+    let slot = match check_model(&state, &path) {
+        Ok(slot) => slot,
+        Err(response) => return *response,
+    };
+    let loaded = slot.get();
+    let info = loaded.model.get_info();
     let with_batch = |shape: &[usize]| {
         std::iter::once(-1)
             .chain(shape.iter().map(|&d| d as i64))
@@ -149,10 +156,11 @@ async fn model_metadata(State(state): State<AppState>, Path(path): Path<ModelPat
 }
 
 async fn model_ready(State(state): State<AppState>, Path(path): Path<ModelPath>) -> Response {
-    if let Err(response) = check_model(&state, &path) {
-        return *response;
+    match check_model(&state, &path) {
+        Ok(slot) if slot.get().ready() => StatusCode::OK.into_response(),
+        Ok(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Err(response) => *response,
     }
-    ready(State(state)).await.into_response()
 }
 
 /// A v2 error: `{"error": "..."}` (plus Furnace's `code`, `details` and `timestamp`, which v2
@@ -285,11 +293,13 @@ async fn infer(
     Path(path): Path<ModelPath>,
     request: Request,
 ) -> Response {
-    if let Err(response) = check_model(&state, &path) {
-        return *response;
-    }
+    let slot = match check_model(&state, &path) {
+        Ok(slot) => slot,
+        Err(response) => return *response,
+    };
+    let loaded = slot.get();
     // As in `/predict`: a batch about to start may wait for this request's body
-    let arrival = state.batcher.as_ref().map(Batcher::arrival);
+    let arrival = loaded.batcher.as_ref().map(Batcher::arrival);
     let header_len = match request.headers().get(&INFERENCE_HEADER_CONTENT_LENGTH) {
         None => None,
         Some(value) => match value
@@ -333,7 +343,7 @@ async fn infer(
             );
         }
     };
-    let (data, batch_size) = match decode_input(&state.model, &mut request, binary) {
+    let (data, batch_size) = match decode_input(&loaded.model, &mut request, binary) {
         Ok(input) => input,
         Err(message) => return v2_error(StatusCode::BAD_REQUEST, &message),
     };
@@ -363,7 +373,7 @@ async fn infer(
             return busy_response();
         }
     };
-    let output = match run_inference(&state, arrival, data, batch_size, permit).await {
+    let output = match run_inference(&state, &loaded, arrival, data, batch_size, permit).await {
         Ok(Ok(output)) => output,
         Ok(Err(e)) => {
             let status = match e {
@@ -376,9 +386,9 @@ async fn infer(
         }
         Err(response) => return *response,
     };
-    state.inference_latency.observe(start_time.elapsed());
+    state.observe_inference(&slot, start_time.elapsed());
 
-    let info = state.model.get_info();
+    let info = loaded.model.get_info();
     let shape: Vec<usize> = std::iter::once(batch_size)
         .chain(info.output_spec.shape.iter().copied())
         .collect();

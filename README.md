@@ -97,6 +97,8 @@ often helps. `furnace --help` lists the models in a build.
 | `POST /predict` | Inference |
 | `GET /healthz` / `GET /readyz` | Liveness / readiness (after the warm-up inference) |
 | `GET /model/info` | Input/output shapes and statistics |
+| `GET /models`, `POST /models/{model}/predict` | Several models side by side ([details](docs/API.md#several-models)) |
+| `POST /admin/models/{model}/reload` | Swap in a model, e.g. new weights, without downtime ([details](docs/API.md#reloading-a-model)) |
 | `GET /metrics` | Counters and latency percentiles as JSON, or the Prometheus format for a scraper |
 | `/v2/...` | KServe / Triton Open Inference Protocol: Triton and KServe clients work unchanged |
 
@@ -118,8 +120,8 @@ server's log lines for that request. Full reference, including errors:
 
 | Option | Default | |
 |---|---|---|
-| `-m, --model-name <NAME>` | the only built-in model | Model to serve |
-| `-w, --weights <PATH>` | `<name>.bpk` next to the binary, then in `models/` | Weight file |
+| `-m, --model-name <NAME>` | the only built-in model | Model to serve; `a,b` serves several, the first by `/predict` |
+| `-w, --weights <PATH>` | `<name>.bpk` next to the binary, then in `models/` | Weight file (one model) |
 | `-b, --backend <BACKEND>` | `cpu` | `cpu`, or `wgpu` / `metal` / `cuda` if built with that feature |
 | `--host <HOST>` / `-p, --port <PORT>` | `127.0.0.1` / `3000` | Listen address |
 | `--max-concurrent-requests <N>` | `100` | Beyond this, requests get `503` |
@@ -130,6 +132,7 @@ server's log lines for that request. Full reference, including errors:
 | `--batch-timeout-us <US>` | `2000` | Longest a batch waits for requests still arriving; a lone request never waits |
 | `--threads <N>` | one per physical core | Inference threads (also `RAYON_NUM_THREADS`) |
 | `--grpc-port <PORT>` | none | Also serve the KServe / Triton protocol over gRPC (builds with `--features grpc`; release binaries and the Docker image have it) |
+| `--admin-token <TOKEN>` | none | Enable the reload API for this bearer token (also `FURNACE_ADMIN_TOKEN`) |
 | `-l, --log-level <LEVEL>` | `info` | `RUST_LOG` sets per-module levels; `FURNACE_ENV=production` switches to JSON logs |
 | `--config <PATH>` | | Read options from a TOML file (also `FURNACE_CONFIG`); the command line overrides it. See [`furnace.example.toml`](furnace.example.toml) |
 

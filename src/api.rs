@@ -5,7 +5,7 @@ use axum::http::{
 use axum::{
     Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, FromRequest, Request, State},
+    extract::{DefaultBodyLimit, FromRequest, Path, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
@@ -174,8 +174,54 @@ pub struct MetricsResponse {
     pub request_latency_ms: Percentiles,
     /// Successful inference latency, queueing included, estimated percentiles
     pub inference_latency_ms: Percentiles,
-    /// Whether the warm-up inference has run (see `GET /readyz`)
+    /// Whether every model's warm-up inference has run (see `GET /readyz`)
     pub ready: bool,
+    /// The same per model; the fields above are totals over them
+    pub models: Vec<ModelMetrics>,
+    pub timestamp: String,
+}
+
+/// Per-model part of `GET /metrics`
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModelMetrics {
+    pub name: String,
+    pub ready: bool,
+    pub inference_count: u64,
+    pub error_count: u64,
+    pub batch_count: u64,
+    pub average_batch_size: f64,
+    pub average_inference_time_ms: f64,
+    pub inference_latency_ms: Percentiles,
+}
+
+/// `GET /models`
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModelsResponse {
+    /// The model `/predict` and `/model/info` use
+    pub default_model: String,
+    pub models: Vec<ModelSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModelSummary {
+    pub name: String,
+    pub ready: bool,
+    pub input_shape: Vec<usize>,
+    pub output_shape: Vec<usize>,
+    pub backend: String,
+    /// Whether `POST /admin/models/{model}/reload` can reload it
+    pub reloadable: bool,
+}
+
+/// `POST /admin/models/{model}/reload`
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReloadResponse {
+    pub model: String,
+    /// The weight file given in the request, if any
+    pub weights: Option<String>,
+    /// Loading, warming up and switching to the new model
+    pub reload_ms: f64,
+    pub warm_up_ms: f64,
     pub timestamp: String,
 }
 
@@ -225,6 +271,9 @@ pub struct ServerConfig {
     pub batching: BatchConfig,
     /// Port for the Open Inference Protocol over gRPC (feature `grpc`); `None` serves HTTP only
     pub grpc_port: Option<u16>,
+    /// Enables `POST /admin/models/{model}/reload` for clients presenting this bearer token;
+    /// `None` leaves the admin API off
+    pub admin_token: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -238,29 +287,118 @@ impl Default for ServerConfig {
             request_timeout: None,
             batching: BatchConfig::default(),
             grpc_port: None,
+            admin_token: None,
         }
     }
 }
 
 type AppState = Arc<ServerState>;
 
-struct ServerState {
+/// Loads a model again for `POST /admin/models/{model}/reload`, from the given weight file or,
+/// with `None`, from where it was loaded before. Blocking.
+pub type Reloader = Arc<dyn Fn(Option<&std::path::Path>) -> Result<Model> + Send + Sync>;
+
+/// A model to serve, and how to reload it (`None`: it cannot be reloaded)
+pub struct ServedModel {
+    pub model: Model,
+    pub reload: Option<Reloader>,
+}
+
+impl From<Model> for ServedModel {
+    fn from(model: Model) -> Self {
+        Self {
+            model,
+            reload: None,
+        }
+    }
+}
+
+/// What a reload replaces at once: the model with its batching workers and readiness
+struct Loaded {
     model: Arc<Model>,
+    /// `None` when batching is off: every request runs its own forward pass
+    batcher: Option<Batcher>,
+    /// Set once the warm-up inference has run
+    ready: Arc<AtomicBool>,
+}
+
+impl Loaded {
+    /// Serve `model`, warming it up on a background thread (`/readyz` waits for it)
+    fn start(model: Model, batching: BatchConfig) -> Arc<Self> {
+        let loaded = Self::new(model, batching);
+        let model = loaded.model.clone();
+        let ready = loaded.ready.clone();
+        std::thread::spawn(move || {
+            match model.warm_up() {
+                Ok(elapsed) => info!(
+                    "🔥 Warm-up inference of {} took {:.1}ms",
+                    model.get_info().name,
+                    elapsed.as_secs_f64() * 1e3
+                ),
+                Err(e) => warn!("Warm-up inference failed: {e}"),
+            }
+            ready.store(true, Ordering::Release);
+        });
+        Arc::new(loaded)
+    }
+
+    fn new(model: Model, batching: BatchConfig) -> Self {
+        let model = Arc::new(model);
+        Self {
+            batcher: batching
+                .enabled()
+                .then(|| Batcher::new(model.clone(), batching)),
+            model,
+            ready: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+}
+
+/// One served model, by name. Its [`Loaded`] is swapped as a whole on reload; requests already
+/// holding the old one finish on it, and it is dropped with the last of them.
+struct ModelSlot {
+    name: String,
+    current: std::sync::RwLock<Arc<Loaded>>,
+    reload: Option<Reloader>,
+    /// One reload at a time
+    reloading: tokio::sync::Mutex<()>,
+    /// Successful inferences of this model, from decoded input to output (queueing included)
+    inference_latency: Histogram,
+}
+
+impl ModelSlot {
+    fn get(&self) -> Arc<Loaded> {
+        self.current
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn replace(&self, loaded: Arc<Loaded>) {
+        *self.current.write().unwrap_or_else(|e| e.into_inner()) = loaded;
+    }
+}
+
+struct ServerState {
+    /// The served models; the first is the default for `/predict` and `/model/info`
+    models: Vec<Arc<ModelSlot>>,
     start_time: SystemTime,
     inference_slots: Arc<Semaphore>,
     max_concurrent: usize,
     request_timeout: Option<Duration>,
-    /// `None` when batching is off: every request runs its own forward pass
-    batcher: Option<Batcher>,
+    batching: BatchConfig,
     max_batch_size: usize,
+    admin_token: Option<String>,
     total_requests: AtomicU64,
     total_errors: AtomicU64,
     rejected_busy: AtomicU64,
-    /// Set once the warm-up inference has run; `/readyz` answers 503 until then
-    ready: Arc<AtomicBool>,
-    /// `/predict` from arrival to response, every status
+    /// Inference requests from arrival to response, every status
     request_latency: Histogram,
-    /// Successful inferences, from the decoded input to the output (queueing included)
+    /// Successful inferences of every model, from decoded input to output (queueing included)
     inference_latency: Histogram,
 }
 
@@ -268,53 +406,72 @@ impl ServerState {
     fn uptime_seconds(&self) -> u64 {
         self.start_time.elapsed().unwrap_or_default().as_secs()
     }
+
+    fn default_slot(&self) -> &Arc<ModelSlot> {
+        &self.models[0]
+    }
+
+    fn slot(&self, name: &str) -> Option<&Arc<ModelSlot>> {
+        self.models.iter().find(|slot| slot.name == name)
+    }
+
+    /// Whether every model has run its warm-up
+    fn ready(&self) -> bool {
+        self.models.iter().all(|slot| slot.get().ready())
+    }
+
+    fn model_names(&self) -> Vec<&str> {
+        self.models.iter().map(|slot| slot.name.as_str()).collect()
+    }
+
+    /// Record a successful inference of `slot`'s model
+    fn observe_inference(&self, slot: &ModelSlot, elapsed: Duration) {
+        slot.inference_latency.observe(elapsed);
+        self.inference_latency.observe(elapsed);
+    }
 }
 
 /// Build the application router with all middleware applied
 pub fn router(model: Model, config: &ServerConfig) -> Router {
-    router_with_state(server_state(model, config), config)
+    router_with_models(vec![model.into()], config)
 }
 
-/// The shared state of the HTTP and gRPC servers; also starts the warm-up inference
-fn server_state(model: Model, config: &ServerConfig) -> AppState {
-    let model = Arc::new(model);
+/// [`router`] for several models; the first is the default for `/predict`
+pub fn router_with_models(models: Vec<ServedModel>, config: &ServerConfig) -> Router {
+    router_with_state(server_state(models, config), config)
+}
+
+/// The shared state of the HTTP and gRPC servers; also starts the models' warm-ups
+fn server_state(models: Vec<ServedModel>, config: &ServerConfig) -> AppState {
+    assert!(!models.is_empty(), "at least one model to serve");
     let batching = config.batching;
-    let state = Arc::new(ServerState {
-        batcher: batching
-            .enabled()
-            .then(|| Batcher::new(model.clone(), batching)),
-        max_batch_size: batching.max_batch_size.max(1),
-        model,
+    let models = models
+        .into_iter()
+        .map(|served| {
+            Arc::new(ModelSlot {
+                name: served.model.get_info().name.clone(),
+                current: std::sync::RwLock::new(Loaded::start(served.model, batching)),
+                reload: served.reload,
+                reloading: tokio::sync::Mutex::new(()),
+                inference_latency: Histogram::new(),
+            })
+        })
+        .collect();
+    Arc::new(ServerState {
+        models,
         start_time: SystemTime::now(),
         inference_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
         max_concurrent: config.max_concurrent_requests,
         request_timeout: config.request_timeout,
+        batching,
+        max_batch_size: batching.max_batch_size.max(1),
+        admin_token: config.admin_token.clone(),
         total_requests: AtomicU64::new(0),
         total_errors: AtomicU64::new(0),
         rejected_busy: AtomicU64::new(0),
-        ready: Arc::new(AtomicBool::new(false)),
         request_latency: Histogram::new(),
         inference_latency: Histogram::new(),
-    });
-
-    // Warm up off the request path: the server accepts requests at once (they just pay the
-    // first-inference cost themselves), while `/readyz` turns 200 when this is done
-    {
-        let model = state.model.clone();
-        let ready = state.ready.clone();
-        std::thread::spawn(move || {
-            match model.warm_up() {
-                Ok(elapsed) => info!(
-                    "🔥 Warm-up inference took {:.1}ms",
-                    elapsed.as_secs_f64() * 1e3
-                ),
-                Err(e) => warn!("Warm-up inference failed: {e}"),
-            }
-            ready.store(true, Ordering::Release);
-        });
-    }
-
-    state
+    })
 }
 
 fn router_with_state(state: AppState, config: &ServerConfig) -> Router {
@@ -340,7 +497,17 @@ fn router_with_state(state: AppState, config: &ServerConfig) -> Router {
                 count_requests,
             )),
         )
+        .route(
+            "/models/{model}/predict",
+            post(predict_named).layer(middleware::from_fn_with_state(
+                state.clone(),
+                count_requests,
+            )),
+        )
         .route("/model/info", get(model_info))
+        .route("/models", get(list_models))
+        .route("/models/{model}", get(model_info_named))
+        .route("/admin/models/{model}/reload", post(reload_model))
         .route("/metrics", get(metrics))
         .merge(v2::routes(state.clone()))
         .layer(DefaultBodyLimit::max(config.max_body_bytes))
@@ -390,7 +557,16 @@ pub async fn start_server(host: &str, port: u16, model: Model) -> Result<()> {
 }
 
 pub async fn start_server_with_config(config: ServerConfig, model: Model) -> Result<()> {
-    let state = server_state(model, &config);
+    start_server_with_models(config, vec![model.into()]).await
+}
+
+/// [`start_server_with_config`] for several models; the first is the default for `/predict`
+pub async fn start_server_with_models(
+    config: ServerConfig,
+    models: Vec<ServedModel>,
+) -> Result<()> {
+    let state = server_state(models, &config);
+    info!("📚 Serving {}", state.model_names().join(", "));
     let app = router_with_state(state.clone(), &config);
     info!(
         "🚦 Concurrency limit set to {} inferences",
@@ -493,7 +669,7 @@ async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "healthy".to_string(),
         model_loaded: true,
-        backend: state.model.get_backend_info(),
+        backend: state.default_slot().get().model.get_backend_info(),
         uptime_seconds: state.uptime_seconds(),
         timestamp: Utc::now().to_rfc3339(),
     })
@@ -502,7 +678,7 @@ async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
 /// `GET /readyz`: 200 once the warm-up inference has run, 503 before. Unlike `/healthz`
 /// (alive), this tells a load balancer when to start sending traffic.
 async fn readiness(State(state): State<AppState>) -> Response {
-    let ready = state.ready.load(Ordering::Acquire);
+    let ready = state.ready();
     let status = if ready {
         StatusCode::OK
     } else {
@@ -519,9 +695,40 @@ async fn readiness(State(state): State<AppState>) -> Response {
 }
 
 async fn predict(State(state): State<AppState>, request: Request) -> Response {
+    let slot = state.default_slot().clone();
+    predict_with(&state, &slot, request).await
+}
+
+/// `POST /models/{model}/predict`: `/predict` for any served model
+async fn predict_named(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    request: Request,
+) -> Response {
+    let Some(slot) = state.slot(&name).cloned() else {
+        return unknown_model_response(&state, &name);
+    };
+    predict_with(&state, &slot, request).await
+}
+
+fn unknown_model_response(state: &ServerState, name: &str) -> Response {
+    create_error_response(
+        StatusCode::NOT_FOUND,
+        "MODEL_NOT_FOUND",
+        &format!(
+            "Unknown model '{name}'; this server serves {}",
+            state.model_names().join(", ")
+        ),
+        Some(serde_json::json!({ "models": state.model_names() })),
+    )
+}
+
+async fn predict_with(state: &AppState, slot: &ModelSlot, request: Request) -> Response {
+    // The model as of now: a reload during this request does not affect it
+    let loaded = slot.get();
     // Tell the batcher a request is on its way in, so a batch about to start can wait
     // for it while its body is received and decoded
-    let arrival = state.batcher.as_ref().map(Batcher::arrival);
+    let arrival = loaded.batcher.as_ref().map(Batcher::arrival);
     // Pick the decoder before buffering the body so unsupported types fail fast
     let format = match RequestFormat::from_headers(request.headers()) {
         Some(format) => format,
@@ -536,14 +743,14 @@ async fn predict(State(state): State<AppState>, request: Request) -> Response {
     };
     #[cfg(feature = "image")]
     if let RequestFormat::Image(_) = format
-        && let Err(response) = image_size(&state.model)
+        && let Err(response) = image_size(&loaded.model)
     {
         return *response;
     }
     let binary_response = accepts_octet_stream(request.headers());
     let headers = request.headers().clone();
 
-    let body = match Bytes::from_request(request, &state).await {
+    let body = match Bytes::from_request(request, state).await {
         Ok(body) => body,
         Err(rejection) => {
             warn!("Rejected request body: {}", rejection.body_text());
@@ -557,10 +764,10 @@ async fn predict(State(state): State<AppState>, request: Request) -> Response {
     };
 
     let decoded = match format {
-        RequestFormat::Json => decode_json(&state.model, &body),
-        RequestFormat::Binary => decode_binary(&state.model, &headers, &body),
+        RequestFormat::Json => decode_json(&loaded.model, &body),
+        RequestFormat::Binary => decode_binary(&loaded.model, &headers, &body),
         #[cfg(feature = "image")]
-        RequestFormat::Image(kind) => decode_image(&state, kind, body.clone()).await,
+        RequestFormat::Image(kind) => decode_image(state, &loaded.model, kind, body.clone()).await,
     };
     // Free the raw body before inference; only the decoded floats are needed now
     drop(body);
@@ -584,7 +791,7 @@ async fn predict(State(state): State<AppState>, request: Request) -> Response {
         }
     };
 
-    let result = match run_inference(&state, arrival, data, batch_size, permit).await {
+    let result = match run_inference(state, &loaded, arrival, data, batch_size, permit).await {
         Ok(result) => result,
         Err(response) => return *response,
     };
@@ -592,7 +799,7 @@ async fn predict(State(state): State<AppState>, request: Request) -> Response {
     match result {
         Ok(output) => {
             let elapsed = start_time.elapsed();
-            state.inference_latency.observe(elapsed);
+            state.observe_inference(slot, elapsed);
             let inference_time_ms = elapsed.as_secs_f64() * 1000.0;
             info!(
                 "Prediction completed in {:.2}ms, batch size: {}",
@@ -602,7 +809,7 @@ async fn predict(State(state): State<AppState>, request: Request) -> Response {
                 return binary_output_response(
                     &output,
                     batch_size,
-                    &state.model.get_info().output_spec.shape,
+                    &loaded.model.get_info().output_spec.shape,
                     inference_time_ms,
                 );
             }
@@ -655,19 +862,20 @@ async fn predict(State(state): State<AppState>, request: Request) -> Response {
 /// model's answer for this request.
 async fn run_inference(
     state: &ServerState,
+    loaded: &Loaded,
     arrival: Option<Arrival<'_>>,
     data: Vec<f32>,
     batch_size: usize,
     permit: OwnedSemaphorePermit,
 ) -> std::result::Result<Result<Vec<f32>>, Box<Response>> {
-    let task = match (&state.batcher, arrival) {
+    let task = match (&loaded.batcher, arrival) {
         (Some(batcher), Some(arrival)) => {
             let receiver = batcher.submit(arrival, FlatInput { data, batch_size }, permit);
             InferenceTask::Batched(receiver)
         }
         _ => {
             // Inference is CPU/GPU-bound; keep it off the async runtime threads
-            let model = state.model.clone();
+            let model = loaded.model.clone();
             InferenceTask::Alone(tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 model.predict_flat(data, batch_size)
@@ -920,10 +1128,11 @@ fn image_size(model: &Model) -> std::result::Result<(u32, u32), Box<Response>> {
 #[cfg(feature = "image")]
 async fn decode_image(
     state: &ServerState,
+    model: &Model,
     kind: ImageKind,
     body: Bytes,
 ) -> std::result::Result<PredictInput, Box<Response>> {
-    let (height, width) = image_size(&state.model)?;
+    let (height, width) = image_size(model)?;
     if body.is_empty() {
         return Err(empty_input_response());
     }
@@ -1096,20 +1305,18 @@ fn wants_prometheus(headers: &HeaderMap) -> bool {
 
 fn prometheus_metrics(state: &ServerState) -> String {
     use crate::telemetry::{label, render_value};
-    let stats = state.model.get_stats();
-    let info = state.model.get_info();
-    let mut out = String::with_capacity(4096);
-    out.push_str("# HELP furnace_build_info Furnace version, model and backend\n");
-    out.push_str("# TYPE furnace_build_info gauge\n");
-    out.push_str(&format!(
-        "furnace_build_info{{version=\"{}\",model=\"{}\",backend=\"{}\"}} 1\n",
-        env!("CARGO_PKG_VERSION"),
-        label(&info.name),
-        label(&info.backend),
-    ));
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(8192);
+    let _ = writeln!(out, "# HELP furnace_build_info Furnace version");
+    let _ = writeln!(out, "# TYPE furnace_build_info gauge");
+    let _ = writeln!(
+        out,
+        "furnace_build_info{{version=\"{}\"}} 1",
+        env!("CARGO_PKG_VERSION")
+    );
     let gauge = "gauge";
     let counter = "counter";
-    let values: [(&str, &str, &str, u64); 13] = [
+    let values: [(&str, &str, &str, u64); 8] = [
         (
             "furnace_uptime_seconds",
             gauge,
@@ -1119,8 +1326,8 @@ fn prometheus_metrics(state: &ServerState) -> String {
         (
             "furnace_ready",
             gauge,
-            "1 once the warm-up inference has run",
-            u64::from(state.ready.load(Ordering::Acquire)),
+            "1 once every model's warm-up inference has run",
+            u64::from(state.ready()),
         ),
         (
             "furnace_requests_total",
@@ -1153,40 +1360,10 @@ fn prometheus_metrics(state: &ServerState) -> String {
             state.max_concurrent as u64,
         ),
         (
-            "furnace_inferences_total",
-            counter,
-            "Requests that reached the model",
-            stats.inference_count,
-        ),
-        (
-            "furnace_inference_errors_total",
-            counter,
-            "Requests the model failed",
-            stats.error_count,
-        ),
-        (
-            "furnace_batches_total",
-            counter,
-            "Forward passes run",
-            stats.batch_count,
-        ),
-        (
-            "furnace_batch_items_total",
-            counter,
-            "Items processed by forward passes",
-            stats.batched_items,
-        ),
-        (
             "furnace_max_batch_size",
             gauge,
             "Most items per batched forward pass; 1 means batching is off",
             state.max_batch_size as u64,
-        ),
-        (
-            "furnace_model_size_bytes",
-            gauge,
-            "Size of the model weights",
-            info.model_size_bytes,
         ),
     ];
     for (name, kind, help, value) in values {
@@ -1195,13 +1372,91 @@ fn prometheus_metrics(state: &ServerState) -> String {
     state.request_latency.render(
         &mut out,
         "furnace_request_duration_seconds",
-        "/predict latency from arrival to response",
+        "Inference request latency from arrival to response",
     );
-    state.inference_latency.render(
-        &mut out,
-        "furnace_inference_duration_seconds",
-        "Successful inference latency from decoded input to output, queueing included",
+
+    // Per model, labelled `model`
+    let models: Vec<_> = state
+        .models
+        .iter()
+        .map(|slot| {
+            let loaded = slot.get();
+            (slot, loaded.model.get_stats(), loaded)
+        })
+        .collect();
+    type Field = fn(&ModelStats, &Loaded) -> String;
+    let families: [(&str, &str, &str, Field); 7] = [
+        (
+            "furnace_model_info",
+            gauge,
+            "Served models and their backends",
+            |_, _| "1".to_string(),
+        ),
+        (
+            "furnace_model_ready",
+            gauge,
+            "1 once the model's warm-up inference has run",
+            |_, l| u8::from(l.ready()).to_string(),
+        ),
+        (
+            "furnace_inferences_total",
+            counter,
+            "Requests that reached the model",
+            |s, _| s.inference_count.to_string(),
+        ),
+        (
+            "furnace_inference_errors_total",
+            counter,
+            "Requests the model failed",
+            |s, _| s.error_count.to_string(),
+        ),
+        (
+            "furnace_batches_total",
+            counter,
+            "Forward passes run",
+            |s, _| s.batch_count.to_string(),
+        ),
+        (
+            "furnace_batch_items_total",
+            counter,
+            "Items processed by forward passes",
+            |s, _| s.batched_items.to_string(),
+        ),
+        (
+            "furnace_model_size_bytes",
+            gauge,
+            "Size of the model weights",
+            |_, l| l.model.get_info().model_size_bytes.to_string(),
+        ),
+    ];
+    for (name, kind, help, field) in families {
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} {kind}");
+        for (slot, stats, loaded) in &models {
+            let mut labels = format!("model=\"{}\"", label(&slot.name));
+            if name == "furnace_model_info" {
+                let _ = write!(
+                    labels,
+                    ",backend=\"{}\"",
+                    label(&loaded.model.get_info().backend)
+                );
+            }
+            let _ = writeln!(out, "{name}{{{labels}}} {}", field(stats, loaded));
+        }
+    }
+    let name = "furnace_inference_duration_seconds";
+    let _ = writeln!(
+        out,
+        "# HELP {name} Successful inference latency from decoded input to output, queueing included"
     );
+    let _ = writeln!(out, "# TYPE {name} histogram");
+    for (slot, _, _) in &models {
+        slot.inference_latency.render_series(
+            &mut out,
+            name,
+            &format!("model=\"{}\"", label(&slot.name)),
+        );
+    }
     out
 }
 
@@ -1212,7 +1467,54 @@ fn in_flight(state: &ServerState) -> usize {
 }
 
 fn json_metrics(state: &ServerState) -> MetricsResponse {
-    let stats = state.model.get_stats();
+    let models: Vec<ModelMetrics> = state
+        .models
+        .iter()
+        .map(|slot| {
+            let loaded = slot.get();
+            let stats = loaded.model.get_stats();
+            ModelMetrics {
+                name: slot.name.clone(),
+                ready: loaded.ready(),
+                inference_count: stats.inference_count,
+                error_count: stats.error_count,
+                batch_count: stats.batch_count,
+                average_batch_size: average_batch_size(&stats),
+                average_inference_time_ms: stats.average_inference_time_ms,
+                inference_latency_ms: slot.inference_latency.percentiles_ms(),
+            }
+        })
+        .collect();
+    // Totals over the models
+    let stats: Vec<ModelStats> = state
+        .models
+        .iter()
+        .map(|slot| slot.get().model.get_stats())
+        .collect();
+    let success_count: u64 = stats.iter().map(|s| s.success_count).sum();
+    let total_inference_time_ms: f64 = stats.iter().map(|s| s.total_inference_time_ms).sum();
+    let stats = ModelStats {
+        inference_count: stats.iter().map(|s| s.inference_count).sum(),
+        total_inference_time_ms,
+        last_inference_time: stats.iter().filter_map(|s| s.last_inference_time).max(),
+        average_inference_time_ms: if success_count == 0 {
+            0.0
+        } else {
+            total_inference_time_ms / success_count as f64
+        },
+        error_count: stats.iter().map(|s| s.error_count).sum(),
+        success_count,
+        min_inference_time_ms: stats
+            .iter()
+            .filter_map(|s| s.min_inference_time_ms)
+            .reduce(f64::min),
+        max_inference_time_ms: stats
+            .iter()
+            .filter_map(|s| s.max_inference_time_ms)
+            .reduce(f64::max),
+        batch_count: stats.iter().map(|s| s.batch_count).sum(),
+        batched_items: stats.iter().map(|s| s.batched_items).sum(),
+    };
     MetricsResponse {
         uptime_seconds: state.uptime_seconds(),
         total_requests: state.total_requests.load(Ordering::Relaxed),
@@ -1222,27 +1524,221 @@ fn json_metrics(state: &ServerState) -> MetricsResponse {
         max_concurrent_inferences: state.max_concurrent,
         total_inferences: stats.inference_count,
         total_batches: stats.batch_count,
-        average_batch_size: if stats.batch_count == 0 {
-            0.0
-        } else {
-            stats.batched_items as f64 / stats.batch_count as f64
-        },
+        average_batch_size: average_batch_size(&stats),
         max_batch_size: state.max_batch_size,
         average_inference_time_ms: stats.average_inference_time_ms,
         last_inference_at: stats.last_inference_time.map(|t| t.to_rfc3339()),
         request_latency_ms: state.request_latency.percentiles_ms(),
         inference_latency_ms: state.inference_latency.percentiles_ms(),
-        ready: state.ready.load(Ordering::Acquire),
+        ready: state.ready(),
+        models,
         timestamp: Utc::now().to_rfc3339(),
     }
 }
 
-async fn model_info(State(state): State<AppState>) -> Json<ModelInfoResponse> {
-    Json(ModelInfoResponse {
-        model_info: state.model.get_info().clone(),
-        stats: state.model.get_stats(),
+fn average_batch_size(stats: &ModelStats) -> f64 {
+    if stats.batch_count == 0 {
+        0.0
+    } else {
+        stats.batched_items as f64 / stats.batch_count as f64
+    }
+}
+
+fn model_info_response(slot: &ModelSlot) -> ModelInfoResponse {
+    let loaded = slot.get();
+    ModelInfoResponse {
+        model_info: loaded.model.get_info().clone(),
+        stats: loaded.model.get_stats(),
         timestamp: Utc::now().to_rfc3339(),
+    }
+}
+
+/// `GET /model/info`: the default model
+async fn model_info(State(state): State<AppState>) -> Json<ModelInfoResponse> {
+    Json(model_info_response(state.default_slot()))
+}
+
+/// `GET /models/{model}`
+async fn model_info_named(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    match state.slot(&name) {
+        Some(slot) => Json(model_info_response(slot)).into_response(),
+        None => unknown_model_response(&state, &name),
+    }
+}
+
+/// `GET /models`: every served model
+async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse> {
+    let models = state
+        .models
+        .iter()
+        .map(|slot| {
+            let loaded = slot.get();
+            let info = loaded.model.get_info();
+            ModelSummary {
+                name: slot.name.clone(),
+                ready: loaded.ready(),
+                input_shape: info.input_spec.shape.clone(),
+                output_shape: info.output_spec.shape.clone(),
+                backend: info.backend.clone(),
+                reloadable: slot.reload.is_some(),
+            }
+        })
+        .collect();
+    Json(ModelsResponse {
+        default_model: state.default_slot().name.clone(),
+        models,
     })
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ReloadRequest {
+    /// New weight file; by default the model reloads from where it was loaded before
+    weights: Option<std::path::PathBuf>,
+}
+
+/// `POST /admin/models/{model}/reload` (bearer token `--admin-token`): load the model again,
+/// warm it up, and switch to it. Requests in flight finish on the previous one.
+async fn reload_model(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(token) = &state.admin_token else {
+        return create_error_response(
+            StatusCode::NOT_FOUND,
+            "ADMIN_API_DISABLED",
+            "The admin API is off; start the server with --admin-token to enable it",
+            None,
+        );
+    };
+    if !authorized(&headers, token) {
+        let mut response = create_error_response(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "Missing or wrong bearer token",
+            None,
+        );
+        response.headers_mut().insert(
+            axum::http::header::WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer"),
+        );
+        return response;
+    }
+    let Some(slot) = state.slot(&name).cloned() else {
+        return unknown_model_response(&state, &name);
+    };
+    let Some(reload) = slot.reload.clone() else {
+        return create_error_response(
+            StatusCode::CONFLICT,
+            "NOT_RELOADABLE",
+            &format!("Model '{name}' cannot be reloaded"),
+            None,
+        );
+    };
+    let request: ReloadRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        ReloadRequest::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(request) => request,
+            Err(e) => {
+                return create_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_REQUEST",
+                    &format!("Expected {{\"weights\": \"<path>\"}} or an empty body: {e}"),
+                    None,
+                );
+            }
+        }
+    };
+    let Ok(_reloading) = slot.reloading.try_lock() else {
+        return create_error_response(
+            StatusCode::CONFLICT,
+            "RELOAD_IN_PROGRESS",
+            &format!("Model '{name}' is already being reloaded"),
+            None,
+        );
+    };
+
+    let previous = slot.get();
+    let batching = state.batching;
+    let weights = request.weights.clone();
+    let start = Instant::now();
+    let task = tokio::task::spawn_blocking(move || -> Result<(Loaded, f64)> {
+        let model = reload(weights.as_deref())?;
+        let previous_info = previous.model.get_info();
+        let info = model.get_info();
+        if info.name != previous_info.name {
+            return Err(ModelError::InvalidFormat(format!(
+                "The reloaded model is named '{}', not '{}'",
+                info.name, previous_info.name
+            ))
+            .into());
+        }
+        if info.input_spec.shape != previous_info.input_spec.shape
+            || info.output_spec.shape != previous_info.output_spec.shape
+        {
+            return Err(ModelError::InvalidFormat(format!(
+                "The reloaded model takes {:?} -> {:?}, the served one {:?} -> {:?}",
+                info.input_spec.shape,
+                info.output_spec.shape,
+                previous_info.input_spec.shape,
+                previous_info.output_spec.shape
+            ))
+            .into());
+        }
+        model.adopt_stats(&previous.model);
+        let loaded = Loaded::new(model, batching);
+        let warm_up = loaded
+            .model
+            .warm_up()
+            .map_err(ModelError::InferenceFailed)?;
+        loaded.ready.store(true, Ordering::Release);
+        Ok((loaded, warm_up.as_secs_f64() * 1e3))
+    });
+    match task.await {
+        Ok(Ok((loaded, warm_up_ms))) => {
+            slot.replace(Arc::new(loaded));
+            let reload_ms = start.elapsed().as_secs_f64() * 1e3;
+            info!("🔄 Reloaded model {name} in {reload_ms:.1}ms (warm-up {warm_up_ms:.1}ms)");
+            Json(ReloadResponse {
+                model: name,
+                weights: request.weights.map(|p| p.display().to_string()),
+                reload_ms,
+                warm_up_ms,
+                timestamp: Utc::now().to_rfc3339(),
+            })
+            .into_response()
+        }
+        Ok(Err(e)) => {
+            warn!("Reloading model {name} failed, still serving the previous one: {e}");
+            create_error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "RELOAD_FAILED",
+                &format!("Reload failed, still serving the previous model: {e}"),
+                None,
+            )
+        }
+        Err(e) => create_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RELOAD_FAILED",
+            &format!("Reload task failed, still serving the previous model: {e}"),
+            None,
+        ),
+    }
+}
+
+/// Whether `Authorization` is `Bearer <token>`, compared in constant time
+fn authorized(headers: &HeaderMap, token: &str) -> bool {
+    let Some(given) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return false;
+    };
+    let (a, b) = (given.as_bytes(), token.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn create_error_response(
@@ -1279,7 +1775,7 @@ pub(crate) mod tests {
 
     #[cfg(feature = "grpc")]
     pub(super) fn test_app_state() -> AppState {
-        server_state(dummy_model(), &ServerConfig::default())
+        server_state(vec![dummy_model().into()], &ServerConfig::default())
     }
 
     pub(super) async fn send(
@@ -1486,7 +1982,11 @@ pub(crate) mod tests {
                 "/health",
                 "/healthz",
                 "/metrics",
+                "/admin/models/{model}/reload",
                 "/model/info",
+                "/models",
+                "/models/{model}",
+                "/models/{model}/predict",
                 "/predict",
                 "/readyz",
                 "/v2",
@@ -1565,6 +2065,251 @@ pub(crate) mod tests {
         assert_matches_schema(&spec, "ModelInfo", &info["model_info"]);
         assert_matches_schema(&spec, "ModelStats", &info["stats"]);
         assert_matches_schema(&spec, "TensorSpec", &info["model_info"]["input_spec"]);
+        assert_matches_schema(&spec, "ModelInfoResponse", &get("/models/test_model").await);
+        assert_matches_schema(&spec, "ModelMetrics", &metrics["models"][0]);
+        let models = get("/models").await;
+        assert_matches_schema(&spec, "ModelsResponse", &models);
+        assert_matches_schema(&spec, "ModelSummary", &models["models"][0]);
+
+        let app = multi_app(Some(TOKEN));
+        let (status, body) = send(app.clone(), reload_request("a", Some(TOKEN), "")).await;
+        assert_eq!(status, StatusCode::OK);
+        let reload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_matches_schema(&spec, "ReloadResponse", &reload);
+    }
+
+    const TOKEN: &str = "0123456789abcdef-token";
+
+    fn named_model(name: &str) -> Model {
+        let dummy = DummyModel::new(name.to_string(), vec![784], vec![10]);
+        Model::new(Box::new(dummy), "dummy", 0)
+    }
+
+    /// Models "a" (the default) and "b"; reloading with weights "bad" fails, "renamed" loads a
+    /// model with another name
+    fn multi_app(admin_token: Option<&str>) -> Router {
+        let models = ["a", "b"]
+            .map(|name| {
+                let name = name.to_string();
+                ServedModel {
+                    model: named_model(&name),
+                    reload: Some(Arc::new(
+                        move |weights: Option<&std::path::Path>| match weights
+                            .and_then(|w| w.to_str())
+                        {
+                            Some("bad") => {
+                                Err(ModelError::InvalidFormat("bad weights".to_string()).into())
+                            }
+                            Some("renamed") => Ok(named_model("other")),
+                            _ => Ok(named_model(&name)),
+                        },
+                    )),
+                }
+            })
+            .into();
+        let config = ServerConfig {
+            admin_token: admin_token.map(str::to_string),
+            ..ServerConfig::default()
+        };
+        router_with_models(models, &config)
+    }
+
+    fn reload_request(model: &str, token: Option<&str>, body: &str) -> Request<Body> {
+        let mut request = Request::builder()
+            .uri(format!("/admin/models/{model}/reload"))
+            .method("POST")
+            .header(CONTENT_TYPE, "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        request.body(Body::from(body.to_string())).unwrap()
+    }
+
+    fn named_predict_request(model: &str) -> Request<Body> {
+        Request::builder()
+            .uri(format!("/models/{model}/predict"))
+            .method("POST")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "input": vec![0.5; 784] }).to_string(),
+            ))
+            .unwrap()
+    }
+
+    async fn get_json(app: &Router, path: &str) -> (StatusCode, serde_json::Value) {
+        let request = Request::builder().uri(path).body(Body::empty()).unwrap();
+        let (status, body) = send(app.clone(), request).await;
+        (status, serde_json::from_slice(&body).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn test_several_models_side_by_side() {
+        let app = multi_app(None);
+        let ok = serde_json::json!({ "input": vec![0.5; 784] }).to_string();
+        // `/predict` serves the first model, "a"; the per-model counts below tell them apart
+        let (status, _) = send(app.clone(), predict_request(ok)).await;
+        assert_eq!(status, StatusCode::OK);
+        for _ in 0..2 {
+            let (status, _) = send(app.clone(), named_predict_request("b")).await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        let (status, body) = send(app.clone(), named_predict_request("c")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["code"], "MODEL_NOT_FOUND");
+
+        let (status, models) = get_json(&app, "/models").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(models["default_model"], "a");
+        assert_eq!(models["models"].as_array().unwrap().len(), 2);
+        assert_eq!(models["models"][1]["name"], "b");
+        assert_eq!(models["models"][1]["reloadable"], true);
+        let (status, info) = get_json(&app, "/models/b").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(info["model_info"]["name"], "b");
+        assert_eq!(info["stats"]["inference_count"], 2);
+        let (status, _) = get_json(&app, "/models/c").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // The v2 protocol addresses the models by name too
+        let infer = |model: &str| {
+            Request::builder()
+                .uri(format!("/v2/models/{model}/infer"))
+                .method("POST")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "inputs": [{ "name": "input", "shape": [1, 784], "datatype": "FP32", "data": vec![0.5; 784] }],
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+        let (status, body) = send(app.clone(), infer("b")).await;
+        assert_eq!(status, StatusCode::OK);
+        let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["model_name"], "b");
+        let (status, body) = send(app.clone(), infer("c")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let error = String::from_utf8_lossy(&body);
+        assert!(error.contains("a, b"), "{error}");
+
+        let metrics = get_metrics(app.clone()).await;
+        assert_eq!(metrics.total_inferences, 4);
+        let per_model: Vec<_> = metrics
+            .models
+            .iter()
+            .map(|m| (m.name.as_str(), m.inference_count))
+            .collect();
+        assert_eq!(per_model, [("a", 1), ("b", 3)]);
+
+        let request = Request::builder()
+            .uri("/metrics")
+            .header(ACCEPT, "text/plain")
+            .body(Body::empty())
+            .unwrap();
+        let (_, body) = send(app.clone(), request).await;
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            text.contains("furnace_inferences_total{model=\"b\"} 3\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("furnace_inference_duration_seconds_count{model=\"a\"} 1\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("furnace_model_info{model=\"a\",backend="),
+            "{text}"
+        );
+        // One HELP / TYPE per family, as Prometheus requires
+        assert_eq!(text.matches("# TYPE furnace_inferences_total ").count(), 1);
+        assert_eq!(
+            text.matches("# TYPE furnace_inference_duration_seconds ")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reload_needs_the_admin_token() {
+        let (status, body) = send(multi_app(None), reload_request("a", Some(TOKEN), "")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(String::from_utf8_lossy(&body).contains("ADMIN_API_DISABLED"));
+
+        let app = multi_app(Some(TOKEN));
+        for token in [None, Some("wrong"), Some("0123456789abcdef-tokeN")] {
+            let response = app
+                .clone()
+                .oneshot(reload_request("a", token, ""))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{token:?}");
+            assert_eq!(response.headers()["www-authenticate"], "Bearer");
+        }
+        let (status, _) = send(app.clone(), reload_request("c", Some(TOKEN), "")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_reload_swaps_the_model_and_keeps_its_stats() {
+        let app = multi_app(Some(TOKEN));
+        let (status, _) = send(app.clone(), named_predict_request("b")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = send(app.clone(), reload_request("b", Some(TOKEN), "")).await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let reload: ReloadResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(reload.model, "b");
+        assert!(reload.reload_ms >= reload.warm_up_ms);
+
+        // The new model is ready at once and carries the old one's counts on
+        let (_, models) = get_json(&app, "/models").await;
+        assert_eq!(models["models"][1]["ready"], true);
+        let (status, _) = send(app.clone(), named_predict_request("b")).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, info) = get_json(&app, "/models/b").await;
+        assert_eq!(info["stats"]["inference_count"], 2);
+
+        // A failed reload leaves the previous model serving
+        for (body, code) in [
+            (r#"{"weights": "bad"}"#, StatusCode::UNPROCESSABLE_ENTITY),
+            (
+                r#"{"weights": "renamed"}"#,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("not json", StatusCode::BAD_REQUEST),
+        ] {
+            let (status, _) = send(app.clone(), reload_request("b", Some(TOKEN), body)).await;
+            assert_eq!(status, code, "{body}");
+            let (status, _) = send(app.clone(), named_predict_request("b")).await;
+            assert_eq!(status, StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_requests_during_a_reload_succeed() {
+        let app = multi_app(Some(TOKEN));
+        let requests: Vec<_> = (0..64)
+            .map(|_| tokio::spawn(send(app.clone(), named_predict_request("a"))))
+            .collect();
+        let reloads: Vec<_> = (0..4)
+            .map(|_| tokio::spawn(send(app.clone(), reload_request("a", Some(TOKEN), ""))))
+            .collect();
+        for request in requests {
+            assert_eq!(request.await.unwrap().0, StatusCode::OK);
+        }
+        // Reloads of one model run one at a time; any overlapping one is told so
+        let mut reloaded = 0;
+        for reload in reloads {
+            match reload.await.unwrap().0 {
+                StatusCode::OK => reloaded += 1,
+                status => assert_eq!(status, StatusCode::CONFLICT),
+            }
+        }
+        assert!(reloaded >= 1);
+        let metrics = get_metrics(app).await;
+        assert_eq!(metrics.models[0].inference_count, 64);
     }
 
     /// Poll `/readyz` until the warm-up has run
@@ -1629,7 +2374,10 @@ pub(crate) mod tests {
             .unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("furnace_requests_total 3\n"), "{text}");
-        assert!(text.contains("furnace_inferences_total 3\n"), "{text}");
+        assert!(
+            text.contains("furnace_inferences_total{model=\"test_model\"} 3\n"),
+            "{text}"
+        );
         assert!(
             text.contains("furnace_request_duration_seconds_count 3\n"),
             "{text}"

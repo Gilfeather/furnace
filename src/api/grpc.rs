@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 
 use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status};
 
-use super::v2::{INPUT_NAME, MODEL_VERSION, OUTPUT_NAME, check_input, model_name_error};
+use super::v2::{INPUT_NAME, MODEL_VERSION, OUTPUT_NAME, check_input, resolve_model};
 use super::*;
 
 /// Types and service generated from proto/open_inference_grpc.proto
@@ -52,10 +52,6 @@ pub(super) async fn serve(
         .map_err(|e| format!("gRPC server error: {e}"))
 }
 
-fn ready(state: &ServerState) -> bool {
-    state.ready.load(Ordering::Acquire)
-}
-
 #[tonic::async_trait]
 impl GrpcInferenceService for Service {
     async fn server_live(
@@ -70,7 +66,7 @@ impl GrpcInferenceService for Service {
         _: GrpcRequest<pb::ServerReadyRequest>,
     ) -> std::result::Result<GrpcResponse<pb::ServerReadyResponse>, Status> {
         Ok(GrpcResponse::new(pb::ServerReadyResponse {
-            ready: ready(&self.state),
+            ready: self.state.ready(),
         }))
     }
 
@@ -79,11 +75,10 @@ impl GrpcInferenceService for Service {
         request: GrpcRequest<pb::ModelReadyRequest>,
     ) -> std::result::Result<GrpcResponse<pb::ModelReadyResponse>, Status> {
         let request = request.into_inner();
-        if let Some(message) = model_name_error(&self.state, &request.name, &request.version) {
-            return Err(Status::not_found(message));
-        }
+        let slot = resolve_model(&self.state, &request.name, &request.version)
+            .map_err(Status::not_found)?;
         Ok(GrpcResponse::new(pb::ModelReadyResponse {
-            ready: ready(&self.state),
+            ready: slot.get().ready(),
         }))
     }
 
@@ -103,10 +98,10 @@ impl GrpcInferenceService for Service {
         request: GrpcRequest<pb::ModelMetadataRequest>,
     ) -> std::result::Result<GrpcResponse<pb::ModelMetadataResponse>, Status> {
         let request = request.into_inner();
-        if let Some(message) = model_name_error(&self.state, &request.name, &request.version) {
-            return Err(Status::not_found(message));
-        }
-        let info = self.state.model.get_info();
+        let slot = resolve_model(&self.state, &request.name, &request.version)
+            .map_err(Status::not_found)?;
+        let loaded = slot.get();
+        let info = loaded.model.get_info();
         let with_batch = |shape: &[usize]| {
             std::iter::once(-1)
                 .chain(shape.iter().map(|&d| d as i64))
@@ -153,17 +148,17 @@ async fn infer(
     state: &ServerState,
     mut request: pb::ModelInferRequest,
 ) -> std::result::Result<pb::ModelInferResponse, Status> {
-    if let Some(message) = model_name_error(state, &request.model_name, &request.model_version) {
-        return Err(Status::not_found(message));
-    }
-    let arrival = state.batcher.as_ref().map(Batcher::arrival);
+    let slot = resolve_model(state, &request.model_name, &request.model_version)
+        .map_err(Status::not_found)?;
+    let loaded = slot.get();
+    let arrival = loaded.batcher.as_ref().map(Batcher::arrival);
     let [input] = request.inputs.as_mut_slice() else {
         return Err(Status::invalid_argument(format!(
             "Expected exactly one input ('{INPUT_NAME}'), got {}",
             request.inputs.len()
         )));
     };
-    let batch_size = check_input(&state.model, &input.name, &input.datatype, &input.shape)
+    let batch_size = check_input(&loaded.model, &input.name, &input.datatype, &input.shape)
         .map_err(Status::invalid_argument)?;
     if let Some(unknown) = request.outputs.iter().find(|o| o.name != OUTPUT_NAME) {
         return Err(Status::invalid_argument(format!(
@@ -171,7 +166,7 @@ async fn infer(
             unknown.name
         )));
     }
-    let item_size: usize = state.model.get_info().input_spec.shape.iter().product();
+    let item_size: usize = loaded.model.get_info().input_spec.shape.iter().product();
     let elements = batch_size * item_size;
     let data = match request.raw_input_contents.first() {
         Some(raw) => {
@@ -212,7 +207,7 @@ async fn infer(
         .clone()
         .try_acquire_owned()
         .map_err(|_| Status::resource_exhausted("Too many concurrent requests, retry later"))?;
-    let output = match run_inference(state, arrival, data, batch_size, permit).await {
+    let output = match run_inference(state, &loaded, arrival, data, batch_size, permit).await {
         Ok(Ok(output)) => output,
         Ok(Err(e)) => {
             return Err(match e {
@@ -227,9 +222,9 @@ async fn infer(
         }
         Err(_) => return Err(Status::internal("Inference failed")),
     };
-    state.inference_latency.observe(start.elapsed());
+    state.observe_inference(&slot, start.elapsed());
 
-    let info = state.model.get_info();
+    let info = loaded.model.get_info();
     let shape = std::iter::once(batch_size as i64)
         .chain(info.output_spec.shape.iter().map(|&d| d as i64))
         .collect();

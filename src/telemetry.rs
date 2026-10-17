@@ -105,19 +105,36 @@ impl Histogram {
 
     /// Append this histogram as Prometheus `_bucket`, `_sum` and `_count` series
     pub fn render(&self, out: &mut String, name: &str, help: &str) {
-        let (counts, sum) = self.snapshot();
         let _ = writeln!(out, "# HELP {name} {help}");
         let _ = writeln!(out, "# TYPE {name} histogram");
+        self.render_series(out, name, "");
+    }
+
+    /// Append the series alone, each with `labels` (e.g. `model="a"`, or empty), for a
+    /// histogram family whose `HELP` and `TYPE` lines were written already
+    pub fn render_series(&self, out: &mut String, name: &str, labels: &str) {
+        let (counts, sum) = self.snapshot();
+        let sep = if labels.is_empty() { "" } else { "," };
+        let braces = |l: &str| {
+            if l.is_empty() {
+                String::new()
+            } else {
+                format!("{{{l}}}")
+            }
+        };
         let mut cumulative = 0;
         for (i, count) in counts.iter().enumerate() {
             cumulative += count;
             let le = LATENCY_BUCKETS
                 .get(i)
                 .map_or_else(|| "+Inf".to_string(), |b| b.to_string());
-            let _ = writeln!(out, "{name}_bucket{{le=\"{le}\"}} {cumulative}");
+            let _ = writeln!(
+                out,
+                "{name}_bucket{{{labels}{sep}le=\"{le}\"}} {cumulative}"
+            );
         }
-        let _ = writeln!(out, "{name}_sum {sum}");
-        let _ = writeln!(out, "{name}_count {cumulative}");
+        let _ = writeln!(out, "{name}_sum{} {sum}", braces(labels));
+        let _ = writeln!(out, "{name}_count{} {cumulative}", braces(labels));
     }
 }
 

@@ -127,6 +127,262 @@
         }
       }
     },
+    "/models": {
+      "get": {
+        "summary": "Served models",
+        "operationId": "listModels",
+        "responses": {
+          "200": {
+            "description": "Every served model; `/predict` and `/model/info` use `default_model`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models/{model}": {
+      "parameters": [
+        {
+          "name": "model",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "A served model's name (GET /models)"
+        }
+      ],
+      "get": {
+        "summary": "Description and statistics of a named model",
+        "operationId": "modelInfoNamed",
+        "responses": {
+          "200": {
+            "description": "As GET /model/info, for the model named in the path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInfoResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/models/{model}/predict": {
+      "post": {
+        "summary": "Run inference on a named model",
+        "operationId": "predictModel",
+        "description": "As `POST /predict`, for the model named in the path.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BatchSize"
+          },
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "name": "Accept",
+            "in": "header",
+            "required": false,
+            "description": "`application/octet-stream` returns the outputs as raw little-endian float32 instead of JSON",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/PredictSingle"
+                  },
+                  {
+                    "$ref": "#/components/schemas/PredictBatch"
+                  }
+                ]
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "description": "batch x input size little-endian float32 values"
+              }
+            },
+            "image/jpeg": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "image/png": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Model outputs",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Batch-Size": {
+                "description": "Items in a binary response",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-Output-Shape": {
+                "description": "Per-item output shape of a binary response, comma separated",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Inference-Time-Ms": {
+                "description": "Inference time of a binary response",
+                "schema": {
+                  "type": "number"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PredictResponse"
+                }
+              },
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          },
+          "504": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "model",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "A served model's name (GET /models)"
+        }
+      ]
+    },
+    "/admin/models/{model}/reload": {
+      "parameters": [
+        {
+          "name": "model",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "A served model's name (GET /models)"
+        }
+      ],
+      "post": {
+        "summary": "Reload a model without downtime",
+        "operationId": "reloadModel",
+        "description": "Enabled by `--admin-token`; send `Authorization: Bearer <token>`. Loads the model again (from `weights` when given, else from where it was loaded), runs a warm-up inference, then switches to it. Requests already running finish on the previous model; if anything fails, the previous model keeps serving.",
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReloadRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The new model is serving",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReloadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "description": "The admin API is off, or no such model",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/predict": {
       "post": {
         "summary": "Run inference",
@@ -310,7 +566,7 @@
           "schema": {
             "type": "string"
           },
-          "description": "The served model's name (GET /model/info)"
+          "description": "A served model's name (GET /models)"
         }
       ],
       "get": {
@@ -391,7 +647,7 @@
           "schema": {
             "type": "string"
           },
-          "description": "The served model's name (GET /model/info)"
+          "description": "A served model's name (GET /models)"
         }
       ],
       "get": {
@@ -464,7 +720,7 @@
           "schema": {
             "type": "string"
           },
-          "description": "The served model's name (GET /model/info)"
+          "description": "A served model's name (GET /models)"
         }
       ],
       "post": {
@@ -814,6 +1070,7 @@
           "request_latency_ms",
           "inference_latency_ms",
           "ready",
+          "models",
           "timestamp"
         ],
         "properties": {
@@ -822,11 +1079,11 @@
           },
           "total_requests": {
             "type": "integer",
-            "description": "/predict requests received, including ones rejected before inference"
+            "description": "Inference requests received, including ones rejected before inference"
           },
           "total_errors": {
             "type": "integer",
-            "description": "/predict requests answered with a 4xx or 5xx status"
+            "description": "Inference requests answered with a 4xx or 5xx status"
           },
           "rejected_busy": {
             "type": "integer",
@@ -872,7 +1129,7 @@
                 "$ref": "#/components/schemas/Percentiles"
               }
             ],
-            "description": "/predict latency from arrival to response, in milliseconds"
+            "description": "Inference request latency from arrival to response, in milliseconds"
           },
           "inference_latency_ms": {
             "allOf": [
@@ -884,7 +1141,14 @@
           },
           "ready": {
             "type": "boolean",
-            "description": "Whether the warm-up inference has run"
+            "description": "Whether every model's warm-up inference has run"
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelMetrics"
+            },
+            "description": "Per model; the totals above are over all of them"
           }
         }
       },
@@ -1307,6 +1571,158 @@
             "type": "object"
           }
         }
+      },
+      "ModelsResponse": {
+        "type": "object",
+        "required": [
+          "default_model",
+          "models"
+        ],
+        "properties": {
+          "default_model": {
+            "type": "string",
+            "description": "The model `/predict` and `/model/info` use"
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelSummary"
+            }
+          }
+        }
+      },
+      "ModelSummary": {
+        "type": "object",
+        "required": [
+          "name",
+          "ready",
+          "input_shape",
+          "output_shape",
+          "backend",
+          "reloadable"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "ready": {
+            "type": "boolean",
+            "description": "Whether its warm-up inference has run"
+          },
+          "input_shape": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "output_shape": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "backend": {
+            "type": "string"
+          },
+          "reloadable": {
+            "type": "boolean",
+            "description": "Whether the admin API can reload it"
+          }
+        }
+      },
+      "ReloadRequest": {
+        "type": "object",
+        "properties": {
+          "weights": {
+            "type": "string",
+            "description": "New weight file (a .bpk for a built-in model, a model path for a file-based one); by default the model reloads from where it was loaded"
+          }
+        }
+      },
+      "ReloadResponse": {
+        "type": "object",
+        "required": [
+          "model",
+          "weights",
+          "reload_ms",
+          "warm_up_ms",
+          "timestamp"
+        ],
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "weights": {
+            "type": "string",
+            "nullable": true,
+            "description": "The weight file given in the request"
+          },
+          "reload_ms": {
+            "type": "number",
+            "description": "Loading, warming up and switching"
+          },
+          "warm_up_ms": {
+            "type": "number"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ModelMetrics": {
+        "type": "object",
+        "required": [
+          "name",
+          "ready",
+          "inference_count",
+          "error_count",
+          "batch_count",
+          "average_batch_size",
+          "average_inference_time_ms",
+          "inference_latency_ms"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "inference_count": {
+            "type": "integer",
+            "description": "Requests that reached the model"
+          },
+          "error_count": {
+            "type": "integer",
+            "description": "Requests the model failed"
+          },
+          "batch_count": {
+            "type": "integer",
+            "description": "Forward passes run"
+          },
+          "average_batch_size": {
+            "type": "number"
+          },
+          "average_inference_time_ms": {
+            "type": "number"
+          },
+          "inference_latency_ms": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Percentiles"
+              }
+            ],
+            "description": "Successful inference latency, queueing included, in milliseconds"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "adminToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The `--admin-token` value"
       }
     }
   }

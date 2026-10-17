@@ -11,9 +11,11 @@ max_body_mb = 100
 log_level = "info"              # error, warn, info, debug or trace
 # threads = 8                   # inference threads (default: one per physical core)
 # grpc_port = 8001              # also serve gRPC (KServe / Triton protocol); needs the `grpc` feature
+# admin_token = "..."           # enable POST /admin/models/{model}/reload; prefer $FURNACE_ADMIN_TOKEN
 
 [model]
 name = "resnet18"               # built-in model compiled from models/<name>.onnx
+# name = ["resnet18", "mnist"]  # or several; the first is the one /predict serves
 # path = "examples/basic_mnist/model"   # or a file-based Burn model instead of `name`
 # weights = "/srv/models/resnet18.bpk"  # default: <name>.bpk next to the binary
 backend = "cpu"                 # cpu, or wgpu / metal / cuda when built with that feature
