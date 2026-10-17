@@ -24,6 +24,9 @@ struct CliArgs {
     max_concurrent_requests: usize,
     max_body_mb: usize,
     request_timeout_ms: Option<u64>,
+    max_batch_size: usize,
+    batch_timeout_us: u64,
+    batch_workers: usize,
     log_level: String,
 }
 
@@ -126,6 +129,36 @@ fn build_cli() -> Command {
                 .help("Per-request inference timeout in milliseconds; exceeded requests get 504")
                 .value_parser(clap::value_parser!(u64)),
         )
+        .arg(
+            Arg::new("max-batch-size")
+                .long("max-batch-size")
+                .value_name("N")
+                .help(
+                    "Most items run together when concurrent requests are batched into one \
+                     forward pass (1-1000); 1 turns dynamic batching off",
+                )
+                .default_value("8")
+                .value_parser(clap::value_parser!(usize)),
+        )
+        .arg(
+            Arg::new("batch-timeout-us")
+                .long("batch-timeout-us")
+                .value_name("US")
+                .help(
+                    "Longest a batch waits, in microseconds, for requests whose bodies are \
+                     still arriving; a lone request never waits",
+                )
+                .default_value("2000")
+                .value_parser(clap::value_parser!(u64).range(0..=1_000_000)),
+        )
+        .arg(
+            Arg::new("batch-workers")
+                .long("batch-workers")
+                .value_name("N")
+                .help("Batches that may run at the same time (1-64)")
+                .default_value("4")
+                .value_parser(clap::value_parser!(u64).range(1..=64)),
+        )
         // Deprecated no-op flags kept so existing launch scripts keep working
         .arg(
             Arg::new("enable-kernel-fusion")
@@ -199,6 +232,16 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
         .into());
     }
 
+    let max_batch_size = *matches.get_one::<usize>("max-batch-size").unwrap();
+    if !(1..=model::MAX_BATCH_SIZE).contains(&max_batch_size) {
+        return Err(CliError::InvalidArgument {
+            arg: "max-batch-size".to_string(),
+            value: max_batch_size.to_string(),
+            reason: format!("must be between 1 and {}", model::MAX_BATCH_SIZE),
+        }
+        .into());
+    }
+
     let model_path = matches.get_one::<PathBuf>("model-path").cloned();
     let model_name = match (matches.get_one::<String>("model-name"), &model_path) {
         (Some(name), _) => Some(
@@ -236,6 +279,9 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
             max_concurrent_requests,
             max_body_mb,
             request_timeout_ms: matches.get_one::<u64>("request-timeout-ms").copied(),
+            max_batch_size,
+            batch_timeout_us: *matches.get_one::<u64>("batch-timeout-us").unwrap(),
+            batch_workers: *matches.get_one::<u64>("batch-workers").unwrap() as usize,
             log_level: matches.get_one::<String>("log-level").unwrap().clone(),
         },
         deprecated,
@@ -389,6 +435,11 @@ async fn main() -> Result<()> {
         max_concurrent_requests: args.max_concurrent_requests,
         max_body_bytes: args.max_body_mb * 1024 * 1024,
         request_timeout: args.request_timeout_ms.map(Duration::from_millis),
+        batching: api::BatchConfig {
+            max_batch_size: args.max_batch_size,
+            batch_timeout: Duration::from_micros(args.batch_timeout_us),
+            workers: args.batch_workers,
+        },
     };
 
     info!(
@@ -398,6 +449,9 @@ async fn main() -> Result<()> {
         max_concurrent_requests = args.max_concurrent_requests,
         max_body_mb = args.max_body_mb,
         request_timeout_ms = ?args.request_timeout_ms,
+        max_batch_size = args.max_batch_size,
+        batch_timeout_us = args.batch_timeout_us,
+        batch_workers = args.batch_workers,
         "🚀 Starting HTTP server"
     );
 

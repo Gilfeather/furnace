@@ -1,6 +1,7 @@
 pub mod allocator;
 pub mod api;
 pub mod backend;
+pub mod batching;
 pub mod burn_model;
 pub mod error;
 pub mod model;

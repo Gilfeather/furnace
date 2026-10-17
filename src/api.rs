@@ -19,13 +19,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::signal;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tokio::task::JoinHandle;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{error, info, warn};
 
+pub use crate::batching::BatchConfig;
+use crate::batching::{Arrival, Batcher};
 use crate::error::{ApiError, FurnaceError, ModelError, Result};
-use crate::model::{MAX_BATCH_SIZE, Model, ModelInfo, ModelStats};
+use crate::model::{FlatInput, MAX_BATCH_SIZE, Model, ModelInfo, ModelStats};
 #[cfg(feature = "image")]
 use crate::preprocess::{ImageKind, image_input_size, preprocess_image};
 
@@ -145,11 +148,17 @@ pub struct MetricsResponse {
     pub total_errors: u64,
     /// Requests rejected with `503 SERVER_BUSY`
     pub rejected_busy: u64,
-    /// Inferences currently running
+    /// Requests queued for or running inference
     pub in_flight_inferences: usize,
     pub max_concurrent_inferences: usize,
-    /// Batches that reached the model (successful or failed)
+    /// Requests that reached the model (successful or failed)
     pub total_inferences: u64,
+    /// Forward passes run; with dynamic batching one pass serves several requests
+    pub total_batches: u64,
+    /// Items per forward pass, on average
+    pub average_batch_size: f64,
+    /// `--max-batch-size`; 1 means dynamic batching is off
+    pub max_batch_size: usize,
     pub average_inference_time_ms: f64,
     /// When the last successful inference finished
     pub last_inference_at: Option<String>,
@@ -190,6 +199,8 @@ pub struct ServerConfig {
     pub max_body_bytes: usize,
     /// Per-request inference timeout; exceeded requests get 504
     pub request_timeout: Option<Duration>,
+    /// Dynamic batching of concurrent requests
+    pub batching: BatchConfig,
 }
 
 impl Default for ServerConfig {
@@ -201,6 +212,7 @@ impl Default for ServerConfig {
             // A single 224x224 RGB image is ~150k floats, i.e. 1-3 MB of JSON
             max_body_bytes: 100 * 1024 * 1024,
             request_timeout: None,
+            batching: BatchConfig::default(),
         }
     }
 }
@@ -213,6 +225,9 @@ struct ServerState {
     inference_slots: Arc<Semaphore>,
     max_concurrent: usize,
     request_timeout: Option<Duration>,
+    /// `None` when batching is off: every request runs its own forward pass
+    batcher: Option<Batcher>,
+    max_batch_size: usize,
     total_requests: AtomicU64,
     total_errors: AtomicU64,
     rejected_busy: AtomicU64,
@@ -226,8 +241,14 @@ impl ServerState {
 
 /// Build the application router with all middleware applied
 pub fn router(model: Model, config: &ServerConfig) -> Router {
+    let model = Arc::new(model);
+    let batching = config.batching;
     let state = Arc::new(ServerState {
-        model: Arc::new(model),
+        batcher: batching
+            .enabled()
+            .then(|| Batcher::new(model.clone(), batching)),
+        max_batch_size: batching.max_batch_size.max(1),
+        model,
         start_time: SystemTime::now(),
         inference_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
         max_concurrent: config.max_concurrent_requests,
@@ -287,6 +308,16 @@ pub async fn start_server_with_config(config: ServerConfig, model: Model) -> Res
         "🚦 Concurrency limit set to {} inferences",
         config.max_concurrent_requests
     );
+    if config.batching.enabled() {
+        info!(
+            "📦 Dynamic batching: up to {} items per batch, waiting at most {}µs, {} worker(s)",
+            config.batching.max_batch_size,
+            config.batching.batch_timeout.as_micros(),
+            config.batching.workers
+        );
+    } else {
+        info!("📦 Dynamic batching off");
+    }
 
     let bind_addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&bind_addr)
@@ -339,6 +370,9 @@ async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
 }
 
 async fn predict(State(state): State<AppState>, request: Request) -> Response {
+    // Tell the batcher a request is on its way in, so a batch about to start can wait
+    // for it while its body is received and decoded
+    let arrival = state.batcher.as_ref().map(Batcher::arrival);
     // Pick the decoder before buffering the body so unsupported types fail fast
     let format = match RequestFormat::from_headers(request.headers()) {
         Some(format) => format,
@@ -401,40 +435,9 @@ async fn predict(State(state): State<AppState>, request: Request) -> Response {
         }
     };
 
-    // Inference is CPU/GPU-bound; keep it off the async runtime threads
-    let model = state.model.clone();
-    let task = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        model.predict_flat(data, batch_size)
-    });
-
-    let joined = match state.request_timeout {
-        Some(timeout) => match tokio::time::timeout(timeout, task).await {
-            Ok(joined) => joined,
-            Err(_) => {
-                warn!("Inference exceeded timeout of {:?}", timeout);
-                return create_error_response(
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "INFERENCE_TIMEOUT",
-                    &format!("Inference exceeded timeout of {}ms", timeout.as_millis()),
-                    None,
-                );
-            }
-        },
-        None => task.await,
-    };
-
-    let result = match joined {
+    let result = match run_inference(&state, arrival, data, batch_size, permit).await {
         Ok(result) => result,
-        Err(e) => {
-            error!("Inference task failed: {}", e);
-            return create_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INFERENCE_FAILED",
-                "Inference task panicked",
-                None,
-            );
-        }
+        Err(response) => return *response,
     };
 
     match result {
@@ -491,6 +494,81 @@ async fn predict(State(state): State<AppState>, request: Request) -> Response {
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
             };
             create_error_response(status_code, error_code, &e.to_string(), None)
+        }
+    }
+}
+
+/// Run one request's inference, batched with others when batching is on.
+///
+/// The outer error is a finished response (timeout, panic); the inner result is the
+/// model's answer for this request.
+async fn run_inference(
+    state: &ServerState,
+    arrival: Option<Arrival<'_>>,
+    data: Vec<f32>,
+    batch_size: usize,
+    permit: OwnedSemaphorePermit,
+) -> std::result::Result<Result<Vec<f32>>, Box<Response>> {
+    let task = match (&state.batcher, arrival) {
+        (Some(batcher), Some(arrival)) => {
+            let receiver = batcher.submit(arrival, FlatInput { data, batch_size }, permit);
+            InferenceTask::Batched(receiver)
+        }
+        _ => {
+            // Inference is CPU/GPU-bound; keep it off the async runtime threads
+            let model = state.model.clone();
+            InferenceTask::Alone(tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                model.predict_flat(data, batch_size)
+            }))
+        }
+    };
+
+    let joined = match state.request_timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, task.wait()).await {
+            Ok(joined) => joined,
+            Err(_) => {
+                warn!("Inference exceeded timeout of {:?}", timeout);
+                return Err(Box::new(create_error_response(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "INFERENCE_TIMEOUT",
+                    &format!("Inference exceeded timeout of {}ms", timeout.as_millis()),
+                    None,
+                )));
+            }
+        },
+        None => task.wait().await,
+    };
+
+    joined.ok_or_else(|| {
+        Box::new(create_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INFERENCE_FAILED",
+            "Inference task panicked",
+            None,
+        ))
+    })
+}
+
+/// An inference in progress: queued for the batcher, or on its own blocking thread
+enum InferenceTask {
+    Batched(oneshot::Receiver<Result<Vec<f32>>>),
+    Alone(JoinHandle<Result<Vec<f32>>>),
+}
+
+impl InferenceTask {
+    /// The result, or `None` if the inference panicked
+    async fn wait(self) -> Option<Result<Vec<f32>>> {
+        match self {
+            // A dropped sender means the batch it was in panicked
+            Self::Batched(receiver) => receiver.await.ok(),
+            Self::Alone(handle) => match handle.await {
+                Ok(result) => Some(result),
+                Err(e) => {
+                    error!("Inference task failed: {}", e);
+                    None
+                }
+            },
         }
     }
 }
@@ -832,6 +910,13 @@ async fn metrics(State(state): State<AppState>) -> Json<MetricsResponse> {
             .saturating_sub(state.inference_slots.available_permits()),
         max_concurrent_inferences: state.max_concurrent,
         total_inferences: stats.inference_count,
+        total_batches: stats.batch_count,
+        average_batch_size: if stats.batch_count == 0 {
+            0.0
+        } else {
+            stats.batched_items as f64 / stats.batch_count as f64
+        },
+        max_batch_size: state.max_batch_size,
         average_inference_time_ms: stats.average_inference_time_ms,
         last_inference_at: stats.last_inference_time.map(|t| t.to_rfc3339()),
         timestamp: Utc::now().to_rfc3339(),
@@ -926,8 +1011,69 @@ mod tests {
         assert_eq!(m.total_errors, 1);
         assert_eq!(m.rejected_busy, 0);
         assert_eq!(m.total_inferences, 1);
+        assert_eq!(m.total_batches, 1);
+        assert_eq!(m.average_batch_size, 1.0);
+        assert_eq!(m.max_batch_size, 8);
         assert_eq!(m.in_flight_inferences, 0);
         assert!(m.last_inference_at.is_some());
+    }
+
+    async fn concurrent_predictions(config: &ServerConfig) -> MetricsResponse {
+        let app = router(dummy_model(), config);
+        let mut tasks = Vec::new();
+        for i in 0..12 {
+            let body = if i % 3 == 0 {
+                serde_json::json!({ "inputs": vec![vec![0.5; 784]; 2] })
+            } else if i == 4 {
+                serde_json::json!({ "input": vec![0.5; 3] })
+            } else {
+                serde_json::json!({ "input": vec![0.5; 784] })
+            };
+            let app = app.clone();
+            tasks.push(tokio::spawn(async move {
+                send(app, predict_request(body.to_string())).await
+            }));
+        }
+        for (i, task) in tasks.into_iter().enumerate() {
+            let (status, body) = task.await.unwrap();
+            if i == 4 {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                continue;
+            }
+            assert_eq!(status, StatusCode::OK);
+            let response: PredictResponse = serde_json::from_slice(&body).unwrap();
+            let expected = if i % 3 == 0 { 2 } else { 1 };
+            assert_eq!(response.batch_size, expected);
+            match response.output_data {
+                PredictOutputData::Batch { outputs } => assert_eq!(outputs.len(), 2),
+                PredictOutputData::Single { output } => assert_eq!(output.len(), 10),
+            }
+        }
+        get_metrics(app).await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_predictions_with_and_without_batching() {
+        let batched = concurrent_predictions(&ServerConfig::default()).await;
+        let unbatched = concurrent_predictions(&ServerConfig {
+            batching: BatchConfig {
+                max_batch_size: 1,
+                ..BatchConfig::default()
+            },
+            ..ServerConfig::default()
+        })
+        .await;
+        for m in [&batched, &unbatched] {
+            // The request with the wrong shape is rejected before reaching the model
+            assert_eq!(m.total_requests, 12);
+            assert_eq!(m.total_errors, 1);
+            assert_eq!(m.total_inferences, 11);
+            assert!((1..=11).contains(&m.total_batches), "{m:?}");
+            assert_eq!(m.in_flight_inferences, 0);
+        }
+        assert_eq!(unbatched.total_batches, 11);
+        assert_eq!(unbatched.average_batch_size, 15.0 / 11.0);
+        assert_eq!(unbatched.max_batch_size, 1);
     }
 
     #[tokio::test]

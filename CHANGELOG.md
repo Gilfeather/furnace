@@ -5,11 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.0] - 2026-10-17
+## [0.7.0] - 2026-10-18
 
-CPU inference is about 2× faster again. Over HTTP, Furnace now matches FastAPI + ONNX Runtime
-on ResNet-18 (8.8 vs 8.6 ms per image, 27.0 vs 28.9 ms for four), while starting in 39 ms
-instead of 1.9 s. The API and CLI are unchanged.
+CPU inference is about 2× faster again, and the server batches concurrent requests. Over HTTP,
+Furnace now matches FastAPI + ONNX Runtime on ResNet-18 one request at a time (8.8 vs 8.6 ms
+per image), serves 35-40% more requests per second under concurrent load, and starts in 39 ms
+instead of 1.9 s. Existing API calls and CLI options work as before.
 
 ### Changed
 - ResNet-18 goes from about 15 ms to 8.0 ms per image at batch 1, and from 40.6 ms to 25.1 ms
@@ -31,8 +32,23 @@ instead of 1.9 s. The API and CLI are unchanged.
   Winograd filters); ONNX Runtime takes 139 MB and FastAPI + ONNX Runtime 694 MB
 - The README is much shorter; the API reference moved to `docs/API.md` and benchmark details to
   `docs/PERFORMANCE.md`
+- `total_inferences` in `GET /metrics` is documented as requests that reached the model (it
+  always counted requests); `in_flight_inferences` includes requests waiting to be batched,
+  and `inference_time_ms` includes that wait
 
 ### Added
+- Dynamic batching in the server. Up to `--batch-workers` forward passes (default 4) run at
+  once; when all are busy, queued `/predict` requests are merged into batches of up to
+  `--max-batch-size` items (default 8). A batch waits at most `--batch-timeout-us` (default
+  2000) for requests still being received, and a lone request never waits.
+  `--max-batch-size 1` restores the old behaviour. With 16 concurrent ResNet-18 clients, p95
+  latency drops from 207 to 116 ms at the same throughput, about 175 images/s against 129 for
+  FastAPI + ONNX Runtime
+- `GET /metrics` reports `total_batches`, `average_batch_size` and `max_batch_size`;
+  `GET /model/info` statistics gain `batch_count` and `batched_items`
+- `Model::predict_many` runs several independent requests as one forward pass
+- `examples/http_bench.rs` takes `MODE@N` for N concurrent clients and reports throughput and
+  p50/p95 latency
 - `benches/compare` also benchmarks FastAPI + ONNX Runtime over HTTP, with the same client as
   the Furnace server
 

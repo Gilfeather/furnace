@@ -96,10 +96,62 @@ this CPU's peak, so the remaining gap is per-core work. Next steps, roughly by p
 1. Winograd F(4x4, 3x3) for the narrow layers (fewer multiplications again).
 2. A faster first 7x7 convolution, which has only 3 input channels.
 3. Faster max pooling.
-4. In the server, batching concurrent requests: batch 4 costs well under 4× batch 1.
+4. Cheaper large batches. Batch 4 takes 25 ms against 8 ms for batch 1, a gain of only 1.3×,
+   so the server's dynamic batching adds no throughput over running passes side by side
+   (see below).
 
 GPU backends (`--features wgpu|metal|cuda`) work but are not tuned; on the integrated Radeon
 780M, wgpu took 41 ms per image (0.4.0).
+
+## Concurrent load
+
+N clients, each on its own keep-alive connection, send ResNet-18 requests (one image, binary
+body and response) back to back. Throughput is over 40 timed requests per client after a
+warm-up; latency percentiles are over all of them. Medians of six runs; the servers ran in a
+different order in each run, with a 10 s pause between them, because a laptop that has just
+run a heavy load is slower for a while.
+
+| Clients | Furnace (default) | Furnace, batching off | Furnace, 1 batch at a time | FastAPI + ONNX Runtime |
+|---|---|---|---|---|
+| 1 | 113 req/s, 8.9 / 9.9 ms | 117 req/s, 8.6 / 10.3 ms | 112 req/s, 8.9 / 10.5 ms | 125 req/s, 8.0 / 9.2 ms |
+| 2 | 150 req/s, 12.6 / 19.1 ms | 149 req/s, 12.2 / 23.3 ms | 114 req/s, 16.9 / 24.4 ms | 129 req/s, 15.7 / 17.8 ms |
+| 4 | 170 req/s, 23 / 28 ms | 177 req/s, 22 / 27 ms | 134 req/s, 30 / 35 ms | 126 req/s, 32 / 35 ms |
+| 8 | 174 req/s, 44 / 63 ms | 179 req/s, 44 / 59 ms | 138 req/s, 57 / 62 ms | 128 req/s, 63 / 69 ms |
+| 16 | 174 req/s, 91 / **116** ms | 173 req/s, 69 / 207 ms | 155 req/s, 103 / 111 ms | 129 req/s, 126 / 137 ms |
+| 32 | 176 req/s, 176 / **236** ms | 172 req/s, 71 / 435 ms | 153 req/s, 210 / 219 ms | 124 req/s, 262 / 281 ms |
+
+Latencies are p50 / p95 (p90 for one client). The configurations:
+
+- *Default*: `--batch-workers 4 --max-batch-size 8`. Up to four passes run side by side;
+  beyond that, queued requests are batched (see [API.md](API.md#dynamic-batching)).
+- *Batching off*: `--max-batch-size 1`, every request runs its own pass at once, as in
+  0.7.0.
+- *1 batch at a time*: `--batch-workers 1`, pure dynamic batching with a single model worker.
+- *FastAPI + ONNX Runtime*: [`server.py`](../benches/compare/fastapi-ort/server.py), which
+  runs one inference at a time.
+
+What this shows:
+
+- **Under load Furnace serves 35-40% more requests than FastAPI + ONNX Runtime** (about 175
+  against 127 per second from 4 clients up), with lower p95 latency at every client count
+  from 4 up.
+- On this CPU, throughput tops out at about 175 images/s however requests are grouped. Two
+  batch-1 passes side by side (about 13 ms for two images over HTTP) beat one batch-2 pass
+  (about 17 ms), so merging requests too early lowers throughput, as the *1 batch at a time*
+  column shows. The default therefore merges only once four passes are running.
+- What batching buys is predictable latency. Without a limit every request starts at once and
+  they all compete for the cores: with 16 or 32 clients, half the requests finish quickly
+  while others wait several times longer (p95 207 and 435 ms). With the default, p95 stays
+  within 1.3-1.4x of p50 (116 and 236 ms).
+- A lone request is not delayed: one client sees the same latency in every Furnace
+  configuration, within run-to-run noise.
+
+```bash
+cargo run --release --example http_bench -- 3000 bin1o bin1o@4 bin1o@16
+```
+
+`MODE@N` runs N concurrent clients. On a GPU, where one large batch is much cheaper than
+several small passes, try `--batch-workers 1` with a larger `--max-batch-size`.
 
 ## Request overhead
 

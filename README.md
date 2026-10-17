@@ -122,6 +122,9 @@ back. Full reference, including errors: [docs/API.md](docs/API.md).
 | `--max-concurrent-requests <N>` | `100` | Beyond this, requests get `503` |
 | `--max-body-mb <MB>` | `100` | Request size limit |
 | `--request-timeout-ms <MS>` | none | Beyond this, requests get `504` |
+| `--batch-workers <N>` | `4` | Forward passes running at once; beyond this, concurrent requests are batched ([details](docs/API.md#dynamic-batching)) |
+| `--max-batch-size <N>` | `8` | Most items per batched pass; `1` turns batching off |
+| `--batch-timeout-us <US>` | `2000` | Longest a batch waits for requests still arriving; a lone request never waits |
 | `-l, --log-level <LEVEL>` | `info` | `FURNACE_ENV=production` switches to JSON logs |
 
 `--model-path <PATH>` serves a Burn MLP saved as `<PATH>.bpk` + `<PATH>.json` instead (see
