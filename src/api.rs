@@ -25,6 +25,8 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{Instrument, error, info, info_span, warn};
 
+mod v2;
+
 pub use crate::batching::BatchConfig;
 use crate::batching::{Arrival, Batcher};
 use crate::error::{ApiError, FurnaceError, ModelError, Result};
@@ -326,6 +328,7 @@ pub fn router(model: Model, config: &ServerConfig) -> Router {
         )
         .route("/model/info", get(model_info))
         .route("/metrics", get(metrics))
+        .merge(v2::routes(state.clone()))
         .layer(DefaultBodyLimit::max(config.max_body_bytes))
         .layer(SetResponseHeaderLayer::overriding(
             X_CONTENT_TYPE_OPTIONS,
@@ -1193,7 +1196,7 @@ fn create_error_response(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::model::DummyModel;
     use axum::{body::Body, http::Request};
@@ -1204,11 +1207,14 @@ mod tests {
         Model::new(Box::new(dummy), "dummy", 0)
     }
 
-    fn test_app() -> Router {
+    pub(super) fn test_app() -> Router {
         router(dummy_model(), &ServerConfig::default())
     }
 
-    async fn send(app: Router, request: Request<Body>) -> (StatusCode, axum::body::Bytes) {
+    pub(super) async fn send(
+        app: Router,
+        request: Request<Body>,
+    ) -> (StatusCode, axum::body::Bytes) {
         let response = app.oneshot(request).await.unwrap();
         let status = response.status();
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1411,7 +1417,16 @@ mod tests {
                 "/metrics",
                 "/model/info",
                 "/predict",
-                "/readyz"
+                "/readyz",
+                "/v2",
+                "/v2/health/live",
+                "/v2/health/ready",
+                "/v2/models/{model}",
+                "/v2/models/{model}/infer",
+                "/v2/models/{model}/ready",
+                "/v2/models/{model}/versions/{version}",
+                "/v2/models/{model}/versions/{version}/infer",
+                "/v2/models/{model}/versions/{version}/ready"
             ]
             .into()
         );
@@ -1452,6 +1467,28 @@ mod tests {
         assert_matches_schema(&spec, "Percentiles", &metrics["request_latency_ms"]);
         wait_until_ready(&app).await;
         assert_matches_schema(&spec, "ReadinessResponse", &get("/readyz").await);
+
+        assert_matches_schema(&spec, "V2ServerMetadata", &get("/v2").await);
+        let model = get("/v2/models/test_model").await;
+        assert_matches_schema(&spec, "V2ModelMetadata", &model);
+        assert_matches_schema(&spec, "V2TensorMetadata", &model["inputs"][0]);
+        let infer = Request::builder()
+            .uri("/v2/models/test_model/infer")
+            .method("POST")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "id": "a",
+                    "inputs": [{ "name": "input", "shape": [1, 784], "datatype": "FP32", "data": vec![0.5; 784] }],
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let (status, body) = send(app.clone(), infer).await;
+        assert_eq!(status, StatusCode::OK);
+        let infer: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_matches_schema(&spec, "V2InferResponse", &infer);
+        assert_matches_schema(&spec, "V2OutputTensor", &infer["outputs"][0]);
         let info = get("/model/info").await;
         assert_matches_schema(&spec, "ModelInfoResponse", &info);
         assert_matches_schema(&spec, "ModelInfo", &info["model_info"]);

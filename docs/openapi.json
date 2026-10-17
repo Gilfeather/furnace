@@ -248,6 +248,397 @@
           }
         }
       }
+    },
+    "/v2": {
+      "get": {
+        "tags": [
+          "Open Inference Protocol (v2)"
+        ],
+        "summary": "Server metadata",
+        "operationId": "v2ServerMetadata",
+        "responses": {
+          "200": {
+            "description": "Server name, version and extensions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ServerMetadata"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/health/live": {
+      "get": {
+        "tags": [
+          "Open Inference Protocol (v2)"
+        ],
+        "summary": "Server liveness",
+        "operationId": "v2Live",
+        "responses": {
+          "200": {
+            "description": "Alive"
+          }
+        }
+      }
+    },
+    "/v2/health/ready": {
+      "get": {
+        "tags": [
+          "Open Inference Protocol (v2)"
+        ],
+        "summary": "Server readiness",
+        "operationId": "v2Ready",
+        "responses": {
+          "200": {
+            "description": "Ready"
+          },
+          "503": {
+            "description": "Warming up"
+          }
+        }
+      }
+    },
+    "/v2/models/{model}": {
+      "parameters": [
+        {
+          "name": "model",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The served model's name (GET /model/info)"
+        }
+      ],
+      "get": {
+        "tags": [
+          "Open Inference Protocol (v2)"
+        ],
+        "summary": "Model metadata",
+        "operationId": "v2ModelMetadata",
+        "responses": {
+          "200": {
+            "description": "Tensors of the model",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ModelMetadata"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/models/{model}/versions/{version}": {
+      "parameters": [
+        {
+          "name": "model",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The served model's name (GET /model/info)"
+        },
+        {
+          "name": "version",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "1"
+            ]
+          }
+        }
+      ],
+      "get": {
+        "tags": [
+          "Open Inference Protocol (v2)"
+        ],
+        "summary": "Model metadata",
+        "operationId": "v2ModelMetadataVersion",
+        "responses": {
+          "200": {
+            "description": "Tensors of the model",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ModelMetadata"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/models/{model}/ready": {
+      "parameters": [
+        {
+          "name": "model",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The served model's name (GET /model/info)"
+        }
+      ],
+      "get": {
+        "tags": [
+          "Open Inference Protocol (v2)"
+        ],
+        "summary": "Model readiness",
+        "operationId": "v2ModelReady",
+        "responses": {
+          "200": {
+            "description": "Ready"
+          },
+          "503": {
+            "description": "Warming up"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/models/{model}/versions/{version}/ready": {
+      "parameters": [
+        {
+          "name": "model",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The served model's name (GET /model/info)"
+        },
+        {
+          "name": "version",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "1"
+            ]
+          }
+        }
+      ],
+      "get": {
+        "tags": [
+          "Open Inference Protocol (v2)"
+        ],
+        "summary": "Model readiness",
+        "operationId": "v2ModelReadyVersion",
+        "responses": {
+          "200": {
+            "description": "Ready"
+          },
+          "503": {
+            "description": "Warming up"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/models/{model}/infer": {
+      "parameters": [
+        {
+          "name": "model",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The served model's name (GET /model/info)"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Open Inference Protocol (v2)"
+        ],
+        "summary": "Inference (Open Inference Protocol)",
+        "operationId": "v2Infer",
+        "description": "One FP32 input named `input`, shape [batch, ...item shape] (or the item shape alone). `data` may be flat or nested. With the binary tensor data extension, the JSON is followed by raw little-endian bytes: set the Inference-Header-Content-Length header to the JSON's length and `binary_data_size` on the input; ask for binary outputs with `binary_data` on a requested output or `binary_data_output` on the request.",
+        "parameters": [
+          {
+            "name": "Inference-Header-Content-Length",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Binary tensor data: length of the JSON part of the body"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/V2InferRequest"
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "description": "JSON header followed by raw tensor bytes"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Outputs; with binary outputs, the JSON header (length in Inference-Header-Content-Length) followed by raw bytes",
+            "headers": {
+              "Inference-Header-Content-Length": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Binary outputs: length of the JSON header"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2InferResponse"
+                }
+              },
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          },
+          "504": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/models/{model}/versions/{version}/infer": {
+      "parameters": [
+        {
+          "name": "model",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The served model's name (GET /model/info)"
+        },
+        {
+          "name": "version",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "1"
+            ]
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "Open Inference Protocol (v2)"
+        ],
+        "summary": "Inference (Open Inference Protocol)",
+        "operationId": "v2InferVersion",
+        "description": "One FP32 input named `input`, shape [batch, ...item shape] (or the item shape alone). `data` may be flat or nested. With the binary tensor data extension, the JSON is followed by raw little-endian bytes: set the Inference-Header-Content-Length header to the JSON's length and `binary_data_size` on the input; ask for binary outputs with `binary_data` on a requested output or `binary_data_output` on the request.",
+        "parameters": [
+          {
+            "name": "Inference-Header-Content-Length",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Binary tensor data: length of the JSON part of the body"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/V2InferRequest"
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "description": "JSON header followed by raw tensor bytes"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Outputs; with binary outputs, the JSON header (length in Inference-Header-Content-Length) followed by raw bytes",
+            "headers": {
+              "Inference-Header-Content-Length": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Binary outputs: length of the JSON header"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2InferResponse"
+                }
+              },
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          },
+          "504": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -707,6 +1098,213 @@
           "timestamp": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "V2ServerMetadata": {
+        "type": "object",
+        "required": [
+          "name",
+          "version",
+          "extensions"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "example": "furnace"
+          },
+          "version": {
+            "type": "string"
+          },
+          "extensions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "V2TensorMetadata": {
+        "type": "object",
+        "required": [
+          "name",
+          "datatype",
+          "shape"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "datatype": {
+            "type": "string",
+            "example": "FP32"
+          },
+          "shape": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "-1 for the batch dimension"
+          }
+        }
+      },
+      "V2ModelMetadata": {
+        "type": "object",
+        "required": [
+          "name",
+          "versions",
+          "platform",
+          "inputs",
+          "outputs"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "platform": {
+            "type": "string",
+            "example": "furnace_onnx"
+          },
+          "inputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/V2TensorMetadata"
+            }
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/V2TensorMetadata"
+            }
+          }
+        }
+      },
+      "V2InferRequest": {
+        "type": "object",
+        "required": [
+          "inputs"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "parameters": {
+            "type": "object"
+          },
+          "inputs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "shape",
+                "datatype"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "input"
+                },
+                "shape": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer"
+                  }
+                },
+                "datatype": {
+                  "type": "string",
+                  "example": "FP32"
+                },
+                "parameters": {
+                  "type": "object"
+                },
+                "data": {
+                  "type": "array",
+                  "items": {},
+                  "description": "Values in row-major order, flat or nested"
+                }
+              }
+            }
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "output"
+                },
+                "parameters": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "V2InferResponse": {
+        "type": "object",
+        "required": [
+          "model_name",
+          "model_version",
+          "outputs"
+        ],
+        "properties": {
+          "model_name": {
+            "type": "string"
+          },
+          "model_version": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/V2OutputTensor"
+            }
+          }
+        }
+      },
+      "V2OutputTensor": {
+        "type": "object",
+        "required": [
+          "name",
+          "datatype",
+          "shape"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "datatype": {
+            "type": "string"
+          },
+          "shape": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "parameters": {
+            "type": "object"
           }
         }
       }
