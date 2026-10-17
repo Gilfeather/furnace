@@ -17,11 +17,14 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Install cargo-audit
-      uses: taiki-e/install-action@cargo-audit
-
-    - name: Run cargo audit
-      run: cargo audit
+    # RustSec advisories for every crate that can be built into furnace, across all features
+    # and targets (cargo-deny walks the resolved dependency graph). Unlike `cargo audit`, it does
+    # not flag optional dependencies that Cargo.lock records but no feature can enable, such as
+    # Burn's LibTorch backend. No advisories are ignored.
+    - name: Check advisories
+      uses: EmbarkStudios/cargo-deny-action@v2
+      with:
+        command: check advisories
 
   cargo_deny:
     name: cargo-deny (licenses, bans, sources)
