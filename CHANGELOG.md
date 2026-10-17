@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GET /metrics` serves the Prometheus text format to scrapers (requests that accept `text/plain`
   or `application/openmetrics-text`), with request and inference latency histograms; the JSON
   gains estimated p50/p95/p99 latencies and `ready`
+- The KServe / Triton Open Inference Protocol over HTTP (`/v2/...`): server and model metadata,
+  health, and inference with FP32 tensors, as JSON (flat or nested) or with Triton's binary
+  tensor data extension. NVIDIA's `tritonclient.http` works against Furnace unchanged
 - `GET /readyz` for readiness probes: 503 until a warm-up inference, run in the background at
   startup, has initialized the model; `/healthz` stays the liveness probe
 

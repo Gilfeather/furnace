@@ -98,6 +98,7 @@ often helps. `furnace --help` lists the models in a build.
 | `GET /healthz` / `GET /readyz` | Liveness / readiness (after the warm-up inference) |
 | `GET /model/info` | Input/output shapes and statistics |
 | `GET /metrics` | Counters and latency percentiles as JSON, or the Prometheus format for a scraper |
+| `/v2/...` | KServe / Triton Open Inference Protocol: Triton and KServe clients work unchanged |
 
 `/predict` takes each input flattened (ResNet-18: `3 × 224 × 224 = 150,528` floats, CHW,
 ImageNet-normalized) and returns raw logits:
