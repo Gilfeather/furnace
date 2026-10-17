@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-10-17
+
+CPU inference is about 2× faster again. Over HTTP, Furnace now matches FastAPI + ONNX Runtime
+on ResNet-18 (8.8 vs 8.6 ms per image, 27.0 vs 28.9 ms for four), while starting in 39 ms
+instead of 1.9 s. The API and CLI are unchanged.
+
+### Changed
+- ResNet-18 goes from about 15 ms to 8.0 ms per image at batch 1, and from 40.6 ms to 25.1 ms
+  at batch 4 (ONNX Runtime: 7.1 and 25.3 ms) on the benchmark laptop. Single-threaded, it goes
+  from 47 ms to about 32 ms. Changes in the vendored burn-flex, for `f32` convolutions without
+  groups or dilation on x86_64 with AVX2 or AVX-512:
+  - Direct convolution without im2col: the input is copied once into a zero-padded buffer (split
+    into phase planes for strides above 1), and `std::arch` microkernels read every kernel tap
+    as a plain vector load
+  - Winograd F(2x2, 3x3) for 3x3 stride-1 layers of up to 128 x 128 channels. The transformed
+    filters are cached per weight tensor, holding only a weak reference, so changed weights are
+    never served stale
+  - Work buffers are reused from a small pool
+  - 2D max pooling runs as two separable passes
+- The server uses a new global allocator, `furnace::allocator::BlockCache`, that keeps freed
+  blocks of 256 KiB and up (at most 128 MiB) for reuse, instead of returning them to the OS and
+  page-faulting them back in on every pass. It takes about 15% off batch-1 latency
+- Peak private memory rises from about 50 to 78 MB for the server (the reused blocks and the
+  Winograd filters); ONNX Runtime takes 139 MB and FastAPI + ONNX Runtime 694 MB
+- The README is much shorter; the API reference moved to `docs/API.md` and benchmark details to
+  `docs/PERFORMANCE.md`
+
+### Added
+- `benches/compare` also benchmarks FastAPI + ONNX Runtime over HTTP, with the same client as
+  the Furnace server
+
+### Fixed
+- `benches/compare`: the documented steps ran stale engine binaries (`cargo run` rebuilds only
+  `compare`), reports said furnace 0.4.0, and the benchmark-report issue template missed the
+  input image
+
 ## [0.6.1] - 2026-10-17
 
 No changes to furnace itself; release pipeline only.
