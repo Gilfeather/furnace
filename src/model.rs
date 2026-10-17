@@ -434,6 +434,16 @@ impl Model {
     }
 
     /// One forward pass over validated input; the error is the failure message
+    /// Run one all-zero input through the model without touching the statistics, so the first
+    /// real request does not pay for lazy initialization (weight transforms, buffer pools,
+    /// page faults on the memory-mapped weights). Returns how long it took.
+    pub fn warm_up(&self) -> std::result::Result<std::time::Duration, String> {
+        let input_size: usize = self.info.input_spec.shape.iter().product();
+        let start = Instant::now();
+        self.forward(vec![0.0; input_size], 1)?;
+        Ok(start.elapsed())
+    }
+
     fn forward(&self, input: Vec<f32>, batch_size: usize) -> std::result::Result<Vec<f32>, String> {
         let input_size: usize = self.info.input_spec.shape.iter().product();
         let input_tensor = Tensor::from_data(

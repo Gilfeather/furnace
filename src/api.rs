@@ -16,7 +16,7 @@ use serde::de::{self, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::signal;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
@@ -31,6 +31,7 @@ use crate::error::{ApiError, FurnaceError, ModelError, Result};
 use crate::model::{FlatInput, MAX_BATCH_SIZE, Model, ModelInfo, ModelStats};
 #[cfg(feature = "image")]
 use crate::preprocess::{ImageKind, image_input_size, preprocess_image};
+use crate::telemetry::{Histogram, Percentiles};
 
 /// Media type of the raw little-endian `f32` input/output format
 pub const OCTET_STREAM: &str = "application/octet-stream";
@@ -165,6 +166,20 @@ pub struct MetricsResponse {
     pub average_inference_time_ms: f64,
     /// When the last successful inference finished
     pub last_inference_at: Option<String>,
+    /// `/predict` latency from arrival to response, estimated percentiles
+    pub request_latency_ms: Percentiles,
+    /// Successful inference latency, queueing included, estimated percentiles
+    pub inference_latency_ms: Percentiles,
+    /// Whether the warm-up inference has run (see `GET /readyz`)
+    pub ready: bool,
+    pub timestamp: String,
+}
+
+/// `GET /readyz`
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReadinessResponse {
+    /// `ready`, or `warming_up` before the warm-up inference has run
+    pub status: String,
     pub timestamp: String,
 }
 
@@ -234,6 +249,12 @@ struct ServerState {
     total_requests: AtomicU64,
     total_errors: AtomicU64,
     rejected_busy: AtomicU64,
+    /// Set once the warm-up inference has run; `/readyz` answers 503 until then
+    ready: Arc<AtomicBool>,
+    /// `/predict` from arrival to response, every status
+    request_latency: Histogram,
+    /// Successful inferences, from the decoded input to the output (queueing included)
+    inference_latency: Histogram,
 }
 
 impl ServerState {
@@ -259,7 +280,27 @@ pub fn router(model: Model, config: &ServerConfig) -> Router {
         total_requests: AtomicU64::new(0),
         total_errors: AtomicU64::new(0),
         rejected_busy: AtomicU64::new(0),
+        ready: Arc::new(AtomicBool::new(false)),
+        request_latency: Histogram::new(),
+        inference_latency: Histogram::new(),
     });
+
+    // Warm up off the request path: the server accepts requests at once (they just pay the
+    // first-inference cost themselves), while `/readyz` turns 200 when this is done
+    {
+        let model = state.model.clone();
+        let ready = state.ready.clone();
+        std::thread::spawn(move || {
+            match model.warm_up() {
+                Ok(elapsed) => info!(
+                    "🔥 Warm-up inference took {:.1}ms",
+                    elapsed.as_secs_f64() * 1e3
+                ),
+                Err(e) => warn!("Warm-up inference failed: {e}"),
+            }
+            ready.store(true, Ordering::Release);
+        });
+    }
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -275,6 +316,7 @@ pub fn router(model: Model, config: &ServerConfig) -> Router {
     Router::new()
         .route("/healthz", get(health_check))
         .route("/health", get(health_check))
+        .route("/readyz", get(readiness))
         .route(
             "/predict",
             post(predict).layer(middleware::from_fn_with_state(
@@ -397,6 +439,25 @@ async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
+/// `GET /readyz`: 200 once the warm-up inference has run, 503 before. Unlike `/healthz`
+/// (alive), this tells a load balancer when to start sending traffic.
+async fn readiness(State(state): State<AppState>) -> Response {
+    let ready = state.ready.load(Ordering::Acquire);
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(ReadinessResponse {
+            status: if ready { "ready" } else { "warming_up" }.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+        }),
+    )
+        .into_response()
+}
+
 async fn predict(State(state): State<AppState>, request: Request) -> Response {
     // Tell the batcher a request is on its way in, so a batch about to start can wait
     // for it while its body is received and decoded
@@ -470,7 +531,9 @@ async fn predict(State(state): State<AppState>, request: Request) -> Response {
 
     match result {
         Ok(output) => {
-            let inference_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+            let elapsed = start_time.elapsed();
+            state.inference_latency.observe(elapsed);
+            let inference_time_ms = elapsed.as_secs_f64() * 1000.0;
             info!(
                 "Prediction completed in {:.2}ms, batch size: {}",
                 inference_time_ms, batch_size
@@ -915,7 +978,9 @@ fn validate_inputs(model: &Model, inputs: &[Vec<f32>]) -> std::result::Result<()
 /// Count every `/predict` request and its outcome, including rejections by the body limit
 async fn count_requests(State(state): State<AppState>, request: Request, next: Next) -> Response {
     state.total_requests.fetch_add(1, Ordering::Relaxed);
+    let start = Instant::now();
     let response = next.run(request).await;
+    state.request_latency.observe(start.elapsed());
     let status = response.status();
     if status.is_client_error() || status.is_server_error() {
         state.total_errors.fetch_add(1, Ordering::Relaxed);
@@ -926,16 +991,165 @@ async fn count_requests(State(state): State<AppState>, request: Request, next: N
     response
 }
 
-async fn metrics(State(state): State<AppState>) -> Json<MetricsResponse> {
+/// `GET /metrics`: JSON by default, or the Prometheus text format for a scraper (a request
+/// whose `Accept` lists `text/plain` or `application/openmetrics-text` before any JSON type)
+async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if wants_prometheus(&headers) {
+        return (
+            [(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+            )],
+            prometheus_metrics(&state),
+        )
+            .into_response();
+    }
+    Json(json_metrics(&state)).into_response()
+}
+
+/// Whether `Accept` lists `text/plain` or `application/openmetrics-text` before (or without)
+/// JSON or a wildcard
+fn wants_prometheus(headers: &HeaderMap) -> bool {
+    let Some(accept) = headers.get(ACCEPT).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    for part in accept.split(',') {
+        let media = media_type_essence(part.trim());
+        if media == "application/json" || media == "*/*" {
+            return false;
+        }
+        if media == "text/plain" || media == "application/openmetrics-text" {
+            return true;
+        }
+    }
+    false
+}
+
+fn prometheus_metrics(state: &ServerState) -> String {
+    use crate::telemetry::{label, render_value};
     let stats = state.model.get_stats();
-    Json(MetricsResponse {
+    let info = state.model.get_info();
+    let mut out = String::with_capacity(4096);
+    out.push_str("# HELP furnace_build_info Furnace version, model and backend\n");
+    out.push_str("# TYPE furnace_build_info gauge\n");
+    out.push_str(&format!(
+        "furnace_build_info{{version=\"{}\",model=\"{}\",backend=\"{}\"}} 1\n",
+        env!("CARGO_PKG_VERSION"),
+        label(&info.name),
+        label(&info.backend),
+    ));
+    let gauge = "gauge";
+    let counter = "counter";
+    let values: [(&str, &str, &str, u64); 13] = [
+        (
+            "furnace_uptime_seconds",
+            gauge,
+            "Seconds since the server started",
+            state.uptime_seconds(),
+        ),
+        (
+            "furnace_ready",
+            gauge,
+            "1 once the warm-up inference has run",
+            u64::from(state.ready.load(Ordering::Acquire)),
+        ),
+        (
+            "furnace_requests_total",
+            counter,
+            "/predict requests received, including rejected ones",
+            state.total_requests.load(Ordering::Relaxed),
+        ),
+        (
+            "furnace_request_errors_total",
+            counter,
+            "/predict requests answered with a 4xx or 5xx status",
+            state.total_errors.load(Ordering::Relaxed),
+        ),
+        (
+            "furnace_requests_rejected_busy_total",
+            counter,
+            "Requests rejected with 503 SERVER_BUSY",
+            state.rejected_busy.load(Ordering::Relaxed),
+        ),
+        (
+            "furnace_in_flight_requests",
+            gauge,
+            "Requests queued for or running inference",
+            in_flight(state) as u64,
+        ),
+        (
+            "furnace_max_concurrent_requests",
+            gauge,
+            "Most requests queued for or running inference at once",
+            state.max_concurrent as u64,
+        ),
+        (
+            "furnace_inferences_total",
+            counter,
+            "Requests that reached the model",
+            stats.inference_count,
+        ),
+        (
+            "furnace_inference_errors_total",
+            counter,
+            "Requests the model failed",
+            stats.error_count,
+        ),
+        (
+            "furnace_batches_total",
+            counter,
+            "Forward passes run",
+            stats.batch_count,
+        ),
+        (
+            "furnace_batch_items_total",
+            counter,
+            "Items processed by forward passes",
+            stats.batched_items,
+        ),
+        (
+            "furnace_max_batch_size",
+            gauge,
+            "Most items per batched forward pass; 1 means batching is off",
+            state.max_batch_size as u64,
+        ),
+        (
+            "furnace_model_size_bytes",
+            gauge,
+            "Size of the model weights",
+            info.model_size_bytes,
+        ),
+    ];
+    for (name, kind, help, value) in values {
+        render_value(&mut out, name, kind, help, value);
+    }
+    state.request_latency.render(
+        &mut out,
+        "furnace_request_duration_seconds",
+        "/predict latency from arrival to response",
+    );
+    state.inference_latency.render(
+        &mut out,
+        "furnace_inference_duration_seconds",
+        "Successful inference latency from decoded input to output, queueing included",
+    );
+    out
+}
+
+fn in_flight(state: &ServerState) -> usize {
+    state
+        .max_concurrent
+        .saturating_sub(state.inference_slots.available_permits())
+}
+
+fn json_metrics(state: &ServerState) -> MetricsResponse {
+    let stats = state.model.get_stats();
+    MetricsResponse {
         uptime_seconds: state.uptime_seconds(),
         total_requests: state.total_requests.load(Ordering::Relaxed),
         total_errors: state.total_errors.load(Ordering::Relaxed),
         rejected_busy: state.rejected_busy.load(Ordering::Relaxed),
-        in_flight_inferences: state
-            .max_concurrent
-            .saturating_sub(state.inference_slots.available_permits()),
+        in_flight_inferences: in_flight(state),
         max_concurrent_inferences: state.max_concurrent,
         total_inferences: stats.inference_count,
         total_batches: stats.batch_count,
@@ -947,8 +1161,11 @@ async fn metrics(State(state): State<AppState>) -> Json<MetricsResponse> {
         max_batch_size: state.max_batch_size,
         average_inference_time_ms: stats.average_inference_time_ms,
         last_inference_at: stats.last_inference_time.map(|t| t.to_rfc3339()),
+        request_latency_ms: state.request_latency.percentiles_ms(),
+        inference_latency_ms: state.inference_latency.percentiles_ms(),
+        ready: state.ready.load(Ordering::Acquire),
         timestamp: Utc::now().to_rfc3339(),
-    })
+    }
 }
 
 async fn model_info(State(state): State<AppState>) -> Json<ModelInfoResponse> {
@@ -1188,7 +1405,15 @@ mod tests {
             .collect();
         assert_eq!(
             paths,
-            ["/health", "/healthz", "/metrics", "/model/info", "/predict"].into()
+            [
+                "/health",
+                "/healthz",
+                "/metrics",
+                "/model/info",
+                "/predict",
+                "/readyz"
+            ]
+            .into()
         );
 
         let app = test_app();
@@ -1222,12 +1447,100 @@ mod tests {
         let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_matches_schema(&spec, "ErrorResponse", &error);
 
-        assert_matches_schema(&spec, "MetricsResponse", &get("/metrics").await);
+        let metrics = get("/metrics").await;
+        assert_matches_schema(&spec, "MetricsResponse", &metrics);
+        assert_matches_schema(&spec, "Percentiles", &metrics["request_latency_ms"]);
+        wait_until_ready(&app).await;
+        assert_matches_schema(&spec, "ReadinessResponse", &get("/readyz").await);
         let info = get("/model/info").await;
         assert_matches_schema(&spec, "ModelInfoResponse", &info);
         assert_matches_schema(&spec, "ModelInfo", &info["model_info"]);
         assert_matches_schema(&spec, "ModelStats", &info["stats"]);
         assert_matches_schema(&spec, "TensorSpec", &info["model_info"]["input_spec"]);
+    }
+
+    /// Poll `/readyz` until the warm-up has run
+    async fn wait_until_ready(app: &Router) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let request = Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap();
+            let (status, _) = send(app.clone(), request).await;
+            if status == StatusCode::OK {
+                return;
+            }
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert!(Instant::now() < deadline, "never became ready");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_readiness_after_warm_up() {
+        let app = test_app();
+        wait_until_ready(&app).await;
+        // The warm-up does not count as an inference
+        let metrics = get_metrics(app).await;
+        assert_eq!(metrics.total_inferences, 0);
+        assert!(metrics.ready);
+    }
+
+    #[tokio::test]
+    async fn test_metrics_latency_percentiles_and_prometheus_format() {
+        let app = test_app();
+        let ok = serde_json::json!({ "input": vec![0.5; 784] }).to_string();
+        for _ in 0..3 {
+            let (status, _) = send(app.clone(), predict_request(ok.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        let m = get_metrics(app.clone()).await;
+        assert!(m.request_latency_ms.p50.is_some());
+        assert!(m.inference_latency_ms.p99.is_some());
+
+        // What Prometheus sends
+        let request = Request::builder()
+            .uri("/metrics")
+            .header(
+                ACCEPT,
+                "application/openmetrics-text;version=1.0.0;q=0.5,text/plain;version=0.0.4;q=0.4,*/*;q=0.1",
+            )
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()[CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/plain")
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("furnace_requests_total 3\n"), "{text}");
+        assert!(text.contains("furnace_inferences_total 3\n"), "{text}");
+        assert!(
+            text.contains("furnace_request_duration_seconds_count 3\n"),
+            "{text}"
+        );
+        assert!(text.contains("furnace_build_info{version="), "{text}");
+
+        // A browser or curl gets JSON
+        let request = Request::builder()
+            .uri("/metrics")
+            .header(ACCEPT, "*/*")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert!(
+            response.headers()[CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("application/json")
+        );
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@ pub mod model;
 pub mod models;
 #[cfg(feature = "image")]
 pub mod preprocess;
+pub mod telemetry;
 pub mod threads;
 pub mod types;
 pub mod weights;

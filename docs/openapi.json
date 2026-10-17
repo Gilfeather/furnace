@@ -4,9 +4,15 @@
     "title": "Furnace inference server",
     "version": "0.7.0",
     "description": "HTTP API of the Furnace inference server. Prose reference with examples: docs/API.md.",
-    "license": { "name": "MIT" }
+    "license": {
+      "name": "MIT"
+    }
   },
-  "servers": [{ "url": "http://127.0.0.1:3000" }],
+  "servers": [
+    {
+      "url": "http://127.0.0.1:3000"
+    }
+  ],
   "paths": {
     "/healthz": {
       "get": {
@@ -15,8 +21,18 @@
         "responses": {
           "200": {
             "description": "The server is up and its model is loaded",
-            "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthResponse" } } }
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -28,7 +44,42 @@
         "responses": {
           "200": {
             "description": "The server is up and its model is loaded",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthResponse" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "summary": "Readiness",
+        "operationId": "readiness",
+        "description": "200 once the warm-up inference has run, 503 before. /healthz says the process is alive; this says it is ready for traffic.",
+        "responses": {
+          "200": {
+            "description": "Ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Still warming up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -40,9 +91,22 @@
         "responses": {
           "200": {
             "description": "Request, error, batching and latency counters since startup",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MetricsResponse" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsResponse"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "description": "Prometheus text format, version 0.0.4"
+                }
+              }
+            }
           }
-        }
+        },
+        "description": "JSON by default. A request whose Accept header lists text/plain or application/openmetrics-text before any JSON type (as Prometheus sends) gets the Prometheus text exposition format instead."
       }
     },
     "/model/info": {
@@ -52,7 +116,13 @@
         "responses": {
           "200": {
             "description": "Input and output shapes, backend and inference statistics",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ModelInfoResponse" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInfoResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -63,14 +133,20 @@
         "operationId": "predict",
         "description": "Each item is the model input flattened in row-major order (ResNet-18: 3 x 224 x 224 = 150,528 floats, CHW, ImageNet-normalized). Send JSON, raw little-endian float32 (`application/octet-stream`, with `X-Batch-Size` for a batch), or, in a build with the `image` feature, one JPEG or PNG image. Outputs are raw logits.",
         "parameters": [
-          { "$ref": "#/components/parameters/BatchSize" },
-          { "$ref": "#/components/parameters/RequestId" },
+          {
+            "$ref": "#/components/parameters/BatchSize"
+          },
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
           {
             "name": "Accept",
             "in": "header",
             "required": false,
             "description": "`application/octet-stream` returns the outputs as raw little-endian float32 instead of JSON",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -79,39 +155,97 @@
             "application/json": {
               "schema": {
                 "oneOf": [
-                  { "$ref": "#/components/schemas/PredictSingle" },
-                  { "$ref": "#/components/schemas/PredictBatch" }
+                  {
+                    "$ref": "#/components/schemas/PredictSingle"
+                  },
+                  {
+                    "$ref": "#/components/schemas/PredictBatch"
+                  }
                 ]
               }
             },
             "application/octet-stream": {
-              "schema": { "type": "string", "format": "binary", "description": "batch x input size little-endian float32 values" }
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "description": "batch x input size little-endian float32 values"
+              }
             },
-            "image/jpeg": { "schema": { "type": "string", "format": "binary" } },
-            "image/png": { "schema": { "type": "string", "format": "binary" } }
+            "image/jpeg": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "image/png": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
           }
         },
         "responses": {
           "200": {
             "description": "Model outputs",
             "headers": {
-              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
-              "X-Batch-Size": { "description": "Items in a binary response", "schema": { "type": "integer" } },
-              "X-Output-Shape": { "description": "Per-item output shape of a binary response, comma separated", "schema": { "type": "string" } },
-              "X-Inference-Time-Ms": { "description": "Inference time of a binary response", "schema": { "type": "number" } }
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Batch-Size": {
+                "description": "Items in a binary response",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-Output-Shape": {
+                "description": "Per-item output shape of a binary response, comma separated",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Inference-Time-Ms": {
+                "description": "Inference time of a binary response",
+                "schema": {
+                  "type": "number"
+                }
+              }
             },
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/PredictResponse" } },
-              "application/octet-stream": { "schema": { "type": "string", "format": "binary" } }
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PredictResponse"
+                }
+              },
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
             }
           },
-          "400": { "$ref": "#/components/responses/Error" },
-          "413": { "$ref": "#/components/responses/Error" },
-          "415": { "$ref": "#/components/responses/Error" },
-          "422": { "$ref": "#/components/responses/Error" },
-          "500": { "$ref": "#/components/responses/Error" },
-          "503": { "$ref": "#/components/responses/Error" },
-          "504": { "$ref": "#/components/responses/Error" }
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          },
+          "504": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     }
@@ -123,155 +257,457 @@
         "in": "header",
         "required": false,
         "description": "Binary requests: the body holds this many items and the JSON response uses `outputs`",
-        "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
       },
       "RequestId": {
         "name": "X-Request-Id",
         "in": "header",
         "required": false,
         "description": "ID for this request, 1-128 visible ASCII characters; generated when absent",
-        "schema": { "type": "string", "maxLength": 128 }
+        "schema": {
+          "type": "string",
+          "maxLength": 128
+        }
       }
     },
     "headers": {
       "RequestId": {
         "description": "The request's ID: the client's X-Request-Id, or a generated UUID",
-        "schema": { "type": "string" }
+        "schema": {
+          "type": "string"
+        }
       }
     },
     "responses": {
       "Error": {
         "description": "Error; see `code`. 400 invalid input, 413 body too large, 415 unsupported content type, 422 malformed request, 500 inference failed, 503 SERVER_BUSY, 504 INFERENCE_TIMEOUT",
-        "headers": { "X-Request-Id": { "$ref": "#/components/headers/RequestId" } },
-        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
       }
     },
     "schemas": {
       "PredictSingle": {
         "type": "object",
-        "required": ["input"],
-        "properties": { "input": { "type": "array", "items": { "type": "number" } } },
+        "required": [
+          "input"
+        ],
+        "properties": {
+          "input": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          }
+        },
         "additionalProperties": false
       },
       "PredictBatch": {
         "type": "object",
-        "required": ["inputs"],
+        "required": [
+          "inputs"
+        ],
         "properties": {
-          "inputs": { "type": "array", "maxItems": 1000, "items": { "type": "array", "items": { "type": "number" } } }
+          "inputs": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            }
+          }
         },
         "additionalProperties": false
       },
       "PredictResponse": {
         "type": "object",
         "description": "`output` for a single input, `outputs` for a batch",
-        "required": ["status", "inference_time_ms", "timestamp", "batch_size"],
+        "required": [
+          "status",
+          "inference_time_ms",
+          "timestamp",
+          "batch_size"
+        ],
         "properties": {
-          "output": { "type": "array", "items": { "type": "number" } },
-          "outputs": { "type": "array", "items": { "type": "array", "items": { "type": "number" } } },
-          "status": { "type": "string", "example": "success" },
-          "inference_time_ms": { "type": "number" },
-          "timestamp": { "type": "string", "format": "date-time" },
-          "batch_size": { "type": "integer" }
+          "output": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            }
+          },
+          "status": {
+            "type": "string",
+            "example": "success"
+          },
+          "inference_time_ms": {
+            "type": "number"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "batch_size": {
+            "type": "integer"
+          }
         }
       },
       "HealthResponse": {
         "type": "object",
-        "required": ["status", "model_loaded", "backend", "uptime_seconds", "timestamp"],
+        "required": [
+          "status",
+          "model_loaded",
+          "backend",
+          "uptime_seconds",
+          "timestamp"
+        ],
         "properties": {
-          "status": { "type": "string", "example": "healthy" },
-          "model_loaded": { "type": "boolean" },
-          "backend": { "type": "string", "example": "cpu" },
-          "uptime_seconds": { "type": "integer" },
-          "timestamp": { "type": "string", "format": "date-time" }
+          "status": {
+            "type": "string",
+            "example": "healthy"
+          },
+          "model_loaded": {
+            "type": "boolean"
+          },
+          "backend": {
+            "type": "string",
+            "example": "cpu"
+          },
+          "uptime_seconds": {
+            "type": "integer"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "MetricsResponse": {
         "type": "object",
         "required": [
-          "uptime_seconds", "total_requests", "total_errors", "rejected_busy", "in_flight_inferences",
-          "max_concurrent_inferences", "total_inferences", "total_batches", "average_batch_size",
-          "max_batch_size", "average_inference_time_ms", "last_inference_at", "timestamp"
+          "uptime_seconds",
+          "total_requests",
+          "total_errors",
+          "rejected_busy",
+          "in_flight_inferences",
+          "max_concurrent_inferences",
+          "total_inferences",
+          "total_batches",
+          "average_batch_size",
+          "max_batch_size",
+          "average_inference_time_ms",
+          "last_inference_at",
+          "request_latency_ms",
+          "inference_latency_ms",
+          "ready",
+          "timestamp"
         ],
         "properties": {
-          "uptime_seconds": { "type": "integer" },
-          "total_requests": { "type": "integer", "description": "/predict requests received, including ones rejected before inference" },
-          "total_errors": { "type": "integer", "description": "/predict requests answered with a 4xx or 5xx status" },
-          "rejected_busy": { "type": "integer", "description": "Requests rejected with 503 SERVER_BUSY" },
-          "in_flight_inferences": { "type": "integer", "description": "Requests queued for or running inference" },
-          "max_concurrent_inferences": { "type": "integer" },
-          "total_inferences": { "type": "integer", "description": "Requests that reached the model" },
-          "total_batches": { "type": "integer", "description": "Forward passes run" },
-          "average_batch_size": { "type": "number" },
-          "max_batch_size": { "type": "integer", "description": "1 means dynamic batching is off" },
-          "average_inference_time_ms": { "type": "number" },
-          "last_inference_at": { "type": "string", "format": "date-time", "nullable": true },
-          "timestamp": { "type": "string", "format": "date-time" }
+          "uptime_seconds": {
+            "type": "integer"
+          },
+          "total_requests": {
+            "type": "integer",
+            "description": "/predict requests received, including ones rejected before inference"
+          },
+          "total_errors": {
+            "type": "integer",
+            "description": "/predict requests answered with a 4xx or 5xx status"
+          },
+          "rejected_busy": {
+            "type": "integer",
+            "description": "Requests rejected with 503 SERVER_BUSY"
+          },
+          "in_flight_inferences": {
+            "type": "integer",
+            "description": "Requests queued for or running inference"
+          },
+          "max_concurrent_inferences": {
+            "type": "integer"
+          },
+          "total_inferences": {
+            "type": "integer",
+            "description": "Requests that reached the model"
+          },
+          "total_batches": {
+            "type": "integer",
+            "description": "Forward passes run"
+          },
+          "average_batch_size": {
+            "type": "number"
+          },
+          "max_batch_size": {
+            "type": "integer",
+            "description": "1 means dynamic batching is off"
+          },
+          "average_inference_time_ms": {
+            "type": "number"
+          },
+          "last_inference_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "request_latency_ms": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Percentiles"
+              }
+            ],
+            "description": "/predict latency from arrival to response, in milliseconds"
+          },
+          "inference_latency_ms": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Percentiles"
+              }
+            ],
+            "description": "Successful inference latency, queueing included, in milliseconds"
+          },
+          "ready": {
+            "type": "boolean",
+            "description": "Whether the warm-up inference has run"
+          }
         }
       },
       "ModelInfoResponse": {
         "type": "object",
-        "required": ["model_info", "stats", "timestamp"],
+        "required": [
+          "model_info",
+          "stats",
+          "timestamp"
+        ],
         "properties": {
-          "model_info": { "$ref": "#/components/schemas/ModelInfo" },
-          "stats": { "$ref": "#/components/schemas/ModelStats" },
-          "timestamp": { "type": "string", "format": "date-time" }
+          "model_info": {
+            "$ref": "#/components/schemas/ModelInfo"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/ModelStats"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "ModelInfo": {
         "type": "object",
-        "required": ["name", "version", "input_spec", "output_spec", "model_type", "backend", "created_at", "model_size_bytes"],
+        "required": [
+          "name",
+          "version",
+          "input_spec",
+          "output_spec",
+          "model_type",
+          "backend",
+          "created_at",
+          "model_size_bytes"
+        ],
         "properties": {
-          "name": { "type": "string" },
-          "version": { "type": "string" },
-          "input_spec": { "$ref": "#/components/schemas/TensorSpec" },
-          "output_spec": { "$ref": "#/components/schemas/TensorSpec" },
-          "model_type": { "type": "string", "example": "onnx" },
-          "backend": { "type": "string" },
-          "created_at": { "type": "string", "format": "date-time" },
-          "model_size_bytes": { "type": "integer" }
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "input_spec": {
+            "$ref": "#/components/schemas/TensorSpec"
+          },
+          "output_spec": {
+            "$ref": "#/components/schemas/TensorSpec"
+          },
+          "model_type": {
+            "type": "string",
+            "example": "onnx"
+          },
+          "backend": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "model_size_bytes": {
+            "type": "integer"
+          }
         }
       },
       "TensorSpec": {
         "type": "object",
-        "required": ["shape", "dtype", "min_value", "max_value"],
+        "required": [
+          "shape",
+          "dtype",
+          "min_value",
+          "max_value"
+        ],
         "properties": {
-          "shape": { "type": "array", "items": { "type": "integer" }, "description": "Per item, without the batch dimension" },
-          "dtype": { "type": "string", "example": "float32" },
-          "min_value": { "type": "number", "nullable": true },
-          "max_value": { "type": "number", "nullable": true }
+          "shape": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "Per item, without the batch dimension"
+          },
+          "dtype": {
+            "type": "string",
+            "example": "float32"
+          },
+          "min_value": {
+            "type": "number",
+            "nullable": true
+          },
+          "max_value": {
+            "type": "number",
+            "nullable": true
+          }
         }
       },
       "ModelStats": {
         "type": "object",
         "required": [
-          "inference_count", "total_inference_time_ms", "last_inference_time", "average_inference_time_ms",
-          "error_count", "success_count", "min_inference_time_ms", "max_inference_time_ms", "batch_count", "batched_items"
+          "inference_count",
+          "total_inference_time_ms",
+          "last_inference_time",
+          "average_inference_time_ms",
+          "error_count",
+          "success_count",
+          "min_inference_time_ms",
+          "max_inference_time_ms",
+          "batch_count",
+          "batched_items"
         ],
         "properties": {
-          "inference_count": { "type": "integer" },
-          "total_inference_time_ms": { "type": "number" },
-          "last_inference_time": { "type": "string", "format": "date-time", "nullable": true },
-          "average_inference_time_ms": { "type": "number" },
-          "error_count": { "type": "integer" },
-          "success_count": { "type": "integer" },
-          "min_inference_time_ms": { "type": "number", "nullable": true },
-          "max_inference_time_ms": { "type": "number", "nullable": true },
-          "batch_count": { "type": "integer", "description": "Forward passes run" },
-          "batched_items": { "type": "integer" }
+          "inference_count": {
+            "type": "integer"
+          },
+          "total_inference_time_ms": {
+            "type": "number"
+          },
+          "last_inference_time": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "average_inference_time_ms": {
+            "type": "number"
+          },
+          "error_count": {
+            "type": "integer"
+          },
+          "success_count": {
+            "type": "integer"
+          },
+          "min_inference_time_ms": {
+            "type": "number",
+            "nullable": true
+          },
+          "max_inference_time_ms": {
+            "type": "number",
+            "nullable": true
+          },
+          "batch_count": {
+            "type": "integer",
+            "description": "Forward passes run"
+          },
+          "batched_items": {
+            "type": "integer"
+          }
         }
       },
       "ErrorResponse": {
         "type": "object",
-        "required": ["error", "code", "details", "timestamp"],
+        "required": [
+          "error",
+          "code",
+          "details",
+          "timestamp"
+        ],
         "properties": {
-          "error": { "type": "string" },
+          "error": {
+            "type": "string"
+          },
           "code": {
             "type": "string",
             "description": "Machine-readable error, e.g. INVALID_REQUEST, INVALID_IMAGE, INVALID_INPUT, INPUT_VALIDATION_FAILED, INVALID_INPUT_VALUE, BATCH_TOO_LARGE, SERVER_BUSY, INFERENCE_TIMEOUT or INFERENCE_FAILED (see the errors table in docs/API.md)",
             "example": "INPUT_VALIDATION_FAILED"
           },
-          "details": { "type": "object", "nullable": true },
-          "timestamp": { "type": "string", "format": "date-time" }
+          "details": {
+            "type": "object",
+            "nullable": true
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Percentiles": {
+        "type": "object",
+        "description": "Estimated from a histogram; null before the first observation",
+        "required": [
+          "p50",
+          "p95",
+          "p99"
+        ],
+        "properties": {
+          "p50": {
+            "type": "number",
+            "nullable": true
+          },
+          "p95": {
+            "type": "number",
+            "nullable": true
+          },
+          "p99": {
+            "type": "number",
+            "nullable": true
+          }
+        }
+      },
+      "ReadinessResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "timestamp"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "warming_up"
+            ]
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       }
     }

@@ -5,7 +5,8 @@ The same API as an OpenAPI 3 spec: [openapi.json](openapi.json).
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /healthz` (alias `/health`) | Liveness and readiness |
+| `GET /healthz` (alias `/health`) | Liveness: the process is up |
+| `GET /readyz` | Readiness: the warm-up inference has run |
 | `GET /metrics` | Request, error and latency counters |
 | `GET /model/info` | Input and output shapes, backend, per-model statistics |
 | `POST /predict` | Inference: JSON, raw `float32`, or (with `--features image`) a JPEG/PNG |
@@ -16,9 +17,17 @@ The same API as an OpenAPI 3 spec: [openapi.json](openapi.json).
 { "status": "healthy", "model_loaded": true, "backend": "cpu", "uptime_seconds": 42, "timestamp": "2026-10-14T03:34:47Z" }
 ```
 
+## `GET /readyz`
+
+`200 {"status": "ready"}` once the warm-up inference has run, `503 {"status": "warming_up"}`
+before. At startup the server runs one all-zero input through the model in the background, so
+lazy initialization (weight transforms, buffer pools, the first touch of the memory-mapped
+weights) is not paid by a real request. Requests are accepted from the start; point a load
+balancer's or Kubernetes' readiness probe here and the liveness probe at `/healthz`.
+
 ## `GET /metrics`
 
-Server counters for monitoring:
+Server counters for monitoring, as JSON:
 
 ```json
 {
@@ -28,9 +37,23 @@ Server counters for monitoring:
   "total_inferences": 1508, "total_batches": 611, "average_batch_size": 2.6, "max_batch_size": 8,
   "average_inference_time_ms": 84.2,
   "last_inference_at": "2026-10-14T05:01:12Z",
+  "request_latency_ms": { "p50": 9.1, "p95": 14.2, "p99": 23.8 },
+  "inference_latency_ms": { "p50": 8.3, "p95": 12.9, "p99": 21.0 },
+  "ready": true,
   "timestamp": "2026-10-14T05:01:13Z"
 }
 ```
+
+Prometheus gets the same counters in its text format: a request whose `Accept` header lists
+`text/plain` or `application/openmetrics-text` before any JSON type, as Prometheus' scraper
+sends, gets `furnace_requests_total`, `furnace_in_flight_requests`, `furnace_batches_total`
+and the rest, plus the latency histograms `furnace_request_duration_seconds` and
+`furnace_inference_duration_seconds` (buckets from 0.5 ms to 10 s) and
+`furnace_build_info{version, model, backend}`. Point a scrape job at `/metrics`; no exporter is
+needed.
+
+The percentiles in the JSON are estimated from those histograms, so they are accurate to the
+bucket they fall in.
 
 `total_requests` and `total_errors` count every `/predict` request, including those rejected
 before inference (400, 413, 503). `rejected_busy` is the 503 subset. `total_inferences` counts
