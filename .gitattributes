@@ -1,0 +1,3 @@
+# The Dockerfile uses backslash line continuations, which CRLF line endings break
+Dockerfile text eol=lf
+*.sh text eol=lf
