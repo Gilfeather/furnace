@@ -51,8 +51,8 @@ curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification
 # Build the project
 cargo build --release
 
-# Run tests (release: ResNet-18 inference is slow in debug builds)
-cargo test --release
+# Run tests (dependencies are optimized even in debug builds, so no --release needed)
+cargo test
 
 # Run the development server
 cargo run --release -- --model-name resnet18 --port 3000

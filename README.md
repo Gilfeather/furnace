@@ -168,10 +168,11 @@ docker run --rm -p 3000:3000 furnace --model-name mnist --threads 4
 ```bash
 cargo fmt --all
 cargo clippy --all-targets -- -D warnings
-cargo test --release   # needs models/resnet18.onnx and models/mnist.onnx
+cargo test             # needs models/resnet18.onnx and models/mnist.onnx
 ```
 
-Generated model code is in `target/release/build/furnace-server-*/out/models/`. Furnace ships a
+Debug builds optimize the dependencies, so `cargo test` needs no `--release` and rebuilds in
+seconds after a change. Generated model code is in `target/*/build/furnace-server-*/out/models/`. Furnace ships a
 patched copy of Burn's CPU backend in `vendor/burn-flex` with faster convolutions; see
 [vendor/README.md](vendor/README.md). Contributions are welcome, see
 [CONTRIBUTING.md](CONTRIBUTING.md), and benchmark results from other CPUs especially

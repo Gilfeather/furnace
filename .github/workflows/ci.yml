@@ -23,11 +23,14 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         rust: [stable]
         include:
+          # Beta and the MSRV only need to compile: a type check, no tests
           - os: ubuntu-latest
             rust: beta
+            check-only: true
           # MSRV (keep in sync with rust-version in Cargo.toml)
           - os: ubuntu-latest
             rust: "1.95"
+            check-only: true
 
     steps:
     - name: Checkout code
@@ -65,9 +68,15 @@ jobs:
         cargo clippy --all-targets -- -D warnings
         cargo clippy --all-targets --features image -- -D warnings
 
-    # With the optional image input; the default build's only extra test is its 415
+    - name: Type check
+      if: matrix.check-only
+      run: cargo check --all-targets --features image
+
+    # With the optional image input; the default build's only extra test is its 415. Examples and
+    # benches are left to clippy above, which type-checks them without an optimized build.
     - name: Run tests
-      run: cargo test --profile ci --all-targets --features image
+      if: ${{ !matrix.check-only }}
+      run: cargo test --profile ci --lib --bins --tests --features image
 
   gpu-features:
     name: Check GPU backend features
@@ -124,6 +133,8 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
+    # Ten minutes of instrumented build; on main only, not on every pull request
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
     - name: Checkout code
       uses: actions/checkout@v5

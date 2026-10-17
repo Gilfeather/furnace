@@ -39,6 +39,9 @@ instead of 1.9 s. Existing API calls and CLI options work as before.
   Winograd filters); ONNX Runtime takes 139 MB and FastAPI + ONNX Runtime 694 MB
 - The README is much shorter; the API reference moved to `docs/API.md` and benchmark details to
   `docs/PERFORMANCE.md`
+- Development: `cargo test` no longer needs `--release` (debug builds optimize the dependencies
+  and furnace lightly), and rebuilds in about 20 seconds after a change. CI builds its tests
+  without fat LTO, checks only that beta and the MSRV compile, and runs coverage on main only
 - `total_inferences` in `GET /metrics` is documented as requests that reached the model (it
   always counted requests); `in_flight_inferences` includes requests waiting to be batched,
   and `inference_time_ms` includes that wait
