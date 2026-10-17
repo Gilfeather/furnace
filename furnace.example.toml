@@ -10,6 +10,7 @@ max_body_mb = 100
 # request_timeout_ms = 5000     # beyond this, requests get 504 (default: no timeout)
 log_level = "info"              # error, warn, info, debug or trace
 # threads = 8                   # inference threads (default: one per physical core)
+# grpc_port = 8001              # also serve gRPC (KServe / Triton protocol); needs the `grpc` feature
 
 [model]
 name = "resnet18"               # built-in model compiled from models/<name>.onnx

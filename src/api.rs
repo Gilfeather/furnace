@@ -25,6 +25,8 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{Instrument, error, info, info_span, warn};
 
+#[cfg(feature = "grpc")]
+pub mod grpc;
 mod v2;
 
 pub use crate::batching::BatchConfig;
@@ -221,6 +223,8 @@ pub struct ServerConfig {
     pub request_timeout: Option<Duration>,
     /// Dynamic batching of concurrent requests
     pub batching: BatchConfig,
+    /// Port for the Open Inference Protocol over gRPC (feature `grpc`); `None` serves HTTP only
+    pub grpc_port: Option<u16>,
 }
 
 impl Default for ServerConfig {
@@ -233,6 +237,7 @@ impl Default for ServerConfig {
             max_body_bytes: 100 * 1024 * 1024,
             request_timeout: None,
             batching: BatchConfig::default(),
+            grpc_port: None,
         }
     }
 }
@@ -267,6 +272,11 @@ impl ServerState {
 
 /// Build the application router with all middleware applied
 pub fn router(model: Model, config: &ServerConfig) -> Router {
+    router_with_state(server_state(model, config), config)
+}
+
+/// The shared state of the HTTP and gRPC servers; also starts the warm-up inference
+fn server_state(model: Model, config: &ServerConfig) -> AppState {
     let model = Arc::new(model);
     let batching = config.batching;
     let state = Arc::new(ServerState {
@@ -304,6 +314,10 @@ pub fn router(model: Model, config: &ServerConfig) -> Router {
         });
     }
 
+    state
+}
+
+fn router_with_state(state: AppState, config: &ServerConfig) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -376,7 +390,8 @@ pub async fn start_server(host: &str, port: u16, model: Model) -> Result<()> {
 }
 
 pub async fn start_server_with_config(config: ServerConfig, model: Model) -> Result<()> {
-    let app = router(model, &config);
+    let state = server_state(model, &config);
+    let app = router_with_state(state.clone(), &config);
     info!(
         "🚦 Concurrency limit set to {} inferences",
         config.max_concurrent_requests
@@ -399,10 +414,52 @@ pub async fn start_server_with_config(config: ServerConfig, model: Model) -> Res
 
     info!("✅ Server running on http://{}", bind_addr);
 
+    // One signal stops both servers
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let wait_for_stop = move |mut stopped: tokio::sync::watch::Receiver<bool>| async move {
+        let _ = stopped.wait_for(|&stop| stop).await;
+    };
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = stop.send(true);
+    });
+
+    #[cfg(feature = "grpc")]
+    let grpc = config.grpc_port.map(|port| {
+        let addr = format!("{}:{port}", config.host);
+        let state = state.clone();
+        let max_message_bytes = config.max_body_bytes;
+        let shutdown = wait_for_stop(stopped.clone());
+        tokio::spawn(async move {
+            let addr = tokio::net::lookup_host(&addr)
+                .await
+                .ok()
+                .and_then(|mut addrs| addrs.next())
+                .ok_or_else(|| format!("cannot resolve {addr}"))?;
+            grpc::serve(state, addr, max_message_bytes, shutdown).await
+        })
+    });
+    #[cfg(not(feature = "grpc"))]
+    if config.grpc_port.is_some() {
+        return Err(ApiError::ServerStartup(
+            "--grpc-port needs a build with the `grpc` feature".to_string(),
+        )
+        .into());
+    }
+
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(wait_for_stop(stopped))
         .await
         .map_err(|e| ApiError::ServerStartup(format!("Server error: {e}")))?;
+
+    #[cfg(feature = "grpc")]
+    if let Some(grpc) = grpc {
+        match grpc.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(ApiError::ServerStartup(e).into()),
+            Err(e) => return Err(ApiError::ServerStartup(format!("gRPC task failed: {e}")).into()),
+        }
+    }
 
     info!("🛑 Server stopped gracefully");
     Ok(())
@@ -1209,6 +1266,11 @@ pub(crate) mod tests {
 
     pub(super) fn test_app() -> Router {
         router(dummy_model(), &ServerConfig::default())
+    }
+
+    #[cfg(feature = "grpc")]
+    pub(super) fn test_app_state() -> AppState {
+        server_state(dummy_model(), &ServerConfig::default())
     }
 
     pub(super) async fn send(

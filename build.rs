@@ -36,6 +36,9 @@ fn main() {
         println!("cargo:rustc-check-cfg=cfg(model_{name})");
     }
 
+    #[cfg(feature = "grpc")]
+    compile_grpc();
+
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
     let models_out_dir = Path::new(&out_dir).join("models");
     fs::create_dir_all(&models_out_dir).expect("Failed to create models output directory");
@@ -201,4 +204,18 @@ mod onnx {
             ty,
         }
     }
+}
+
+/// Rust types and the service trait for the Open Inference Protocol's gRPC API, from
+/// proto/open_inference_grpc.proto. protox parses the file in pure Rust, so no `protoc` is needed.
+#[cfg(feature = "grpc")]
+fn compile_grpc() {
+    println!("cargo:rerun-if-changed=proto/open_inference_grpc.proto");
+    let descriptors = protox::compile(["open_inference_grpc.proto"], ["proto"])
+        .expect("failed to parse proto/open_inference_grpc.proto");
+    tonic_prost_build::configure()
+        .build_server(true)
+        .build_client(true)
+        .compile_fds(descriptors)
+        .expect("failed to generate the gRPC code");
 }
