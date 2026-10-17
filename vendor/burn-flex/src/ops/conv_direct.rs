@@ -67,6 +67,19 @@ impl Isa {
         }
     }
 
+    /// Whether the direct convolution is faster than burn-flex's im2col + GEMM path. On NEON
+    /// it is not: on a Neoverse CI runner the `gemm` crate's packed kernels run ResNet-18's
+    /// shapes at about 40 GFLOP/s single-threaded and these microkernels at about 31, so NEON
+    /// only uses them inside Winograd, which is 1.15-1.5x faster than im2col there.
+    pub(super) fn direct_beats_im2col(self) -> bool {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx512 | Self::Avx2 => true,
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => false,
+        }
+    }
+
     /// `f32` lanes per vector register
     pub(super) fn lanes(self) -> usize {
         match self {
@@ -161,8 +174,8 @@ impl Geometry {
 }
 
 /// `f32` 2D convolution with `groups == 1` and no dilation, or `None` when this CPU has neither
-/// AVX-512 nor AVX2 + FMA or the stride is larger than [`MAX_STRIDE`]. The output is NCHW and
-/// includes the bias.
+/// AVX-512 nor AVX2 + FMA (on NEON, im2col is faster) or the stride is larger than
+/// [`MAX_STRIDE`]. The output is NCHW and includes the bias.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn conv2d_direct_f32(
     x: &[f32],
@@ -179,6 +192,9 @@ pub(crate) fn conv2d_direct_f32(
         return None;
     }
     let isa = Isa::detect()?;
+    if !isa.direct_beats_im2col() {
+        return None;
+    }
     Some(conv2d_direct_with(
         isa,
         x,
