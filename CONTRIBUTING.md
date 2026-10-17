@@ -5,6 +5,7 @@ Thank you for your interest in contributing to Furnace! We welcome contributions
 ## Table of Contents
 
 - [Code of Conduct](#code-of-conduct)
+- [Scope: server, not engine](#scope-server-not-engine)
 - [Getting Started](#getting-started)
 - [Development Setup](#development-setup)
 - [How to Contribute](#how-to-contribute)
@@ -17,6 +18,18 @@ Thank you for your interest in contributing to Furnace! We welcome contributions
 ## Code of Conduct
 
 This project and everyone participating in it is governed by our Code of Conduct. By participating, you are expected to uphold this code.
+
+## Scope: server, not engine
+
+Furnace is an inference *server*. Its job is everything around the model: loading any ONNX
+model, HTTP, input validation, batching, backpressure, timeouts, metrics, configuration,
+logging and packaging. It should need to know almost nothing about what a model computes.
+
+How fast the model itself runs (convolution and matrix kernels, SIMD, GPU backends) is
+[Burn](https://github.com/tracel-ai/burn)'s job. Speed-ups there belong upstream in Burn, where
+every Burn user gets them and Furnace picks them up by updating. `vendor/burn-flex` holds CPU
+kernel changes only until a Burn release includes them (see
+[vendor/README.md](vendor/README.md)); please don't add new compute kernels to Furnace.
 
 ## Getting Started
 
