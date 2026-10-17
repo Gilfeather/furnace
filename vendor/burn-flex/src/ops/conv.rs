@@ -297,6 +297,78 @@ fn conv3d_impl<
         let threads = rayon::current_num_threads();
         #[cfg(not(feature = "rayon"))]
         let threads = 1;
+
+        // f32 without groups or dilation: direct convolution, no im2col (x86_64 with AVX2 or
+        // AVX-512)
+        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        if core::any::TypeId::of::<T>() == core::any::TypeId::of::<f32>()
+            && groups == 1
+            && dilation_h == 1
+            && dilation_w == 1
+        {
+            let bias = bias.as_ref().map(|b| b.to_contiguous());
+            let bias_data: Option<&[f32]> = bias.as_ref().map(|b| b.storage());
+            // 3x3 stride 1: Winograd F(2x2, 3x3) with cached filters. Only up to 128 x 128
+            // channels: the transformed filters are 16/9 the size of the weights, and wider
+            // layers then stream more filter data from memory than Winograd saves in compute.
+            let winograd = kernel_h == 3
+                && kernel_w == 3
+                && stride_h == 1
+                && stride_w == 1
+                && channels_in >= 8
+                && channels_out >= 8
+                && channels_in * channels_out <= 128 * 128;
+            let output = if winograd {
+                let filters =
+                    super::weight_cache::get_or_insert(&weight, "winograd f(2x2, 3x3)", || {
+                        let filters = super::winograd::Filters::new(
+                            bytemuck::cast_slice(w_data),
+                            channels_out,
+                            channels_in,
+                        );
+                        let bytes = filters.bytes();
+                        (filters, bytes)
+                    });
+                super::winograd::conv2d_winograd_f32(
+                    bytemuck::cast_slice(x_data),
+                    &filters,
+                    bias_data,
+                    [batch_size, channels_in, in_h, in_w],
+                    channels_out,
+                    [out_h, out_w],
+                    [pad_h, pad_w],
+                    threads,
+                )
+            } else {
+                None
+            };
+            if let Some(output) = output.or_else(|| {
+                super::conv_direct::conv2d_direct_f32(
+                    bytemuck::cast_slice(x_data),
+                    bytemuck::cast_slice(w_data),
+                    bias_data,
+                    [batch_size, channels_in, in_h, in_w],
+                    [channels_out, kernel_h, kernel_w],
+                    [out_h, out_w],
+                    [stride_h, stride_w],
+                    [pad_h, pad_w],
+                    threads,
+                )
+            }) {
+                return FlexTensor::new(
+                    Bytes::from_elems(output),
+                    Layout::contiguous(Shape::from(vec![
+                        batch_size,
+                        channels_out,
+                        out_d,
+                        out_h,
+                        out_w,
+                    ])),
+                    dtype,
+                );
+            }
+        }
+
         let output = conv2d_im2col_nchw(
             x_data,
             w_data,

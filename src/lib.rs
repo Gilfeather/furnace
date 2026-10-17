@@ -1,3 +1,4 @@
+pub mod allocator;
 pub mod api;
 pub mod backend;
 pub mod burn_model;

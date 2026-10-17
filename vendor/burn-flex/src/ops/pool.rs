@@ -548,6 +548,9 @@ pub fn max_pool2d_f32(
     dilation: [usize; 2],
     ceil_mode: bool,
 ) -> FlexTensor {
+    if dilation == [1, 1] {
+        return max_pool2d_separable_f32(x, kernel_size, stride, padding, ceil_mode);
+    }
     let output = max_pool3d_f32(
         expand_2d_to_3d(&x),
         [1, kernel_size[0], kernel_size[1]],
@@ -557,6 +560,82 @@ pub fn max_pool2d_f32(
         ceil_mode,
     );
     squeeze_3d_to_2d(output)
+}
+
+/// 2D max pooling without dilation or indices, as a horizontal pass (max over each window's
+/// columns, for every input row) followed by a vertical one (max over the window's rows). That
+/// reads each input element about once per pass instead of once per window it falls in.
+fn max_pool2d_separable_f32(
+    x: FlexTensor,
+    [kernel_h, kernel_w]: [usize; 2],
+    [stride_h, stride_w]: [usize; 2],
+    [pad_h, pad_w]: [usize; 2],
+    ceil_mode: bool,
+) -> FlexTensor {
+    let x = x.to_contiguous();
+    let &[batch, channels, in_h, in_w] = x.layout().shape().as_slice() else {
+        panic!("max_pool2d: expected a 4D input");
+    };
+    let out_h = pool_output_size(in_h, kernel_h, pad_h, stride_h, 1, ceil_mode);
+    let out_w = pool_output_size(in_w, kernel_w, pad_w, stride_w, 1, ceil_mode);
+    let x_data: &[f32] = x.storage();
+
+    // Input range [start, end) covered by each output window, clipped to the input
+    let window = |o: usize, kernel: usize, stride: usize, pad: usize, input: usize| {
+        let start = (o * stride) as isize - pad as isize;
+        let end = (start + kernel as isize).clamp(0, input as isize) as usize;
+        (start.clamp(0, input as isize) as usize, end)
+    };
+    let cols: Vec<_> = (0..out_w)
+        .map(|o| window(o, kernel_w, stride_w, pad_w, in_w))
+        .collect();
+    let rows: Vec<_> = (0..out_h)
+        .map(|o| window(o, kernel_h, stride_h, pad_h, in_h))
+        .collect();
+    // NaN wins and then stays, as in the generic kernel
+    let pick = |m: f32, v: f32| if v > m || v.is_nan() { v } else { m };
+
+    let plane = |(src, dst): (&[f32], &mut [f32])| {
+        let mut row_max = vec![f32::NEG_INFINITY; in_h * out_w];
+        for (src_row, out_row) in src.chunks_exact(in_w).zip(row_max.chunks_exact_mut(out_w)) {
+            for (value, &(start, end)) in out_row.iter_mut().zip(&cols) {
+                *value = src_row[start..end]
+                    .iter()
+                    .fold(f32::NEG_INFINITY, |m, &v| pick(m, v));
+            }
+        }
+        for (out_row, &(start, end)) in dst.chunks_exact_mut(out_w).zip(&rows) {
+            out_row.fill(f32::NEG_INFINITY);
+            for in_row in row_max[start * out_w..end * out_w].chunks_exact(out_w) {
+                for (m, &v) in out_row.iter_mut().zip(in_row) {
+                    *m = pick(*m, v);
+                }
+            }
+        }
+    };
+
+    let mut output = vec![f32::NEG_INFINITY; batch * channels * out_h * out_w];
+    if !output.is_empty() && in_h * in_w > 0 {
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            x_data
+                .par_chunks_exact(in_h * in_w)
+                .zip(output.par_chunks_exact_mut(out_h * out_w))
+                .for_each(plane);
+        }
+        #[cfg(not(feature = "rayon"))]
+        x_data
+            .chunks_exact(in_h * in_w)
+            .zip(output.chunks_exact_mut(out_h * out_w))
+            .for_each(plane);
+    }
+
+    FlexTensor::new(
+        Bytes::from_elems(output),
+        Layout::contiguous(Shape::from(vec![batch, channels, out_h, out_w])),
+        DType::F32,
+    )
 }
 
 /// 2D max pooling (without indices) for f64.
@@ -1854,6 +1933,49 @@ mod tests {
         // Without: 1.0 / 1 = 1.0
         assert!((out_include[0] - 0.25).abs() < 1e-5);
         assert!((out_exclude[0] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_max_pool2d_separable_matches_generic() {
+        // (h, w, kernel, stride, pad, ceil_mode)
+        let cases = [
+            (112, 112, [3, 3], [2, 2], [1, 1], false),
+            (7, 9, [3, 2], [1, 2], [1, 0], false),
+            (8, 8, [2, 2], [2, 2], [0, 0], false),
+            (6, 7, [3, 3], [2, 2], [1, 1], true),
+            (5, 5, [5, 5], [3, 3], [2, 2], true),
+            (4, 6, [1, 3], [1, 1], [0, 1], false),
+        ];
+        for (h, w, kernel, stride, pad, ceil_mode) in cases {
+            let n = 2 * 3 * h * w;
+            let mut x_data: Vec<f32> = (0..n).map(|i| ((i * 7919) % 1009) as f32 - 504.0).collect();
+            x_data[n / 3] = f32::NAN;
+            let shape = vec![2, 3, h, w];
+            let x = || FlexTensor::from_data(TensorData::new(x_data.clone(), shape.clone()));
+            let fast: Vec<f32> = max_pool2d_f32(x(), kernel, stride, pad, [1, 1], ceil_mode)
+                .into_data()
+                .try_into_vec()
+                .unwrap();
+            let generic: Vec<f32> = squeeze_3d_to_2d(max_pool3d_f32(
+                expand_2d_to_3d(&x()),
+                [1, kernel[0], kernel[1]],
+                [1, stride[0], stride[1]],
+                [0, pad[0], pad[1]],
+                [1, 1, 1],
+                ceil_mode,
+            ))
+            .into_data()
+            .try_into_vec()
+            .unwrap();
+            assert_eq!(fast.len(), generic.len());
+            for (i, (a, b)) in fast.iter().zip(&generic).enumerate() {
+                assert!(
+                    a == b || (a.is_nan() && b.is_nan()),
+                    "case {:?}: [{i}] {a} vs {b}",
+                    (h, w, kernel, stride, pad, ceil_mode)
+                );
+            }
+        }
     }
 
     #[test]
