@@ -5,6 +5,7 @@ pub mod batching;
 pub mod burn_model;
 pub mod config;
 pub mod error;
+mod json_fast;
 pub mod model;
 pub mod models;
 #[cfg(feature = "image")]

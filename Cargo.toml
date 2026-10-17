@@ -95,6 +95,8 @@ thiserror = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
 toml = "1"
 num_cpus = "1"
+# Parses the numbers of JSON request bodies straight to f32 (see src/json_fast.rs)
+fast-float2 = "0.2"
 # gRPC transport for the Open Inference Protocol (feature `grpc`)
 prost = { version = "0.14", optional = true }
 tonic = { version = "0.14", optional = true }

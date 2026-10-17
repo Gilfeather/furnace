@@ -785,29 +785,14 @@ fn accepts_octet_stream(headers: &HeaderMap) -> bool {
 }
 
 fn decode_json(model: &Model, body: &[u8]) -> std::result::Result<PredictInput, Box<Response>> {
-    // serde_json directly rather than axum's `Json`, which also tracks the path of
-    // every element for error messages
-    let request: PredictRequest = serde_json::from_slice(body).map_err(|e| {
-        let (status, message) = match e.classify() {
-            serde_json::error::Category::Data => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("Failed to deserialize the JSON body into the target type: {e}"),
-            ),
-            _ => (
-                StatusCode::BAD_REQUEST,
-                format!("Failed to parse the request body as JSON: {e}"),
-            ),
-        };
-        warn!("Rejected request body: {}", message);
-        Box::new(create_error_response(
-            status,
-            "INVALID_REQUEST",
-            &message,
-            None,
-        ))
-    })?;
-
-    match request.input_data {
+    // The usual bodies, `{"input": [...]}` and `{"inputs": [[...], ...]}`, take a faster
+    // parser; anything else, including every malformed body, goes through serde_json
+    let input_data = match crate::json_fast::parse(body) {
+        Some(crate::json_fast::FastInput::Single(input)) => PredictInputData::Single { input },
+        Some(crate::json_fast::FastInput::Batch(inputs)) => PredictInputData::Batch { inputs },
+        None => decode_json_serde(body)?.input_data,
+    };
+    match input_data {
         PredictInputData::Single { input } => {
             validate_inputs(model, std::slice::from_ref(&input))?;
             Ok(PredictInput {
@@ -825,6 +810,30 @@ fn decode_json(model: &Model, body: &[u8]) -> std::result::Result<PredictInput, 
             })
         }
     }
+}
+
+fn decode_json_serde(body: &[u8]) -> std::result::Result<PredictRequest, Box<Response>> {
+    // serde_json directly rather than axum's `Json`, which also tracks the path of
+    // every element for error messages
+    serde_json::from_slice(body).map_err(|e| {
+        let (status, message) = match e.classify() {
+            serde_json::error::Category::Data => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Failed to deserialize the JSON body into the target type: {e}"),
+            ),
+            _ => (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to parse the request body as JSON: {e}"),
+            ),
+        };
+        warn!("Rejected request body: {}", message);
+        Box::new(create_error_response(
+            status,
+            "INVALID_REQUEST",
+            &message,
+            None,
+        ))
+    })
 }
 
 /// Decode a raw body of `batch_size × input_size` little-endian `f32` values.
