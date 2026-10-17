@@ -23,7 +23,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio::task::JoinHandle;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
-use tracing::{error, info, warn};
+use tracing::{Instrument, error, info, info_span, warn};
 
 pub use crate::batching::BatchConfig;
 use crate::batching::{Arrival, Batcher};
@@ -41,6 +41,9 @@ pub const BATCH_SIZE_HEADER: HeaderName = HeaderName::from_static("x-batch-size"
 pub const OUTPUT_SHAPE_HEADER: HeaderName = HeaderName::from_static("x-output-shape");
 /// Binary response: what `inference_time_ms` holds in the JSON response
 pub const INFERENCE_TIME_HEADER: HeaderName = HeaderName::from_static("x-inference-time-ms");
+/// Request and response: an ID for the request, taken from the client (up to 128 visible ASCII
+/// characters) or generated, attached to every log line of the request
+pub const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 
 #[derive(Debug, Serialize)]
 pub struct PredictRequest {
@@ -266,6 +269,7 @@ pub fn router(model: Model, config: &ServerConfig) -> Router {
             BATCH_SIZE_HEADER,
             OUTPUT_SHAPE_HEADER,
             INFERENCE_TIME_HEADER,
+            REQUEST_ID_HEADER,
         ]);
 
     Router::new()
@@ -290,7 +294,31 @@ pub fn router(model: Model, config: &ServerConfig) -> Router {
             HeaderValue::from_static("DENY"),
         ))
         .layer(cors)
+        .layer(middleware::from_fn(request_id))
         .with_state(state)
+}
+
+/// Run the request inside a `request` span carrying its ID (the client's `X-Request-Id` when it
+/// is a reasonable token, else a new UUID), and echo the ID in the response.
+async fn request_id(request: Request, next: Next) -> Response {
+    let id = request
+        .headers()
+        .get(&REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|id| !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_graphic()))
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let span = info_span!(
+        "request",
+        id = %id,
+        method = %request.method(),
+        path = %request.uri().path()
+    );
+    let mut response = next.run(request).instrument(span).await;
+    if let Ok(value) = HeaderValue::from_str(&id) {
+        response.headers_mut().insert(REQUEST_ID_HEADER, value);
+    }
+    response
 }
 
 pub async fn start_server(host: &str, port: u16, model: Model) -> Result<()> {
@@ -1119,6 +1147,43 @@ mod tests {
         let response = test_app().oneshot(request).await.unwrap();
         assert_eq!(response.headers()[X_CONTENT_TYPE_OPTIONS], "nosniff");
         assert_eq!(response.headers()[X_FRAME_OPTIONS], "DENY");
+    }
+
+    #[tokio::test]
+    async fn test_request_id_echoed_or_generated() {
+        let with_id = |id: &str| {
+            Request::builder()
+                .uri("/healthz")
+                .header(REQUEST_ID_HEADER, id)
+                .body(Body::empty())
+                .unwrap()
+        };
+        // The client's ID comes back
+        let response = test_app().oneshot(with_id("trace-42")).await.unwrap();
+        assert_eq!(response.headers()[REQUEST_ID_HEADER], "trace-42");
+
+        // Without one, or with one that is too long or has spaces, a UUID is generated
+        let plain = Request::builder()
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap();
+        for request in [plain, with_id(&"x".repeat(129)), with_id("a b")] {
+            let response = test_app().oneshot(request).await.unwrap();
+            let id = response.headers()[REQUEST_ID_HEADER].to_str().unwrap();
+            assert!(uuid::Uuid::parse_str(id).is_ok(), "{id}");
+        }
+
+        // Errors carry it too
+        let request = Request::builder()
+            .uri("/predict")
+            .method("POST")
+            .header("content-type", "application/json")
+            .header(REQUEST_ID_HEADER, "bad-1")
+            .body(Body::from("{"))
+            .unwrap();
+        let response = test_app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.headers()[REQUEST_ID_HEADER], "bad-1");
     }
 
     #[tokio::test]
