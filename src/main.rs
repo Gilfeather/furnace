@@ -23,6 +23,8 @@ struct CliArgs {
     model_paths: Vec<PathBuf>,
     weights: Option<PathBuf>,
     admin_token: Option<String>,
+    api_keys: Vec<String>,
+    rate_limit: Option<furnace::access::RateLimit>,
     host: String,
     port: u16,
     backend: BackendKind,
@@ -223,6 +225,35 @@ fn build_cli() -> Command {
                 )),
         )
         .arg(
+            Arg::new("api-key")
+                .long("api-key")
+                .value_name("KEY")
+                .action(clap::ArgAction::Append)
+                .help(format!(
+                    "Require this key ('Authorization: Bearer <KEY>' or 'X-API-Key: <KEY>') on \
+                    every route but the health probes; repeat for several. Also read from \
+                    ${API_KEYS_ENV} (comma-separated), which keeps them out of the process list"
+                )),
+        )
+        .arg(
+            Arg::new("rate-limit")
+                .long("rate-limit")
+                .value_name("PER_SECOND")
+                .help(
+                    "Requests a second each client may send on average, beyond which it gets \
+                    429; clients are their API key, or their IP address without keys",
+                )
+                .value_parser(clap::value_parser!(f64)),
+        )
+        .arg(
+            Arg::new("rate-limit-burst")
+                .long("rate-limit-burst")
+                .value_name("N")
+                .help("Requests a client may send at once under --rate-limit [default: the rate, at least 1]")
+                .value_parser(clap::value_parser!(u32).range(1..))
+                .requires("rate-limit"),
+        )
+        .arg(
             Arg::new("threads")
                 .long("threads")
                 .value_name("N")
@@ -377,6 +408,48 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
         .cloned()
         .or_else(|| std::env::var(ADMIN_TOKEN_ENV).ok())
         .filter(|token| !token.is_empty());
+    let mut api_keys: Vec<String> = matches
+        .get_many::<String>("api-key")
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+    if let Ok(keys) = std::env::var(API_KEYS_ENV) {
+        api_keys.extend(keys.split(',').map(str::trim).map(str::to_string));
+    }
+    api_keys.retain(|key| !key.is_empty());
+    if api_keys.iter().any(|key| key.len() < 16) {
+        return Err(CliError::InvalidArgument {
+            arg: "api-key".to_string(),
+            value: "<hidden>".to_string(),
+            reason: "keys must be at least 16 characters".to_string(),
+        }
+        .into());
+    }
+    api_keys.sort();
+    api_keys.dedup();
+
+    let rate_limit = match matches.get_one::<f64>("rate-limit").copied() {
+        None => None,
+        Some(per_second) if per_second.is_finite() && per_second > 0.0 => {
+            Some(furnace::access::RateLimit {
+                per_second,
+                burst: matches
+                    .get_one::<u32>("rate-limit-burst")
+                    .copied()
+                    .unwrap_or_else(|| per_second.ceil().clamp(1.0, f64::from(u32::MAX)) as u32),
+            })
+        }
+        Some(per_second) => {
+            return Err(CliError::InvalidArgument {
+                arg: "rate-limit".to_string(),
+                value: per_second.to_string(),
+                reason: "must be a positive number".to_string(),
+            }
+            .into());
+        }
+    };
+
     if let Some(token) = &admin_token
         && token.len() < 16
     {
@@ -394,6 +467,8 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
             model_paths,
             weights,
             admin_token,
+            api_keys,
+            rate_limit,
             host,
             port,
             backend,
@@ -577,6 +652,8 @@ async fn main() -> Result<()> {
         },
         grpc_port: args.grpc_port,
         admin_token: args.admin_token.clone(),
+        api_keys: args.api_keys.clone(),
+        rate_limit: args.rate_limit,
     };
 
     info!(
@@ -602,6 +679,8 @@ async fn main() -> Result<()> {
 
 /// Environment variable read for `--admin-token`
 const ADMIN_TOKEN_ENV: &str = "FURNACE_ADMIN_TOKEN";
+/// Environment variable with comma-separated `--api-key`s
+const API_KEYS_ENV: &str = "FURNACE_API_KEYS";
 
 /// One loader per model to serve. Called with `None` it loads the model as configured; the
 /// admin API calls it again to reload, possibly with a new weight file.

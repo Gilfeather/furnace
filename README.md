@@ -133,6 +133,8 @@ server's log lines for that request. Full reference, including errors:
 | `--threads <N>` | one per physical core | Inference threads (also `RAYON_NUM_THREADS`) |
 | `--grpc-port <PORT>` | none | Also serve the KServe / Triton protocol over gRPC (builds with `--features grpc`; release binaries and the Docker image have it) |
 | `--admin-token <TOKEN>` | none | Enable the reload API for this bearer token (also `FURNACE_ADMIN_TOKEN`) |
+| `--api-key <KEY>` | none | Require a key on everything but health probes; repeatable (also `FURNACE_API_KEYS`) ([details](docs/API.md#api-keys-and-rate-limiting)) |
+| `--rate-limit <PER_SECOND>` / `--rate-limit-burst <N>` | none | Per-client request rate (by API key, else IP address); beyond it, `429` |
 | `-l, --log-level <LEVEL>` | `info` | `RUST_LOG` sets per-module levels; `FURNACE_ENV=production` switches to JSON logs |
 | `--config <PATH>` | | Read options from a TOML file (also `FURNACE_CONFIG`); the command line overrides it. See [`furnace.example.toml`](furnace.example.toml) |
 

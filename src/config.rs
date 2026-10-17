@@ -38,6 +38,10 @@ pub struct Server {
     pub grpc_port: Option<u16>,
     /// Prefer the `FURNACE_ADMIN_TOKEN` environment variable over writing it here
     pub admin_token: Option<String>,
+    /// Prefer the `FURNACE_API_KEYS` environment variable over writing them here
+    pub api_keys: Option<Vec<String>>,
+    pub rate_limit: Option<f64>,
+    pub rate_limit_burst: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -113,6 +117,14 @@ impl ConfigFile {
         push("--threads", s.threads.map(|v| v.to_string()));
         push("--grpc-port", s.grpc_port.map(|v| v.to_string()));
         push("--admin-token", s.admin_token.clone());
+        for key in s.api_keys.iter().flatten() {
+            push("--api-key", Some(key.clone()));
+        }
+        push("--rate-limit", s.rate_limit.map(|v| v.to_string()));
+        push(
+            "--rate-limit-burst",
+            s.rate_limit_burst.map(|v| v.to_string()),
+        );
         let m = &self.model;
         if with_model {
             for name in m.name.iter().flat_map(OneOrMany::iter) {
