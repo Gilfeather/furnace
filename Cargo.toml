@@ -130,19 +130,31 @@ inherits = "release"
 lto = false
 codegen-units = 16
 
+# Build scripts (burn-onnx's model code generation) stay optimized, without the single
+# codegen unit that serializes their compilation
+[profile.ci.build-override]
+opt-level = 3
+codegen-units = 16
+
 [profile.release.build-override]
 opt-level = 3
 codegen-units = 1
 
 [profile.dev]
-# Faster compilation for development
-opt-level = 0
+# Light optimization: still quick to rebuild, and fast enough for the tests that need concurrent
+# requests to overlap (request parsing at opt-level 0 serializes them)
+opt-level = 1
 debug = true
 split-debuginfo = "unpacked"
 
+# Dependencies (Burn's CPU kernels above all) are optimized even in debug builds, so `cargo test`
+# runs ResNet-18 at a usable speed while furnace's own code still rebuilds quickly
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
 [profile.test]
-# Better debugging for tests
-opt-level = 0
+opt-level = 1
 debug = true
 
 [profile.bench]
