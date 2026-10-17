@@ -109,7 +109,9 @@ ImageNet-normalized) and returns raw logits:
 
 For speed, send `Content-Type: application/octet-stream` with little-endian `float32` values
 (and `X-Batch-Size: N` for a batch); add `Accept: application/octet-stream` to get raw floats
-back. Full reference, including errors: [docs/API.md](docs/API.md).
+back. Every response carries an `X-Request-Id` (yours, or a generated one) that also tags the
+server's log lines for that request. Full reference, including errors:
+[docs/API.md](docs/API.md); OpenAPI spec: [docs/openapi.json](docs/openapi.json).
 
 ## Options
 
@@ -125,7 +127,9 @@ back. Full reference, including errors: [docs/API.md](docs/API.md).
 | `--batch-workers <N>` | `4` | Forward passes running at once; beyond this, concurrent requests are batched ([details](docs/API.md#dynamic-batching)) |
 | `--max-batch-size <N>` | `8` | Most items per batched pass; `1` turns batching off |
 | `--batch-timeout-us <US>` | `2000` | Longest a batch waits for requests still arriving; a lone request never waits |
-| `-l, --log-level <LEVEL>` | `info` | `FURNACE_ENV=production` switches to JSON logs |
+| `--threads <N>` | one per physical core | Inference threads (also `RAYON_NUM_THREADS`) |
+| `-l, --log-level <LEVEL>` | `info` | `RUST_LOG` sets per-module levels; `FURNACE_ENV=production` switches to JSON logs |
+| `--config <PATH>` | | Read options from a TOML file (also `FURNACE_CONFIG`); the command line overrides it. See [`furnace.example.toml`](furnace.example.toml) |
 
 `--model-path <PATH>` serves a Burn MLP saved as `<PATH>.bpk` + `<PATH>.json` instead (see
 `examples/basic_mnist_create.rs`).
@@ -145,6 +149,19 @@ editing it in place (on Windows, stop the server first). For a single file, buil
 `--features embed-weights`.
 
 GPU backends are Cargo features: `--features wgpu` (Vulkan, DX12, Metal), `metal` or `cuda`.
+
+### Docker
+
+The [`Dockerfile`](Dockerfile) compiles every model in `models/` into a small image (distroless,
+non-root, ~80 MB with ResNet-18's weights):
+
+```bash
+docker build -t furnace .
+docker run --rm -p 3000:3000 furnace                         # serves resnet18
+docker run --rm -p 3000:3000 furnace --model-name mnist --threads 4
+```
+
+`--build-arg FEATURES=image` adds JPEG/PNG input. The server stops cleanly on `SIGTERM`.
 
 ## Development
 

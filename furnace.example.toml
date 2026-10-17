@@ -1,0 +1,23 @@
+# Example configuration: `furnace --config furnace.example.toml`
+# (or set FURNACE_CONFIG). Every key is optional; options given on the command line override
+# the file. Unknown keys are an error, so typos don't go unnoticed.
+
+[server]
+host = "127.0.0.1"
+port = 3000
+max_concurrent_requests = 100   # beyond this, requests get 503
+max_body_mb = 100
+# request_timeout_ms = 5000     # beyond this, requests get 504 (default: no timeout)
+log_level = "info"              # error, warn, info, debug or trace
+# threads = 8                   # inference threads (default: one per physical core)
+
+[model]
+name = "resnet18"               # built-in model compiled from models/<name>.onnx
+# path = "examples/basic_mnist/model"   # or a file-based Burn model instead of `name`
+# weights = "/srv/models/resnet18.bpk"  # default: <name>.bpk next to the binary
+backend = "cpu"                 # cpu, or wgpu / metal / cuda when built with that feature
+
+[batching]
+max_batch_size = 8              # 1 turns dynamic batching off
+timeout_us = 2000
+workers = 4

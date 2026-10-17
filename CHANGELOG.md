@@ -25,6 +25,9 @@ instead of 1.9 s. Existing API calls and CLI options work as before.
     never served stale
   - Work buffers are reused from a small pool
   - 2D max pooling runs as two separable passes
+- Inference uses one thread per physical core by default, like ONNX Runtime, instead of one
+  per logical CPU. That costs nothing on bare metal and avoids stragglers on VMs: in a Linux VM
+  on the benchmark laptop, ResNet-18 took 24 ms per image with 8 threads and 50 ms with 16
 - On ARM (Apple Silicon, AWS Graviton, Ampere), the Winograd convolutions run on NEON
   microkernels, 1.15-1.5x faster than the im2col path on a Neoverse CI runner. The direct
   convolution stays x86-only: on ARM, burn-flex's im2col path is faster than it
@@ -41,6 +44,14 @@ instead of 1.9 s. Existing API calls and CLI options work as before.
   and `inference_time_ms` includes that wait
 
 ### Added
+- `--config <PATH>` (or `FURNACE_CONFIG`) reads options from a TOML file; options on the command
+  line override it, and unknown keys are an error. See `furnace.example.toml`
+- `--threads <N>` sets the inference threads (also `RAYON_NUM_THREADS`, or `[server] threads`)
+- Every response has an `X-Request-Id`: the client's (1-128 visible ASCII characters) or a
+  generated UUID. The server's log lines for the request carry it in a `request` span
+- A `Dockerfile`: every model in `models/` compiled in, on a distroless non-root image
+- `docs/openapi.json`, an OpenAPI 3 spec of the HTTP API, checked against the server's actual
+  responses by a test
 - Dynamic batching in the server. Up to `--batch-workers` forward passes (default 4) run at
   once; when all are busy, queued `/predict` requests are merged into batches of up to
   `--max-batch-size` items (default 8). A batch waits at most `--batch-timeout-us` (default
@@ -57,6 +68,7 @@ instead of 1.9 s. Existing API calls and CLI options work as before.
   the Furnace server
 
 ### Fixed
+- `furnace --help` showed a run of spaces in the `--model-name` description
 - `benches/compare`: the documented steps ran stale engine binaries (`cargo run` rebuilds only
   `compare`), reports said furnace 0.4.0, and the benchmark-report issue template missed the
   input image

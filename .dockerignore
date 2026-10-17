@@ -1,0 +1,11 @@
+# Everything the build does not need; models/ stays, it is compiled in
+.git
+.github
+.claude
+.kiro
+target
+**/target
+benches/compare/fastapi-ort/.venv
+benches/compare/dog.jpg
+*.f32
+resnet18_*_sample.json

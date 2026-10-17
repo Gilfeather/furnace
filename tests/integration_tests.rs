@@ -586,6 +586,87 @@ async fn test_cli_serves_model_by_name() {
     assert_eq!(response.status(), 200);
 }
 
+/// A free port on localhost
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// `--config` supplies the model and options; the command line overrides the file's port
+#[tokio::test]
+async fn test_cli_config_file_with_command_line_override() {
+    let (file_port, cli_port) = (free_port(), free_port());
+    let dir = std::env::temp_dir().join(format!("furnace-config-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("furnace.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[server]\nport = {file_port}\nmax_concurrent_requests = 7\n\n[model]\nname = \"mnist\"\n"
+        ),
+    )
+    .unwrap();
+    let _server = ServerProcess(
+        furnace()
+            .arg("--config")
+            .arg(&config)
+            .args(["--port", &cli_port.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let base_url = format!("http://127.0.0.1:{cli_port}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let metrics: Value = loop {
+        if let Ok(response) = client().get(format!("{base_url}/metrics")).send().await {
+            break response.json().await.unwrap();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "server did not start on the command-line port"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    // From the file
+    assert_eq!(metrics["max_concurrent_inferences"], 7);
+    let info: Value = client()
+        .get(format!("{base_url}/model/info"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info["model_info"]["name"], "mnist");
+    // The file's port was overridden
+    assert!(
+        client()
+            .get(format!("http://127.0.0.1:{file_port}/healthz"))
+            .send()
+            .await
+            .is_err()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_cli_rejects_bad_config_file() {
+    let dir = std::env::temp_dir().join(format!("furnace-bad-config-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("furnace.toml");
+    std::fs::write(&config, "[server]\nprot = 3000\n").unwrap();
+    let output = furnace().arg("--config").arg(&config).output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("prot"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn test_cli_lists_available_models() {
     let help = furnace().arg("--help").output().unwrap();
