@@ -297,25 +297,49 @@ mod tests {
     use crate::backend::BackendKind;
     use crate::model::BurnModel;
     use burn::tensor::{Device, Tensor};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Semaphore;
 
     const WIDTH: usize = 4;
 
-    /// Doubles its input and records every batch size it sees. It can be slowed down, and
-    /// it panics on an input of -1, so tests can check what was batched with what.
+    /// Doubles its input and records every batch size it sees, and the most passes that ran
+    /// at once. It can be slowed down, and it panics on an input of -1, so tests can check what
+    /// was batched with what.
     #[derive(Debug)]
     struct Doubler {
         device: Device,
         shape: Vec<usize>,
         batches: Arc<Mutex<Vec<usize>>>,
         delay: Duration,
+        running: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        /// When non-zero, the first passes wait (up to 5 s) until this many run at once, so a
+        /// test can check concurrency without depending on timing
+        rendezvous: usize,
+        met: Arc<AtomicBool>,
     }
 
     impl BurnModel for Doubler {
         fn predict(&self, input: Tensor<2>) -> Result<Tensor<2>> {
             let [batch, _] = input.dims();
             self.batches.lock().unwrap().push(batch);
+            let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            if self.rendezvous > 0 && !self.met.load(Ordering::SeqCst) {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while self.running.load(Ordering::SeqCst) < self.rendezvous
+                    && Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let reached = self.running.load(Ordering::SeqCst);
+                self.peak.fetch_max(reached, Ordering::SeqCst);
+                if reached >= self.rendezvous {
+                    self.met.store(true, Ordering::SeqCst);
+                }
+            }
             std::thread::sleep(self.delay);
+            self.running.fetch_sub(1, Ordering::SeqCst);
             let values = input.clone().into_data().try_to_vec::<f32>().unwrap();
             assert!(!values.contains(&-1.0), "poisoned input");
             Ok(input.mul_scalar(2.0))
@@ -341,6 +365,7 @@ mod tests {
         batcher: Batcher,
         model: Arc<Model>,
         batches: Arc<Mutex<Vec<usize>>>,
+        peak: Arc<AtomicUsize>,
         slots: Arc<Semaphore>,
     }
 
@@ -354,13 +379,28 @@ mod tests {
         batch_timeout: Duration,
         delay: Duration,
     ) -> Setup {
+        setup_full(workers, max_batch_size, batch_timeout, delay, 0)
+    }
+
+    fn setup_full(
+        workers: usize,
+        max_batch_size: usize,
+        batch_timeout: Duration,
+        delay: Duration,
+        rendezvous: usize,
+    ) -> Setup {
         let batches = Arc::new(Mutex::new(Vec::new()));
+        let peak = Arc::new(AtomicUsize::new(0));
         let model = Arc::new(Model::new(
             Box::new(Doubler {
                 device: BackendKind::Cpu.device(),
                 shape: vec![WIDTH],
                 batches: batches.clone(),
                 delay,
+                running: Arc::new(AtomicUsize::new(0)),
+                peak: peak.clone(),
+                rendezvous,
+                met: Arc::new(AtomicBool::new(false)),
             }),
             "test",
             0,
@@ -374,6 +414,7 @@ mod tests {
             batcher: Batcher::new(model.clone(), config),
             model,
             batches,
+            peak,
             slots: Arc::new(Semaphore::new(1000)),
         }
     }
@@ -567,8 +608,8 @@ mod tests {
 
     #[tokio::test]
     async fn idle_workers_run_requests_side_by_side() {
-        let s = setup_with_workers(2, 8, Duration::from_secs(5), Duration::from_millis(100));
-        let start = Instant::now();
+        // The first two passes wait for each other, so they can only finish if they overlap
+        let s = setup_full(2, 8, Duration::from_secs(5), Duration::from_millis(100), 2);
         let first = s.submit(&[1.0]);
         let second = s.submit(&[2.0]);
         settle().await;
@@ -577,11 +618,10 @@ mod tests {
         let fourth = s.submit(&[4.0]);
         assert_eq!(first.await.unwrap().unwrap(), expected(&[1.0]));
         assert_eq!(second.await.unwrap().unwrap(), expected(&[2.0]));
-        // Side by side, the first two took one delay, not two
-        assert!(
-            start.elapsed() < Duration::from_millis(190),
-            "{:?}",
-            start.elapsed()
+        assert_eq!(
+            s.peak.load(Ordering::SeqCst),
+            2,
+            "the first two ran side by side"
         );
         assert_eq!(third.await.unwrap().unwrap(), expected(&[3.0]));
         assert_eq!(fourth.await.unwrap().unwrap(), expected(&[4.0]));
