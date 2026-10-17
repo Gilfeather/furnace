@@ -87,6 +87,40 @@ jobs:
     - name: Clippy with wgpu backend
       run: cargo clippy --no-default-features --features wgpu -- -D warnings
 
+  vendored-kernels:
+    name: Vendored CPU kernels (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # x86_64 (AVX2 / AVX-512 when the runner has it) and aarch64 (NEON)
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: vendor/burn-flex
+
+    - name: Clippy
+      run: cargo clippy --manifest-path vendor/burn-flex/Cargo.toml --release --all-targets -- -D warnings
+
+    - name: Run tests
+      run: cargo test --manifest-path vendor/burn-flex/Cargo.toml --release --lib
+
+    # Rough single-threaded numbers for this runner's CPU, for the log only
+    - name: Kernel throughput
+      env:
+        RAYON_NUM_THREADS: "1"
+      run: cargo test --manifest-path vendor/burn-flex/Cargo.toml --release --lib throughput -- --ignored --nocapture --test-threads 1
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest

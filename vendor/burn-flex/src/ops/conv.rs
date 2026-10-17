@@ -299,8 +299,8 @@ fn conv3d_impl<
         let threads = 1;
 
         // f32 without groups or dilation: direct convolution, no im2col (x86_64 with AVX2 or
-        // AVX-512)
-        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        // AVX-512, aarch64 with NEON)
+        #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
         if core::any::TypeId::of::<T>() == core::any::TypeId::of::<f32>()
             && groups == 1
             && dilation_h == 1
