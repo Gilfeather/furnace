@@ -1,12 +1,18 @@
 //! Run every engine binary in its own process and print the results as Markdown.
 //!
 //! ```text
-//! cargo run --release -- [--iters N] [--warmup N] [--only furnace,tract,ort,http]
+//! cargo build --release
+//! target/release/compare [--iters N] [--warmup N] [--only furnace,http,tract,ort,fastapi]
 //!                        [--json results.json] [--server PATH]
 //! ```
 //!
+//! Build first: `cargo run` rebuilds only this binary, not the engine binaries it starts.
+//!
 //! Each engine binary prints one JSON `Report`; run one directly to see it, e.g.
 //! `target/release/cmp-ort --threads 1`.
+//!
+//! The FastAPI + ONNX Runtime row runs only once its virtual environment exists (see
+//! `src/bin/cmp-fastapi.rs`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,6 +66,14 @@ fn main() {
     engines.push(engine("tract", "cmp-tract", &["--threads", &tract_mt]));
     engines.push(engine("ort", "cmp-ort", &["--threads", "0"]));
     engines.push(engine("ort", "cmp-ort", &["--threads", "1"]));
+    if Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fastapi-ort/.venv")
+        .is_dir()
+    {
+        engines.push(engine("fastapi", "cmp-fastapi", &[]));
+    } else {
+        eprintln!("skipping FastAPI + ONNX Runtime: no fastapi-ort/.venv (see cmp-fastapi.rs)");
+    }
 
     let dir: PathBuf = std::env::current_exe()
         .expect("current_exe")

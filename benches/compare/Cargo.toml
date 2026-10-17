@@ -6,6 +6,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 publish = false
+default-run = "compare"
 description = "Compare furnace against tract and ONNX Runtime on ResNet-18"
 license = "MIT"
 

@@ -120,3 +120,6 @@ docker-compose.override.yml
 # Nix
 /result
 /.direnv
+# Python environment for benches/compare/fastapi-ort
+.venv/
+__pycache__/

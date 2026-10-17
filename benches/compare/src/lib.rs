@@ -6,6 +6,7 @@
 //! Markdown table.
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,8 @@ pub const INPUT_LEN: usize = CHANNELS * SIDE * SIDE;
 pub const CLASSES: usize = 1000;
 /// ImageNet class 258 ("Samoyed"), the expected top-1 for PyTorch Hub's `dog.jpg`
 pub const EXPECTED_TOP1: usize = 258;
+/// What the furnace rows run: the furnace checkout this harness sits in
+pub const FURNACE_VERSION: &str = "furnace 0.6.1, Burn 0.22";
 
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -249,6 +252,173 @@ pub fn bench_in_process<E>(
         binary_mb: binary_size_mb(&[]),
         notes: Vec::new(),
     }
+}
+
+/// A full benchmark of an inference server over HTTP on localhost: start it, wait for
+/// `/healthz`, then time `POST /predict` with furnace's binary protocol (little-endian f32
+/// body, batch size in `X-Batch-Size`, inference time in the `X-Inference-Time-Ms` answer
+/// header) on one keep-alive connection, one request at a time.
+///
+/// `command` builds the server command for a free port. Load is the time from spawning it
+/// until `/healthz` answers. Memory is that process's, or the process whose `pid` the
+/// `/healthz` JSON names, if any. The caller fills in `version`,
+/// `binary_mb` and anything else engine specific.
+pub fn bench_http_server(
+    args: &Args,
+    engine: &str,
+    command: impl FnOnce(u16) -> Command,
+) -> Report {
+    let image = preprocess(&args.image);
+
+    // A port nobody listens on, so /healthz can only be answered by our own server
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("free port")
+        .port();
+
+    let start = Instant::now();
+    let mut child = command(port)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|e| panic!("cannot start {engine}: {e}"));
+    // Kill the server even if a request below panics
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(60)))
+        .build()
+        .into();
+    let base = format!("http://127.0.0.1:{port}");
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let health = loop {
+        // Windows retries a refused SYN for ~0.5 s, so probe the port with a short
+        // connect timeout before asking /healthz, or startup is overstated
+        let listening =
+            std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(10)).is_ok();
+        if listening && let Ok(mut resp) = agent.get(format!("{base}/healthz")).call() {
+            break resp.body_mut().read_to_string().unwrap_or_default();
+        }
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            panic!("{engine} exited during startup: {status}");
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "{engine} did not start"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let load_ms = start.elapsed().as_secs_f64() * 1000.0;
+    // A server started through a launcher reports the pid that does the work
+    let pid = serde_json::from_str::<serde_json::Value>(&health)
+        .ok()
+        .and_then(|h| h.get("pid")?.as_u64())
+        .and_then(|p| u32::try_from(p).ok())
+        .unwrap_or_else(|| child.id());
+    let mut guard = KillOnDrop(child);
+
+    // Returns (logits, server-reported inference ms)
+    let predict = |body: &[u8], batch: usize| -> (Vec<f32>, f64) {
+        let mut resp = agent
+            .post(format!("{base}/predict"))
+            .header("Content-Type", "application/octet-stream")
+            .header("Accept", "application/octet-stream")
+            .header("X-Batch-Size", batch.to_string())
+            .send(body)
+            .expect("POST /predict");
+        let server_ms = resp
+            .headers()
+            .get("x-inference-time-ms")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(f64::NAN);
+        let bytes = resp.body_mut().read_to_vec().expect("read body");
+        let logits = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        (logits, server_ms)
+    };
+    let to_body =
+        |floats: &[f32]| -> Vec<u8> { floats.iter().flat_map(|f| f.to_le_bytes()).collect() };
+
+    let one = to_body(&image);
+    let start = Instant::now();
+    let (logits, _) = predict(&one, 1);
+    let first_inference_ms = start.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(logits.len(), CLASSES, "{engine}: unexpected output length");
+    let top1 = argmax(&logits);
+
+    let batches = args
+        .batches
+        .iter()
+        .map(|&batch| {
+            let body = to_body(&batch_input(&image, batch));
+            for _ in 0..args.warmup {
+                predict(&body, batch);
+            }
+            let mut server_ms = Vec::with_capacity(args.iters);
+            let mut samples: Vec<Duration> = (0..args.iters)
+                .map(|_| {
+                    let start = Instant::now();
+                    let (out, ms) = predict(&body, batch);
+                    let elapsed = start.elapsed();
+                    assert_eq!(out.len(), batch * CLASSES);
+                    server_ms.push(ms);
+                    elapsed
+                })
+                .collect();
+            let mut result = BatchResult::from_samples(batch, &mut samples);
+            server_ms.sort_by(f64::total_cmp);
+            result.server_median_ms = Some(server_ms[server_ms.len() / 2]);
+            result
+        })
+        .collect();
+
+    assert!(
+        guard.0.try_wait().is_ok_and(|s| s.is_none()),
+        "{engine} exited during the benchmark"
+    );
+    let mem = memory::of_process(pid);
+    Report {
+        engine: engine.to_string(),
+        version: String::new(),
+        threads: "default".to_string(),
+        load_ms,
+        first_inference_ms,
+        top1,
+        top1_logit: logits[top1],
+        batches,
+        peak_working_set_mb: mem.peak_working_set_mb,
+        peak_private_mb: mem.peak_private_mb,
+        binary_mb: 0.0,
+        notes: vec!["load = spawn to first healthy /healthz".to_string()],
+    }
+}
+
+/// Total size of the files under `dir`, in MB (10^6 bytes)
+pub fn dir_size_mb(dir: &Path) -> f64 {
+    fn walk(dir: &Path) -> u64 {
+        std::fs::read_dir(dir).map_or(0, |entries| {
+            entries
+                .flatten()
+                .map(|e| match e.file_type() {
+                    Ok(t) if t.is_dir() => walk(&e.path()),
+                    Ok(_) => e.metadata().map_or(0, |m| m.len()),
+                    Err(_) => 0,
+                })
+                .sum()
+        })
+    }
+    walk(dir) as f64 / 1e6
 }
 
 /// Size of the running executable plus files next to it whose names contain any of

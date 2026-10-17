@@ -1,0 +1,6 @@
+# FastAPI + ONNX Runtime server for `cmp-fastapi` (see server.py). ONNX Runtime matches
+# the version behind the `ort` crate in Cargo.toml, so both ORT rows run the same kernels.
+fastapi==0.143.3
+uvicorn[standard]==0.54.0
+onnxruntime==1.31.0
+numpy==2.5.4
