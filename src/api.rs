@@ -29,6 +29,7 @@ use tracing::{Instrument, error, info, info_span, warn};
 pub mod grpc;
 mod v2;
 
+use crate::access::{Access, RateLimit, Rejection, constant_time_eq, presented_key};
 pub use crate::batching::BatchConfig;
 use crate::batching::{Arrival, Batcher};
 use crate::error::{ApiError, FurnaceError, ModelError, Result};
@@ -156,6 +157,10 @@ pub struct MetricsResponse {
     pub total_errors: u64,
     /// Requests rejected with `503 SERVER_BUSY`
     pub rejected_busy: u64,
+    /// Requests rejected with `401 UNAUTHORIZED` for a missing or unknown API key
+    pub rejected_unauthorized: u64,
+    /// Requests rejected with `429 RATE_LIMITED`
+    pub rejected_rate_limited: u64,
     /// Requests queued for or running inference
     pub in_flight_inferences: usize,
     pub max_concurrent_inferences: usize,
@@ -274,6 +279,11 @@ pub struct ServerConfig {
     /// Enables `POST /admin/models/{model}/reload` for clients presenting this bearer token;
     /// `None` leaves the admin API off
     pub admin_token: Option<String>,
+    /// When not empty, every route but the health probes needs one of these keys, as
+    /// `Authorization: Bearer <key>` or `X-API-Key: <key>`
+    pub api_keys: Vec<String>,
+    /// Per-client rate limit; clients are their API key, or their IP address without keys
+    pub rate_limit: Option<RateLimit>,
 }
 
 impl Default for ServerConfig {
@@ -288,6 +298,8 @@ impl Default for ServerConfig {
             batching: BatchConfig::default(),
             grpc_port: None,
             admin_token: None,
+            api_keys: Vec::new(),
+            rate_limit: None,
         }
     }
 }
@@ -393,9 +405,12 @@ struct ServerState {
     batching: BatchConfig,
     max_batch_size: usize,
     admin_token: Option<String>,
+    access: Access,
     total_requests: AtomicU64,
     total_errors: AtomicU64,
     rejected_busy: AtomicU64,
+    rejected_unauthorized: AtomicU64,
+    rejected_rate_limited: AtomicU64,
     /// Inference requests from arrival to response, every status
     request_latency: Histogram,
     /// Successful inferences of every model, from decoded input to output (queueing included)
@@ -466,9 +481,12 @@ fn server_state(models: Vec<ServedModel>, config: &ServerConfig) -> AppState {
         batching,
         max_batch_size: batching.max_batch_size.max(1),
         admin_token: config.admin_token.clone(),
+        access: Access::new(&config.api_keys, config.rate_limit),
         total_requests: AtomicU64::new(0),
         total_errors: AtomicU64::new(0),
         rejected_busy: AtomicU64::new(0),
+        rejected_unauthorized: AtomicU64::new(0),
+        rejected_rate_limited: AtomicU64::new(0),
         request_latency: Histogram::new(),
         inference_latency: Histogram::new(),
     })
@@ -510,6 +528,7 @@ fn router_with_state(state: AppState, config: &ServerConfig) -> Router {
         .route("/admin/models/{model}/reload", post(reload_model))
         .route("/metrics", get(metrics))
         .merge(v2::routes(state.clone()))
+        .layer(middleware::from_fn_with_state(state.clone(), guard))
         .layer(DefaultBodyLimit::max(config.max_body_bytes))
         .layer(SetResponseHeaderLayer::overriding(
             X_CONTENT_TYPE_OPTIONS,
@@ -522,6 +541,75 @@ fn router_with_state(state: AppState, config: &ServerConfig) -> Router {
         .layer(cors)
         .layer(middleware::from_fn(request_id))
         .with_state(state)
+}
+
+/// Health probes, open to everyone and never rate limited
+const PUBLIC_PATHS: &[&str] = &[
+    "/healthz",
+    "/health",
+    "/readyz",
+    "/v2/health/live",
+    "/v2/health/ready",
+];
+
+/// API keys and the rate limit (see [`crate::access`]). The admin API checks its own token.
+async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    if PUBLIC_PATHS.contains(&path) {
+        return next.run(request).await;
+    }
+    let verdict = {
+        let header = |name: &str| request.headers().get(name).and_then(|v| v.to_str().ok());
+        let key = presented_key(header("authorization"), header(API_KEY_HEADER));
+        let ip = request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|info| info.0.ip());
+        state.access.admit(key, ip, !path.starts_with("/admin/"))
+    };
+    match verdict {
+        Ok(()) => next.run(request).await,
+        Err(rejection) => rejection_response(&state, &rejection),
+    }
+}
+
+/// Header carrying an API key, as an alternative to `Authorization: Bearer`
+const API_KEY_HEADER: &str = "x-api-key";
+
+fn rejection_response(state: &ServerState, rejection: &Rejection) -> Response {
+    match rejection {
+        Rejection::Unauthorized => {
+            state.rejected_unauthorized.fetch_add(1, Ordering::Relaxed);
+            let mut response = create_error_response(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "Missing or unknown API key; send 'Authorization: Bearer <key>' or 'X-API-Key: <key>'",
+                None,
+            );
+            response.headers_mut().insert(
+                axum::http::header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Bearer"),
+            );
+            response
+        }
+        Rejection::RateLimited(retry) => {
+            state.rejected_rate_limited.fetch_add(1, Ordering::Relaxed);
+            let seconds = retry.as_secs() + u64::from(retry.subsec_nanos() > 0);
+            let mut response = create_error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                "RATE_LIMITED",
+                &format!(
+                    "Rate limit exceeded; retry in {} ms",
+                    retry.as_millis().max(1)
+                ),
+                Some(serde_json::json!({ "retry_after_ms": retry.as_millis() })),
+            );
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, HeaderValue::from(seconds));
+            response
+        }
+    }
 }
 
 /// Run the request inside a `request` span carrying its ID (the client's `X-Request-Id` when it
@@ -623,10 +711,26 @@ pub async fn start_server_with_models(
         .into());
     }
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(wait_for_stop(stopped))
-        .await
-        .map_err(|e| ApiError::ServerStartup(format!("Server error: {e}")))?;
+    if !config.api_keys.is_empty() {
+        info!(
+            "🔑 API keys required ({} configured)",
+            config.api_keys.len()
+        );
+    }
+    if let Some(limit) = config.rate_limit {
+        info!(
+            "⏱️ Rate limit: {} requests/s per client, bursts of {}",
+            limit.per_second, limit.burst
+        );
+    }
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(wait_for_stop(stopped))
+    .await
+    .map_err(|e| ApiError::ServerStartup(format!("Server error: {e}")))?;
 
     #[cfg(feature = "grpc")]
     if let Some(grpc) = grpc {
@@ -1316,7 +1420,7 @@ fn prometheus_metrics(state: &ServerState) -> String {
     );
     let gauge = "gauge";
     let counter = "counter";
-    let values: [(&str, &str, &str, u64); 8] = [
+    let values: [(&str, &str, &str, u64); 10] = [
         (
             "furnace_uptime_seconds",
             gauge,
@@ -1346,6 +1450,18 @@ fn prometheus_metrics(state: &ServerState) -> String {
             counter,
             "Requests rejected with 503 SERVER_BUSY",
             state.rejected_busy.load(Ordering::Relaxed),
+        ),
+        (
+            "furnace_requests_rejected_unauthorized_total",
+            counter,
+            "Requests rejected with 401 for a missing or unknown API key",
+            state.rejected_unauthorized.load(Ordering::Relaxed),
+        ),
+        (
+            "furnace_requests_rejected_rate_limited_total",
+            counter,
+            "Requests rejected with 429 by the rate limit",
+            state.rejected_rate_limited.load(Ordering::Relaxed),
         ),
         (
             "furnace_in_flight_requests",
@@ -1520,6 +1636,8 @@ fn json_metrics(state: &ServerState) -> MetricsResponse {
         total_requests: state.total_requests.load(Ordering::Relaxed),
         total_errors: state.total_errors.load(Ordering::Relaxed),
         rejected_busy: state.rejected_busy.load(Ordering::Relaxed),
+        rejected_unauthorized: state.rejected_unauthorized.load(Ordering::Relaxed),
+        rejected_rate_limited: state.rejected_rate_limited.load(Ordering::Relaxed),
         in_flight_inferences: in_flight(state),
         max_concurrent_inferences: state.max_concurrent,
         total_inferences: stats.inference_count,
@@ -1737,8 +1855,7 @@ fn authorized(headers: &HeaderMap, token: &str) -> bool {
     else {
         return false;
     };
-    let (a, b) = (given.as_bytes(), token.as_bytes());
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    constant_time_eq(given.as_bytes(), token.as_bytes())
 }
 
 fn create_error_response(
@@ -1764,7 +1881,7 @@ pub(crate) mod tests {
     use axum::{body::Body, http::Request};
     use tower::util::ServiceExt;
 
-    fn dummy_model() -> Model {
+    pub(super) fn dummy_model() -> Model {
         let dummy = DummyModel::new("test_model".to_string(), vec![784], vec![10]);
         Model::new(Box::new(dummy), "dummy", 0)
     }
@@ -2079,6 +2196,128 @@ pub(crate) mod tests {
     }
 
     const TOKEN: &str = "0123456789abcdef-token";
+    const API_KEY: &str = "api-key-0123456789";
+
+    fn guarded_app(api_keys: &[&str], rate_limit: Option<RateLimit>) -> Router {
+        let config = ServerConfig {
+            api_keys: api_keys.iter().map(|k| k.to_string()).collect(),
+            rate_limit,
+            admin_token: Some(TOKEN.to_string()),
+            ..ServerConfig::default()
+        };
+        router(dummy_model(), &config)
+    }
+
+    fn with_header(mut request: Request<Body>, name: &'static str, value: &str) -> Request<Body> {
+        request
+            .headers_mut()
+            .insert(name, HeaderValue::from_str(value).unwrap());
+        request
+    }
+
+    fn ok_predict() -> Request<Body> {
+        predict_request(serde_json::json!({ "input": vec![0.5; 784] }).to_string())
+    }
+
+    #[tokio::test]
+    async fn test_api_keys() {
+        let app = guarded_app(&[API_KEY, "another-key-0123456789"], None);
+        let response = app.clone().oneshot(ok_predict()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()["www-authenticate"], "Bearer");
+        let wrong = with_header(ok_predict(), "authorization", "Bearer api-key-012345678");
+        assert_eq!(send(app.clone(), wrong).await.0, StatusCode::UNAUTHORIZED);
+
+        let bearer = with_header(ok_predict(), "authorization", &format!("Bearer {API_KEY}"));
+        assert_eq!(send(app.clone(), bearer).await.0, StatusCode::OK);
+        let header = with_header(ok_predict(), "x-api-key", "another-key-0123456789");
+        assert_eq!(send(app.clone(), header).await.0, StatusCode::OK);
+
+        // Probes stay open; everything else is closed
+        for path in ["/healthz", "/health", "/readyz", "/v2/health/live"] {
+            let request = Request::builder().uri(path).body(Body::empty()).unwrap();
+            let status = send(app.clone(), request).await.0;
+            assert_ne!(status, StatusCode::UNAUTHORIZED, "{path}");
+        }
+        for path in [
+            "/metrics",
+            "/model/info",
+            "/models",
+            "/v2",
+            "/v2/models/test_model",
+        ] {
+            let request = Request::builder().uri(path).body(Body::empty()).unwrap();
+            assert_eq!(
+                send(app.clone(), request).await.0,
+                StatusCode::UNAUTHORIZED,
+                "{path}"
+            );
+        }
+        // The admin API takes its own token, not an API key
+        let reload = Request::builder()
+            .uri("/admin/models/test_model/reload")
+            .method("POST")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+        assert_ne!(send(app.clone(), reload).await.0, StatusCode::UNAUTHORIZED);
+
+        let request = Request::builder()
+            .uri("/metrics")
+            .header("x-api-key", API_KEY)
+            .body(Body::empty())
+            .unwrap();
+        let (_, body) = send(app, request).await;
+        let metrics: MetricsResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(metrics.rejected_unauthorized, 7);
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit() {
+        let limit = RateLimit {
+            per_second: 0.001,
+            burst: 2,
+        };
+        let app = guarded_app(&[], Some(limit));
+        for _ in 0..2 {
+            assert_eq!(send(app.clone(), ok_predict()).await.0, StatusCode::OK);
+        }
+        let response = app.clone().oneshot(ok_predict()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        // One request every 1000 s
+        let retry: u64 = response.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((990..=1000).contains(&retry), "{retry}");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["code"], "RATE_LIMITED");
+        // Probes are not limited
+        let request = Request::builder()
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(send(app.clone(), request).await.0, StatusCode::OK);
+
+        // With keys, each key has its own budget
+        let app = guarded_app(&[API_KEY, "another-key-0123456789"], Some(limit));
+        let auth = |key: &str| with_header(ok_predict(), "x-api-key", key);
+        for _ in 0..2 {
+            assert_eq!(send(app.clone(), auth(API_KEY)).await.0, StatusCode::OK);
+        }
+        assert_eq!(
+            send(app.clone(), auth(API_KEY)).await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            send(app.clone(), auth("another-key-0123456789")).await.0,
+            StatusCode::OK
+        );
+    }
 
     fn named_model(name: &str) -> Model {
         let dummy = DummyModel::new(name.to_string(), vec![784], vec![10]);

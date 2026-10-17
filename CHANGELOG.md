@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- API keys: with `--api-key` (repeatable, or `FURNACE_API_KEYS`), every route except the health
+  probes needs `Authorization: Bearer <key>` or `X-API-Key: <key>`, over HTTP and gRPC alike;
+  otherwise `401` / `UNAUTHENTICATED`
+- Per-client rate limiting: `--rate-limit <PER_SECOND>` and `--rate-limit-burst <N>`, by API
+  key or else by IP address; over the limit, `429` with `Retry-After` (gRPC
+  `RESOURCE_EXHAUSTED`). `/metrics` counts the rejections
+
 ### Changed
 - JSON bodies of the usual shape (`{"input": [...]}`, `{"inputs": [[...], ...]}`) are parsed
   by a dedicated scanner that converts numbers straight to f32 with `fast-float2` and splits

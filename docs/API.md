@@ -308,6 +308,29 @@ another model path for a `--model-path` model; the path is read on the server.
 | 409 | `RELOAD_IN_PROGRESS` | The model is being reloaded already |
 | 422 | `RELOAD_FAILED` | Loading or warming up failed; the previous model is still serving |
 
+## API keys and rate limiting
+
+With `--api-key <KEY>` (repeat it for several keys, or set `FURNACE_API_KEYS=key1,key2`, which
+keeps them out of the process list; at least 16 characters each), every route except the health
+probes (`/healthz`, `/health`, `/readyz`, `/v2/health/live`, `/v2/health/ready`) needs one:
+
+```bash
+curl -H "Authorization: Bearer $KEY" localhost:3000/models
+curl -H "X-API-Key: $KEY" -X POST localhost:3000/predict -H 'Content-Type: application/json' -d @input.json
+```
+
+Over gRPC, send the same as `authorization` or `x-api-key` metadata (with `tritonclient.grpc`,
+`client.infer(..., headers={"authorization": f"Bearer {key}"})`). A missing or unknown key gets
+`401 UNAUTHORIZED` (gRPC `UNAUTHENTICATED`). Keys are compared in constant time. The admin API
+takes `--admin-token` instead.
+
+`--rate-limit <PER_SECOND>` caps each client at that many requests a second on average, with
+bursts of up to `--rate-limit-burst` (default: the rate). A client is its API key, or, without
+keys, its IP address; behind a proxy every request comes from the proxy's address, so give
+clients keys there. Over the limit, requests get `429 RATE_LIMITED` with a `Retry-After`
+header (gRPC `RESOURCE_EXHAUSTED`). Health probes are never limited. `/metrics` counts both
+rejections (`rejected_unauthorized`, `rejected_rate_limited`).
+
 ## Request IDs and logs
 
 Every response, errors included, has an `X-Request-Id` header. Send your own (1-128 visible
@@ -343,6 +366,8 @@ Errors share one shape:
 | 400 | `BATCH_TOO_LARGE` | More than 1000 items |
 | 404 | `MODEL_NOT_FOUND` | `/models/{model}/...` names a model the server does not serve |
 | 413 | `INVALID_REQUEST` | Body larger than `--max-body-mb` |
+| 401 | `UNAUTHORIZED` | `--api-key` is set and the request has no or an unknown key |
+| 429 | `RATE_LIMITED` | Over `--rate-limit`; `Retry-After` says when to retry |
 | 503 | `SERVER_BUSY` | All `--max-concurrent-requests` slots in use; retry later |
 | 504 | `INFERENCE_TIMEOUT` | Exceeded `--request-timeout-ms` |
 | 500 | `INFERENCE_FAILED` | Model error |

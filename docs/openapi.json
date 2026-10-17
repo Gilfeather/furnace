@@ -34,7 +34,8 @@
               }
             }
           }
-        }
+        },
+        "security": []
       }
     },
     "/health": {
@@ -52,7 +53,8 @@
               }
             }
           }
-        }
+        },
+        "security": []
       }
     },
     "/readyz": {
@@ -81,7 +83,8 @@
               }
             }
           }
-        }
+        },
+        "security": []
       }
     },
     "/metrics": {
@@ -104,6 +107,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           }
         },
         "description": "JSON by default. A request whose Accept header lists text/plain or application/openmetrics-text before any JSON type (as Prometheus sends) gets the Prometheus text exposition format instead."
@@ -123,6 +132,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           }
         }
       }
@@ -141,6 +156,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           }
         }
       }
@@ -171,8 +192,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           }
         }
       }
@@ -278,6 +305,9 @@
           "400": {
             "$ref": "#/components/responses/Error"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/Error"
           },
@@ -289,6 +319,9 @@
           },
           "422": {
             "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           },
           "500": {
             "$ref": "#/components/responses/Error"
@@ -376,6 +409,9 @@
           },
           "422": {
             "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           },
           "500": {
             "$ref": "#/components/responses/Error"
@@ -484,6 +520,9 @@
           "400": {
             "$ref": "#/components/responses/Error"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "413": {
             "$ref": "#/components/responses/Error"
           },
@@ -492,6 +531,9 @@
           },
           "422": {
             "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           },
           "500": {
             "$ref": "#/components/responses/Error"
@@ -522,6 +564,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           }
         }
       }
@@ -537,7 +585,8 @@
           "200": {
             "description": "Alive"
           }
-        }
+        },
+        "security": []
       }
     },
     "/v2/health/ready": {
@@ -554,7 +603,8 @@
           "503": {
             "description": "Warming up"
           }
-        }
+        },
+        "security": []
       }
     },
     "/v2/models/{model}": {
@@ -586,8 +636,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           }
         }
       }
@@ -632,8 +688,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           }
         }
       }
@@ -660,11 +722,17 @@
           "200": {
             "description": "Ready"
           },
-          "503": {
-            "description": "Warming up"
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "404": {
             "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "description": "Warming up"
           }
         }
       }
@@ -702,11 +770,17 @@
           "200": {
             "description": "Ready"
           },
-          "503": {
-            "description": "Warming up"
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "404": {
             "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "description": "Warming up"
           }
         }
       }
@@ -786,8 +860,14 @@
           "400": {
             "$ref": "#/components/responses/Error"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           },
           "503": {
             "$ref": "#/components/responses/Error"
@@ -884,8 +964,14 @@
           "400": {
             "$ref": "#/components/responses/Error"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           },
           "503": {
             "$ref": "#/components/responses/Error"
@@ -935,6 +1021,41 @@
         "headers": {
           "X-Request-Id": {
             "$ref": "#/components/headers/RequestId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "API keys are required and none or an unknown one was sent (`UNAUTHORIZED`)",
+        "headers": {
+          "WWW-Authenticate": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "Over the per-client rate limit (`RATE_LIMITED`)",
+        "headers": {
+          "Retry-After": {
+            "description": "Seconds until the client may retry",
+            "schema": {
+              "type": "integer"
+            }
           }
         },
         "content": {
@@ -1059,6 +1180,8 @@
           "total_requests",
           "total_errors",
           "rejected_busy",
+          "rejected_unauthorized",
+          "rejected_rate_limited",
           "in_flight_inferences",
           "max_concurrent_inferences",
           "total_inferences",
@@ -1088,6 +1211,14 @@
           "rejected_busy": {
             "type": "integer",
             "description": "Requests rejected with 503 SERVER_BUSY"
+          },
+          "rejected_unauthorized": {
+            "type": "integer",
+            "description": "Requests rejected with 401 for a missing or unknown API key"
+          },
+          "rejected_rate_limited": {
+            "type": "integer",
+            "description": "Requests rejected with 429 by the rate limit"
           },
           "in_flight_inferences": {
             "type": "integer",
@@ -1723,7 +1854,26 @@
         "type": "http",
         "scheme": "bearer",
         "description": "The `--admin-token` value"
+      },
+      "apiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "One of the `--api-key` values; `X-API-Key: <key>` works too. Only required when the server has API keys"
+      },
+      "apiKeyHeader": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key"
       }
     }
-  }
+  },
+  "security": [
+    {},
+    {
+      "apiKey": []
+    },
+    {
+      "apiKeyHeader": []
+    }
+  ]
 }

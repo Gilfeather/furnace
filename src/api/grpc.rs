@@ -52,6 +52,36 @@ pub(super) async fn serve(
         .map_err(|e| format!("gRPC server error: {e}"))
 }
 
+impl Service {
+    /// API keys and the rate limit, as for HTTP: `authorization: Bearer <key>` or
+    /// `x-api-key: <key>` metadata
+    fn admit<T>(&self, request: &GrpcRequest<T>) -> std::result::Result<(), Status> {
+        let metadata = |name| request.metadata().get(name).and_then(|v| v.to_str().ok());
+        let key = presented_key(metadata("authorization"), metadata("x-api-key"));
+        let ip = request.remote_addr().map(|addr| addr.ip());
+        self.state
+            .access
+            .admit(key, ip, true)
+            .map_err(|rejection| match rejection {
+                Rejection::Unauthorized => {
+                    self.state
+                        .rejected_unauthorized
+                        .fetch_add(1, Ordering::Relaxed);
+                    Status::unauthenticated("Missing or unknown API key")
+                }
+                Rejection::RateLimited(retry) => {
+                    self.state
+                        .rejected_rate_limited
+                        .fetch_add(1, Ordering::Relaxed);
+                    Status::resource_exhausted(format!(
+                        "Rate limit exceeded; retry in {} ms",
+                        retry.as_millis().max(1)
+                    ))
+                }
+            })
+    }
+}
+
 #[tonic::async_trait]
 impl GrpcInferenceService for Service {
     async fn server_live(
@@ -74,6 +104,7 @@ impl GrpcInferenceService for Service {
         &self,
         request: GrpcRequest<pb::ModelReadyRequest>,
     ) -> std::result::Result<GrpcResponse<pb::ModelReadyResponse>, Status> {
+        self.admit(&request)?;
         let request = request.into_inner();
         let slot = resolve_model(&self.state, &request.name, &request.version)
             .map_err(Status::not_found)?;
@@ -84,8 +115,9 @@ impl GrpcInferenceService for Service {
 
     async fn server_metadata(
         &self,
-        _: GrpcRequest<pb::ServerMetadataRequest>,
+        request: GrpcRequest<pb::ServerMetadataRequest>,
     ) -> std::result::Result<GrpcResponse<pb::ServerMetadataResponse>, Status> {
+        self.admit(&request)?;
         Ok(GrpcResponse::new(pb::ServerMetadataResponse {
             name: "furnace".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -97,6 +129,7 @@ impl GrpcInferenceService for Service {
         &self,
         request: GrpcRequest<pb::ModelMetadataRequest>,
     ) -> std::result::Result<GrpcResponse<pb::ModelMetadataResponse>, Status> {
+        self.admit(&request)?;
         let request = request.into_inner();
         let slot = resolve_model(&self.state, &request.name, &request.version)
             .map_err(Status::not_found)?;
@@ -129,6 +162,7 @@ impl GrpcInferenceService for Service {
         &self,
         request: GrpcRequest<pb::ModelInferRequest>,
     ) -> std::result::Result<GrpcResponse<pb::ModelInferResponse>, Status> {
+        self.admit(&request)?;
         let state = &self.state;
         let start = Instant::now();
         state.total_requests.fetch_add(1, Ordering::Relaxed);
@@ -258,7 +292,10 @@ mod tests {
 
     /// A gRPC server for the test model on a free port, and a client for it
     async fn client() -> GrpcInferenceServiceClient<tonic::transport::Channel> {
-        let state = test_app_state();
+        client_for(test_app_state()).await
+    }
+
+    async fn client_for(state: AppState) -> GrpcInferenceServiceClient<tonic::transport::Channel> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(
@@ -269,6 +306,45 @@ mod tests {
         GrpcInferenceServiceClient::connect(format!("http://{addr}"))
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn api_keys_and_rate_limit() {
+        let config = ServerConfig {
+            api_keys: vec!["grpc-key-0123456789".to_string()],
+            rate_limit: Some(RateLimit {
+                per_second: 0.001,
+                burst: 2,
+            }),
+            ..ServerConfig::default()
+        };
+        let state = server_state(vec![super::super::tests::dummy_model().into()], &config);
+        let mut client = client_for(state).await;
+        let with_key = |mut request: tonic::Request<ModelInferRequest>| {
+            request.metadata_mut().insert(
+                "authorization",
+                "Bearer grpc-key-0123456789".parse().unwrap(),
+            );
+            request
+        };
+        let infer = || tonic::Request::new(request(vec![1, 784], Some(vec![0.5; 784]), None));
+
+        // Health needs no key
+        let live = client.server_live(pb::ServerLiveRequest {}).await.unwrap();
+        assert!(live.into_inner().live);
+        let status = client.model_infer(infer()).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        // Two at once, then the third is over the limit
+        for _ in 0..2 {
+            client.model_infer(with_key(infer())).await.unwrap();
+        }
+        let status = client.model_infer(with_key(infer())).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        assert!(
+            status.message().contains("Rate limit"),
+            "{}",
+            status.message()
+        );
     }
 
     fn request(

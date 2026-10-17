@@ -12,6 +12,9 @@ log_level = "info"              # error, warn, info, debug or trace
 # threads = 8                   # inference threads (default: one per physical core)
 # grpc_port = 8001              # also serve gRPC (KServe / Triton protocol); needs the `grpc` feature
 # admin_token = "..."           # enable POST /admin/models/{model}/reload; prefer $FURNACE_ADMIN_TOKEN
+# api_keys = ["..."]            # require one of these keys; prefer $FURNACE_API_KEYS
+# rate_limit = 50               # requests/s per client (API key, or IP address), beyond which 429
+# rate_limit_burst = 100        # requests a client may send at once (default: rate_limit)
 
 [model]
 name = "resnet18"               # built-in model compiled from models/<name>.onnx

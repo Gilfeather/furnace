@@ -1,3 +1,4 @@
+pub mod access;
 pub mod allocator;
 pub mod api;
 pub mod backend;
