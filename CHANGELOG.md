@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- JSON bodies of the usual shape (`{"input": [...]}`, `{"inputs": [[...], ...]}`) are parsed
+  by a dedicated scanner that converts numbers straight to f32 with `fast-float2` and splits
+  large arrays across threads; other bodies still go through serde_json. The HTTP overhead of
+  a ResNet-18 JSON request drops from about 4.7 ms to about 2.2 ms
+
 ### Added
 - `GET /metrics` serves the Prometheus text format to scrapers (requests that accept `text/plain`
   or `application/openmetrics-text`), with request and inference latency histograms; the JSON
