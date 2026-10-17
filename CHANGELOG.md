@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Dynamic batching in the server. Up to `--batch-workers` forward passes (default 4) run at
+  once; when all are busy, queued `/predict` requests are merged into batches of up to
+  `--max-batch-size` items (default 8). A batch waits at most `--batch-timeout-us` (default
+  2000) for requests still being received, and a lone request never waits.
+  `--max-batch-size 1` restores the old behaviour. With 16 concurrent ResNet-18 clients, p95
+  latency drops from 207 to 116 ms at the same throughput, about 175 images/s against 129 for
+  FastAPI + ONNX Runtime
+- `GET /metrics` reports `total_batches`, `average_batch_size` and `max_batch_size`;
+  `GET /model/info` statistics gain `batch_count` and `batched_items`
+- `Model::predict_many` runs several independent requests as one forward pass
+- `examples/http_bench.rs` takes `MODE@N` for N concurrent clients and reports throughput and
+  p50/p95 latency
+
+### Changed
+- `total_inferences` in `GET /metrics` is documented as requests that reached the model (it
+  always counted requests); `in_flight_inferences` includes requests waiting to be batched,
+  and `inference_time_ms` includes that wait
+
 ## [0.7.0] - 2026-10-17
 
 CPU inference is about 2× faster again. Over HTTP, Furnace now matches FastAPI + ONNX Runtime

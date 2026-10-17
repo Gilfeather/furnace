@@ -24,14 +24,18 @@ Server counters for monitoring:
   "uptime_seconds": 3600,
   "total_requests": 1520, "total_errors": 12, "rejected_busy": 9,
   "in_flight_inferences": 2, "max_concurrent_inferences": 100,
-  "total_inferences": 1508, "average_inference_time_ms": 84.2,
+  "total_inferences": 1508, "total_batches": 611, "average_batch_size": 2.6, "max_batch_size": 8,
+  "average_inference_time_ms": 84.2,
   "last_inference_at": "2026-10-14T05:01:12Z",
   "timestamp": "2026-10-14T05:01:13Z"
 }
 ```
 
 `total_requests` and `total_errors` count every `/predict` request, including those rejected
-before inference (400, 413, 503). `rejected_busy` is the 503 subset.
+before inference (400, 413, 503). `rejected_busy` is the 503 subset. `total_inferences` counts
+requests that reached the model and `total_batches` the forward passes that served them (see
+[Dynamic batching](#dynamic-batching)); `average_batch_size` is items per forward pass.
+`in_flight_inferences` includes requests waiting in the batching queue.
 
 ## `GET /model/info`
 
@@ -150,6 +154,32 @@ Without the feature, `image/*` requests get 415. The feature adds the
 [`image`](https://crates.io/crates/image) crate with only its JPEG and PNG decoders,
 about +0.4 MB to the release binary (5.5 MB to 5.9 MB on Windows x86-64).
 
+## Dynamic batching
+
+Concurrent `/predict` requests are merged into shared forward passes once the server is
+saturated. Results are the same as unbatched, and each response still carries only its own
+outputs, in order.
+
+Up to `--batch-workers` forward passes (default 4) run at the same time. While a worker is
+free, each request gets a pass of its own, started at once: on a CPU, two small passes side
+by side use the cores better than one pass over both. Once every worker is busy, requests
+queue, and the next worker to finish takes everything queued, up to `--max-batch-size`
+items (default 8), as one batch. If it finds a single request queued while another is still
+being received or decoded, it waits for that one, at most `--batch-timeout-us` (default
+2000 µs) after the first was queued. A lone request never waits. A request with several
+items counts as that many; one larger than the maximum runs alone.
+
+Each request is validated on its own, so a bad one (wrong size, NaN) gets its own 400 and the
+others in its batch are unaffected. `inference_time_ms` includes time spent in the queue.
+Queued requests hold one of the `--max-concurrent-requests` slots, and `--request-timeout-ms`
+covers queueing and inference; a request that times out while queued is dropped from its
+batch.
+
+`--max-batch-size 1` turns batching off: every request then runs its own pass on a blocking
+thread, and up to `--max-concurrent-requests` of them run side by side, competing for the
+cores, so under heavy load some requests take far longer than others. See
+[`PERFORMANCE.md`](PERFORMANCE.md#concurrent-load) for measurements.
+
 ## Errors
 
 Errors share one shape:
@@ -184,7 +214,8 @@ output. Download it (see the README's quick start), then `cargo build --release`
 
 **`length limit exceeded` / 413**: raise `--max-body-mb`. A ResNet-18 image is 1.5–3 MB of JSON.
 
-**Lots of `503 SERVER_BUSY`**: increase `--max-concurrent-requests`, or batch on the client.
+**Lots of `503 SERVER_BUSY`**: increase `--max-concurrent-requests`. Requests waiting to be
+batched hold a slot too.
 
 **`backend not available in this build`**: rebuild with the matching feature,
 e.g. `--features wgpu`.

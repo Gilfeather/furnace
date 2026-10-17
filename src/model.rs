@@ -37,6 +37,10 @@ pub struct ModelStats {
     pub success_count: u64,
     pub min_inference_time_ms: Option<f64>,
     pub max_inference_time_ms: Option<f64>,
+    /// Forward passes run. Below `success_count` when requests were batched together
+    pub batch_count: u64,
+    /// Items processed by those forward passes
+    pub batched_items: u64,
 }
 
 impl ModelStats {
@@ -50,6 +54,8 @@ impl ModelStats {
             success_count: 0,
             min_inference_time_ms: None,
             max_inference_time_ms: None,
+            batch_count: 0,
+            batched_items: 0,
         }
     }
 
@@ -73,6 +79,18 @@ impl ModelStats {
         self.inference_count += 1;
         self.error_count += 1;
     }
+
+    fn record_batch(&mut self, items: usize) {
+        self.batch_count += 1;
+        self.batched_items += items as u64;
+    }
+}
+
+/// One request's input for [`Model::predict_many`]: `batch_size` items back to back
+#[derive(Debug)]
+pub struct FlatInput {
+    pub data: Vec<f32>,
+    pub batch_size: usize,
 }
 
 /// A model that can run inference on flattened `[batch, features]` input.
@@ -266,22 +284,98 @@ impl Model {
     /// per-item allocations and copies, so it is the fastest entry point for large inputs.
     /// Blocking, like [`Model::predict_batch`].
     pub fn predict_flat(&self, input: Vec<f32>, batch_size: usize) -> Result<Vec<f32>> {
+        self.predict_many(vec![FlatInput {
+            data: input,
+            batch_size,
+        }])
+        .pop()
+        .expect("one request yields one result")
+    }
+
+    /// Run several independent requests as one forward pass and split the outputs back.
+    ///
+    /// Each request is validated on its own, so an invalid one gets its own error and
+    /// the rest still run. Results come back in request order, each holding that
+    /// request's `batch_size * output_size` values. The requests together must not
+    /// exceed [`MAX_BATCH_SIZE`] items. Statistics count every request, plus one batch
+    /// per forward pass. Blocking, like [`Model::predict_batch`].
+    pub fn predict_many(&self, requests: Vec<FlatInput>) -> Vec<Result<Vec<f32>>> {
+        let mut results: Vec<Option<Result<Vec<f32>>>> = Vec::with_capacity(requests.len());
+        let mut valid = Vec::with_capacity(requests.len());
+        let mut errors = 0;
+        for (i, request) in requests.into_iter().enumerate() {
+            match self.validate_flat(&request.data, request.batch_size) {
+                Ok(()) => {
+                    results.push(None);
+                    valid.push((i, request));
+                }
+                Err(e) => {
+                    results.push(Some(Err(e)));
+                    errors += 1;
+                }
+            }
+        }
+
         let start = Instant::now();
-        let result = self.run_flat(input, batch_size);
+        let items: usize = valid.iter().map(|(_, r)| r.batch_size).sum();
+        let output = match valid.as_mut_slice() {
+            [] => None,
+            // A lone request runs on its own buffer, without a copy
+            [(_, only)] => Some(self.forward(std::mem::take(&mut only.data), items)),
+            many => {
+                let mut input = Vec::with_capacity(many.iter().map(|(_, r)| r.data.len()).sum());
+                for (_, request) in many.iter_mut() {
+                    input.append(&mut request.data);
+                }
+                Some(self.forward(input, items))
+            }
+        };
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
-        match &result {
-            Ok(_) => {
-                stats.record_success(elapsed_ms);
-                debug!(
-                    "Batch inference completed in {:.2}ms, batch size: {}, backend: {}",
-                    elapsed_ms, batch_size, self.info.backend
-                );
-            }
-            Err(_) => stats.record_error(),
+        for _ in 0..errors {
+            stats.record_error();
         }
-        result
+        if let Some(output) = output {
+            stats.record_batch(items);
+            match output {
+                Ok(output) => {
+                    debug!(
+                        "Batch inference completed in {:.2}ms, {} request(s), batch size: {}, backend: {}",
+                        elapsed_ms,
+                        valid.len(),
+                        items,
+                        self.info.backend
+                    );
+                    if let [(i, _)] = valid.as_slice() {
+                        // A lone request takes the whole buffer
+                        stats.record_success(elapsed_ms);
+                        results[*i] = Some(Ok(output));
+                    } else {
+                        let output_size: usize = self.info.output_spec.shape.iter().product();
+                        let mut rest = output.as_slice();
+                        for (i, request) in &valid {
+                            let (mine, tail) = rest.split_at(request.batch_size * output_size);
+                            rest = tail;
+                            stats.record_success(elapsed_ms);
+                            results[*i] = Some(Ok(mine.to_vec()));
+                        }
+                    }
+                }
+                Err(message) => {
+                    for (i, _) in &valid {
+                        stats.record_error();
+                        results[*i] =
+                            Some(Err(ModelError::InferenceFailed(message.clone()).into()));
+                    }
+                }
+            }
+        }
+
+        results
+            .into_iter()
+            .map(|r| r.expect("every request has a result"))
+            .collect()
     }
 
     fn check_batch_size(batch_size: usize) -> Result<()> {
@@ -313,7 +407,8 @@ impl Model {
         Ok(flattened)
     }
 
-    fn run_flat(&self, input: Vec<f32>, batch_size: usize) -> Result<Vec<f32>> {
+    /// Checks one request's flat input: batch size, length and finite values
+    fn validate_flat(&self, input: &[f32], batch_size: usize) -> Result<()> {
         Self::check_batch_size(batch_size)?;
 
         let input_size: usize = self.info.input_spec.shape.iter().product();
@@ -335,7 +430,12 @@ impl Model {
             ))
             .into());
         }
+        Ok(())
+    }
 
+    /// One forward pass over validated input; the error is the failure message
+    fn forward(&self, input: Vec<f32>, batch_size: usize) -> std::result::Result<Vec<f32>, String> {
+        let input_size: usize = self.info.input_spec.shape.iter().product();
         let input_tensor = Tensor::from_data(
             TensorData::new(input, [batch_size, input_size]),
             self.inner.device(),
@@ -344,21 +444,20 @@ impl Model {
         let output = self
             .inner
             .predict(input_tensor)
-            .map_err(|e| ModelError::InferenceFailed(e.to_string()))?;
+            .map_err(|e| e.to_string())?;
 
         let output_size: usize = self.info.output_spec.shape.iter().product();
         let [out_batch, out_size] = output.dims();
         if out_batch != batch_size || out_size != output_size {
-            return Err(ModelError::InferenceFailed(format!(
+            return Err(format!(
                 "model returned shape [{out_batch}, {out_size}], expected [{batch_size}, {output_size}]"
-            ))
-            .into());
+            ));
         }
 
         output
             .into_data()
             .try_into_vec::<f32>()
-            .map_err(|e| ModelError::InferenceFailed(format!("{e:?}")).into())
+            .map_err(|e| format!("{e:?}"))
     }
 
     pub fn get_info(&self) -> &ModelInfo {

@@ -291,6 +291,170 @@ async fn test_backpressure_returns_503() {
     assert!(statuses.iter().all(|s| *s == 200 || *s == 503));
 }
 
+/// A distinct, non-constant image per `seed`, so mixed-up outputs would show
+fn ramp(seed: usize) -> Vec<f32> {
+    (0..RESNET_INPUT)
+        .map(|i| ((i * (seed + 1)) % 224) as f32 / 112.0 - 1.0)
+        .collect()
+}
+
+/// Concurrent requests batched into shared forward passes get the same outputs, in the
+/// same order, as each image run on its own, and a bad request fails alone
+#[tokio::test]
+async fn test_dynamic_batching_matches_unbatched() {
+    use furnace::api::BatchConfig;
+
+    let unbatched = spawn_server(ServerConfig {
+        batching: BatchConfig {
+            max_batch_size: 1,
+            ..BatchConfig::default()
+        },
+        ..ServerConfig::default()
+    })
+    .await;
+    let batched = spawn_server(ServerConfig {
+        batching: BatchConfig {
+            max_batch_size: 8,
+            batch_timeout: Duration::from_millis(5),
+            ..BatchConfig::default()
+        },
+        ..ServerConfig::default()
+    })
+    .await;
+
+    let mut reference = Vec::new();
+    for seed in 0..10 {
+        let response: Value = client()
+            .post(format!("{unbatched}/predict"))
+            .header("content-type", "application/octet-stream")
+            .body(le_bytes(&ramp(seed)))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        reference.push(json_floats(&response["output"]));
+    }
+
+    let mut nan = ramp(0);
+    nan[123] = f32::NAN;
+    let url = format!("{batched}/predict");
+    let requests = vec![
+        // (request, seeds of its items; empty for the invalid one)
+        (
+            client().post(&url).json(&json!({ "input": ramp(0) })),
+            vec![0],
+        ),
+        (
+            client()
+                .post(&url)
+                .header("content-type", "application/octet-stream")
+                .body(le_bytes(&ramp(1))),
+            vec![1],
+        ),
+        (
+            client()
+                .post(&url)
+                .json(&json!({ "inputs": [ramp(2), ramp(3)] })),
+            vec![2, 3],
+        ),
+        (
+            client()
+                .post(&url)
+                .header("content-type", "application/octet-stream")
+                .body(le_bytes(&nan)),
+            vec![],
+        ),
+        (
+            client()
+                .post(&url)
+                .header("content-type", "application/octet-stream")
+                .header("x-batch-size", "2")
+                .header("accept", "application/octet-stream")
+                .body(le_bytes(&[ramp(4), ramp(5)].concat())),
+            vec![4, 5],
+        ),
+        (
+            client().post(&url).json(&json!({ "input": ramp(6) })),
+            vec![6],
+        ),
+        (
+            client().post(&url).json(&json!({ "input": ramp(7) })),
+            vec![7],
+        ),
+        (
+            client().post(&url).json(&json!({ "input": ramp(8) })),
+            vec![8],
+        ),
+        (
+            client().post(&url).json(&json!({ "input": ramp(9) })),
+            vec![9],
+        ),
+    ];
+
+    let handles: Vec<_> = requests
+        .into_iter()
+        .map(|(request, seeds)| {
+            tokio::spawn(async move {
+                let response = request.send().await.unwrap();
+                let status = response.status().as_u16();
+                let binary = response.headers()["content-type"] == "application/octet-stream";
+                let body = response.bytes().await.unwrap();
+                (seeds, status, binary, body)
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        let (seeds, status, binary, body) = handle.await.unwrap();
+        if seeds.is_empty() {
+            assert_eq!(status, 400);
+            let error: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(error["code"], "INVALID_INPUT_VALUE");
+            continue;
+        }
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+        let outputs: Vec<Vec<f32>> = if binary {
+            let (values, _) = body.as_chunks::<4>();
+            let values: Vec<f32> = values.iter().copied().map(f32::from_le_bytes).collect();
+            values.chunks(1000).map(<[f32]>::to_vec).collect()
+        } else {
+            let doc: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(doc["batch_size"], seeds.len());
+            match doc.get("output") {
+                Some(output) => vec![json_floats(output)],
+                None => doc["outputs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(json_floats)
+                    .collect(),
+            }
+        };
+        assert_eq!(outputs.len(), seeds.len());
+        for (output, seed) in outputs.iter().zip(&seeds) {
+            assert_close(output, &reference[*seed]);
+        }
+    }
+
+    let metrics: Value = client()
+        .get(format!("{batched}/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // Every request reached the model; the valid ones shared forward passes
+    assert_eq!(metrics["total_inferences"], 9);
+    assert_eq!(metrics["max_batch_size"], 8);
+    let batches = metrics["total_batches"].as_u64().unwrap();
+    assert!((1..8).contains(&batches), "{metrics}");
+    assert!(metrics["average_batch_size"].as_f64().unwrap() > 1.0);
+    assert_eq!(metrics["in_flight_inferences"], 0);
+}
+
 /// A second built-in model with different shapes, generated from models/mnist.onnx with no
 /// model-specific code
 #[tokio::test]
