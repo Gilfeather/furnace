@@ -30,6 +30,7 @@ struct CliArgs {
     batch_workers: usize,
     log_level: String,
     threads: Option<usize>,
+    grpc_port: Option<u16>,
 }
 
 fn build_cli() -> Command {
@@ -190,6 +191,16 @@ fn build_cli() -> Command {
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
+            Arg::new("grpc-port")
+                .long("grpc-port")
+                .value_name("PORT")
+                .help(
+                    "Also serve the KServe / Triton Open Inference Protocol over gRPC on this \
+                    port (builds with the `grpc` feature)",
+                )
+                .value_parser(clap::value_parser!(u16)),
+        )
+        .arg(
             Arg::new("threads")
                 .long("threads")
                 .value_name("N")
@@ -323,6 +334,7 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
             batch_workers: *matches.get_one::<u64>("batch-workers").unwrap() as usize,
             log_level: matches.get_one::<String>("log-level").unwrap().clone(),
             threads: matches.get_one::<u64>("threads").map(|&n| n as usize),
+            grpc_port: matches.get_one::<u16>("grpc-port").copied(),
         },
         deprecated,
     ))
@@ -482,6 +494,7 @@ async fn main() -> Result<()> {
             batch_timeout: Duration::from_micros(args.batch_timeout_us),
             workers: args.batch_workers,
         },
+        grpc_port: args.grpc_port,
     };
 
     info!(

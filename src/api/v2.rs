@@ -95,29 +95,29 @@ async fn ready(State(state): State<AppState>) -> StatusCode {
     }
 }
 
-/// The model the path names, or the v2 error response for an unknown model or version
+/// The v2 error response for a path naming an unknown model or version
 fn check_model(state: &ServerState, path: &ModelPath) -> std::result::Result<(), Box<Response>> {
+    model_name_error(state, &path.model, path.version.as_deref().unwrap_or(""))
+        .map_or(Ok(()), |message| {
+            Err(Box::new(v2_error(StatusCode::NOT_FOUND, &message)))
+        })
+}
+
+/// Why `model` / `version` is not the served model (an empty version means any), if it is not.
+/// Shared with the gRPC transport.
+pub(super) fn model_name_error(state: &ServerState, model: &str, version: &str) -> Option<String> {
     let name = &state.model.get_info().name;
-    if path.model != *name {
-        return Err(Box::new(v2_error(
-            StatusCode::NOT_FOUND,
-            &format!(
-                "Unknown model '{}'; this server serves '{name}'",
-                path.model
-            ),
-        )));
+    if model != name {
+        return Some(format!(
+            "Unknown model '{model}'; this server serves '{name}'"
+        ));
     }
-    if let Some(version) = &path.version
-        && version != MODEL_VERSION
-    {
-        return Err(Box::new(v2_error(
-            StatusCode::NOT_FOUND,
-            &format!(
-                "Unknown version '{version}' of model '{name}'; the only version is {MODEL_VERSION}"
-            ),
-        )));
+    if !version.is_empty() && version != MODEL_VERSION {
+        return Some(format!(
+            "Unknown version '{version}' of model '{name}'; the only version is {MODEL_VERSION}"
+        ));
     }
-    Ok(())
+    None
 }
 
 async fn model_metadata(State(state): State<AppState>, Path(path): Path<ModelPath>) -> Response {
@@ -422,6 +422,47 @@ async fn infer(
         .into_response()
 }
 
+/// Check an input tensor's name, datatype and shape against the model; returns its batch size.
+/// The shape is `[batch, ...item shape]`, or the item shape alone for one item. Shared with the
+/// gRPC transport.
+pub(super) fn check_input(
+    model: &Model,
+    name: &str,
+    datatype: &str,
+    shape: &[i64],
+) -> std::result::Result<usize, String> {
+    if name != INPUT_NAME {
+        return Err(format!(
+            "Unknown input '{name}'; the model's input is '{INPUT_NAME}'"
+        ));
+    }
+    if datatype != "FP32" {
+        return Err(format!(
+            "Input datatype {datatype} is not supported; the model takes FP32"
+        ));
+    }
+    let item_shape = &model.get_info().input_spec.shape;
+    let dims: Vec<usize> = shape
+        .iter()
+        .map(|&d| usize::try_from(d).map_err(|_| format!("Invalid shape {shape:?}")))
+        .collect::<std::result::Result<_, _>>()?;
+    let batch_size = if dims.len() == item_shape.len() + 1 && dims[1..] == item_shape[..] {
+        dims[0]
+    } else if dims == *item_shape {
+        1
+    } else {
+        let mut expected = vec!["N".to_string()];
+        expected.extend(item_shape.iter().map(ToString::to_string));
+        return Err(format!(
+            "Input shape {shape:?} does not match the model's [{}]",
+            expected.join(", ")
+        ));
+    };
+    check_batch_len(batch_size)
+        .map_err(|_| format!("Batch size {batch_size} is outside 1..={MAX_BATCH_SIZE}"))?;
+    Ok(batch_size)
+}
+
 /// The request's one `FP32` input as flat values and its batch size
 fn decode_input(
     model: &Model,
@@ -434,41 +475,8 @@ fn decode_input(
             request.inputs.len()
         ));
     };
-    if input.name != INPUT_NAME {
-        return Err(format!(
-            "Unknown input '{}'; the model's input is '{INPUT_NAME}'",
-            input.name
-        ));
-    }
-    if input.datatype != "FP32" {
-        return Err(format!(
-            "Input datatype {} is not supported; the model takes FP32",
-            input.datatype
-        ));
-    }
-    let item_shape = &model.get_info().input_spec.shape;
-    let item_size: usize = item_shape.iter().product();
-    // [batch, ...item_shape], or just item_shape for a single item
-    let shape: Vec<usize> = input
-        .shape
-        .iter()
-        .map(|&d| usize::try_from(d).map_err(|_| format!("Invalid shape {:?}", input.shape)))
-        .collect::<std::result::Result<_, _>>()?;
-    let batch_size = if shape.len() == item_shape.len() + 1 && shape[1..] == item_shape[..] {
-        shape[0]
-    } else if shape == *item_shape {
-        1
-    } else {
-        let mut expected = vec!["N".to_string()];
-        expected.extend(item_shape.iter().map(ToString::to_string));
-        return Err(format!(
-            "Input shape {:?} does not match the model's [{}]",
-            input.shape,
-            expected.join(", ")
-        ));
-    };
-    check_batch_len(batch_size)
-        .map_err(|_| format!("Batch size {batch_size} is outside 1..={MAX_BATCH_SIZE}"))?;
+    let batch_size = check_input(model, &input.name, &input.datatype, &input.shape)?;
+    let item_size: usize = model.get_info().input_spec.shape.iter().product();
     let elements = batch_size * item_size;
 
     let data = match (input.parameters.binary_data_size, input.data.take()) {

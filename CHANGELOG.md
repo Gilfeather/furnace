@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The KServe / Triton Open Inference Protocol over HTTP (`/v2/...`): server and model metadata,
   health, and inference with FP32 tensors, as JSON (flat or nested) or with Triton's binary
   tensor data extension. NVIDIA's `tritonclient.http` works against Furnace unchanged
+- The same protocol over gRPC with `--grpc-port` (feature `grpc`, on in the release binaries
+  and the Docker image): `inference.GRPCInferenceService` from KServe's proto, compiled with
+  the pure-Rust `protox`, so building needs no `protoc`. `tritonclient.grpc` works unchanged
 - `GET /readyz` for readiness probes: 503 until a warm-up inference, run in the background at
   startup, has initialized the model; `/healthz` stays the liveness probe
 

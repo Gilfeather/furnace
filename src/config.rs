@@ -35,6 +35,7 @@ pub struct Server {
     pub request_timeout_ms: Option<u64>,
     pub log_level: Option<String>,
     pub threads: Option<u64>,
+    pub grpc_port: Option<u16>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -91,6 +92,7 @@ impl ConfigFile {
         );
         push("--log-level", s.log_level.clone());
         push("--threads", s.threads.map(|v| v.to_string()));
+        push("--grpc-port", s.grpc_port.map(|v| v.to_string()));
         let m = &self.model;
         if with_model {
             push("--model-name", m.name.clone());

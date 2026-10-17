@@ -129,6 +129,7 @@ server's log lines for that request. Full reference, including errors:
 | `--max-batch-size <N>` | `8` | Most items per batched pass; `1` turns batching off |
 | `--batch-timeout-us <US>` | `2000` | Longest a batch waits for requests still arriving; a lone request never waits |
 | `--threads <N>` | one per physical core | Inference threads (also `RAYON_NUM_THREADS`) |
+| `--grpc-port <PORT>` | none | Also serve the KServe / Triton protocol over gRPC (builds with `--features grpc`; release binaries and the Docker image have it) |
 | `-l, --log-level <LEVEL>` | `info` | `RUST_LOG` sets per-module levels; `FURNACE_ENV=production` switches to JSON logs |
 | `--config <PATH>` | | Read options from a TOML file (also `FURNACE_CONFIG`); the command line overrides it. See [`furnace.example.toml`](furnace.example.toml) |
 
@@ -156,7 +157,7 @@ GPU backends are Cargo features: `--features wgpu` (Vulkan, DX12, Metal), `metal
 Each release publishes an image with ResNet-18 and MNIST built in, for x86_64 and ARM64:
 
 ```bash
-docker run --rm -p 3000:3000 ghcr.io/gilfeather/furnace:latest            # serves resnet18
+docker run --rm -p 3000:3000 -p 8001:8001 ghcr.io/gilfeather/furnace:latest   # HTTP 3000, gRPC 8001
 docker run --rm -p 3000:3000 ghcr.io/gilfeather/furnace:latest --model-name mnist
 ```
 

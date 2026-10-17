@@ -238,6 +238,27 @@ logits = result.as_numpy("output")     # shape (2, 1000)
 
 Errors are `{"error": "..."}` (with Furnace's `code`, `details` and `timestamp` alongside).
 
+### Over gRPC
+
+Built with `--features grpc`, `--grpc-port 8001` also serves the protocol's gRPC transport
+(`inference.GRPCInferenceService`, from the
+[KServe proto](https://github.com/kserve/open-inference-protocol) in `proto/`), so
+`tritonclient.grpc` and other KServe gRPC clients work unchanged. Inference takes the input as
+`raw_input_contents` (what `tritonclient.grpc` sends) or `contents.fp32_contents` and answers
+with `raw_output_contents`; it shares the HTTP server's batching, limits, timeout and metrics.
+Errors map to gRPC status codes: `NOT_FOUND` for an unknown model, `INVALID_ARGUMENT`,
+`RESOURCE_EXHAUSTED` when all slots are busy, `DEADLINE_EXCEEDED` on the timeout. Messages
+may be as large as `--max-body-mb`.
+
+```python
+import tritonclient.grpc as grpcclient
+
+client = grpcclient.InferenceServerClient(url="localhost:8001")
+inp = grpcclient.InferInput("input", list(x.shape), "FP32")
+inp.set_data_from_numpy(x)
+logits = client.infer("resnet18", [inp]).as_numpy("output")
+```
+
 ## Request IDs and logs
 
 Every response, errors included, has an `X-Request-Id` header. Send your own (1-128 visible

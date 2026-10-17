@@ -103,7 +103,7 @@ jobs:
         curl -fsSL "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
 
     - name: Build release binary
-      run: cargo build --release --target ${{ matrix.target }}
+      run: cargo build --release --target ${{ matrix.target }} --features grpc
 
     - name: Rename binary
       shell: bash
@@ -195,6 +195,7 @@ jobs:
       with:
         context: .
         push: true
+        build-args: FEATURES=grpc
         tags: ${{ steps.image.outputs.name }}:${{ needs.create-release.outputs.version }}-${{ matrix.arch }}
         labels: |
           org.opencontainers.image.source=https://github.com/${{ github.repository }}

@@ -4,7 +4,10 @@
 #   docker run --rm -p 3000:3000 furnace             # serves resnet18
 #   docker run --rm -p 3000:3000 furnace --model-name mnist
 #
-# Build arguments: FEATURES (Cargo features, e.g. "image"), and MODELS_DIR (default "models").
+#   docker run --rm -p 3000:3000 -p 8001:8001 furnace   # HTTP on 3000, gRPC on 8001
+#
+# Build arguments: FEATURES (Cargo features, default "grpc"; e.g. "grpc image"; without "grpc",
+# drop `--grpc-port` from the ENTRYPOINT), and MODELS_DIR (default "models").
 #
 # The binary links against glibc rather than musl: musl's allocator makes multithreaded
 # inference markedly slower (ResNet-18 took 37% longer per image with the musl build).
@@ -12,7 +15,7 @@
 FROM rust:1.99-slim-bookworm AS build
 WORKDIR /src
 COPY . .
-ARG FEATURES=""
+ARG FEATURES="grpc"
 ARG MODELS_DIR=models
 RUN set -eu; \
     FURNACE_MODELS_DIR="/src/${MODELS_DIR}" \
@@ -28,6 +31,6 @@ RUN set -eu; \
 FROM gcr.io/distroless/cc-debian12:nonroot
 # The weights (`<model>.bpk`) sit next to the binary, where furnace looks for them first
 COPY --from=build /out/ /app/
-EXPOSE 3000
-ENTRYPOINT ["/app/furnace", "--host", "0.0.0.0", "--port", "3000"]
+EXPOSE 3000 8001
+ENTRYPOINT ["/app/furnace", "--host", "0.0.0.0", "--port", "3000", "--grpc-port", "8001"]
 CMD ["--model-name", "resnet18"]

@@ -51,6 +51,8 @@ embed-weights = ["onnx"]
 # Accept `image/jpeg` and `image/png` on POST /predict, with ImageNet preprocessing done by
 # the server. Off by default to keep the binary small.
 image = ["dep:image"]
+# The Open Inference Protocol over gRPC (`--grpc-port`), next to the HTTP API
+grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost", "dep:tonic-prost-build", "dep:protox"]
 wgpu = ["burn/wgpu"]
 metal = ["burn/metal"]
 cuda = ["burn/cuda"]
@@ -93,10 +95,17 @@ thiserror = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
 toml = "1"
 num_cpus = "1"
+# gRPC transport for the Open Inference Protocol (feature `grpc`)
+prost = { version = "0.14", optional = true }
+tonic = { version = "0.14", optional = true }
+tonic-prost = { version = "0.14", optional = true }
 rayon = "1"
 
 [build-dependencies]
 burn-onnx = { version = "0.22", optional = true }
+# gRPC: a pure-Rust protobuf compiler, so building needs no `protoc`
+protox = { version = "0.10", optional = true }
+tonic-prost-build = { version = "0.14", optional = true }
 # Reads model input/output shapes for the built-in model registry (already a burn-onnx dependency)
 onnx-ir = { version = "0.22", optional = true }
 
@@ -104,6 +113,8 @@ onnx-ir = { version = "0.22", optional = true }
 tempfile = "3.12"
 reqwest = { version = "0.13", features = ["json"] }
 tower = { version = "0.5", features = ["util"] }
+# Serves the gRPC tests on an ephemeral port
+tokio-stream = { version = "0.1", features = ["net"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 rand = "0.10"
 # Builds ONNX graphs for the build/optimize.rs tests (already a build dependency)
