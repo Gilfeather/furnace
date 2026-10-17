@@ -432,6 +432,26 @@ Runtime is linked statically, but on Windows `ort` ships the DirectML build, whi
 furnace loads in about a millisecond, has the smallest binary, and uses the least memory. Over
 HTTP with binary bodies it adds 1 to 3 ms to in-process inference.
 
+#### As a server: furnace vs FastAPI + ONNX Runtime
+
+ONNX Runtime is a library, not a server. Serving it usually means a Python web framework in
+front of it, so the harness also runs [`benches/compare/fastapi-ort/server.py`](benches/compare/fastapi-ort/server.py):
+FastAPI on uvicorn calling ONNX Runtime, speaking furnace's binary protocol so both servers are
+driven by the same Rust client (one keep-alive connection, one request at a time). Same machine,
+measured in a separate session from the tables above (median of three runs); Python 3.14.3,
+FastAPI 0.143.3, uvicorn 0.54.0, ONNX Runtime 1.31.0, the same version as the `ort` rows.
+
+| Server | Batch 1 median / p95 | Batch 4 median / p95 | Load to healthy | Peak working set | Peak private | Size |
+|---|---|---|---|---|---|---|
+| **furnace** | 14.6 / 16.7 ms | 38.4 / 42.8 ms | **32 ms** | **81 MB** | **52 MB** | **5.5 MB** + 46 MB `.bpk` |
+| FastAPI + ONNX Runtime | **8.8 / 9.5 ms** | **29.1 / 31.8 ms** | 1896 ms | 214 MB | 693 MB | 102 MB venv + Python + 47 MB `.onnx` |
+
+The HTTP layer costs about the same in both (0.9 vs 1.2 ms at batch 1, 2.1 vs 3.4 ms at batch 4),
+so the latency gap is ONNX Runtime's faster kernels. furnace is ready 60× sooner, uses about a
+third of the resident memory and a thirteenth of the private memory, and ships as one file
+without an interpreter. On Windows the virtual environment's `python.exe` is a launcher, so the
+FastAPI server reports its own pid on `/healthz` and that process is the one measured.
+
 What changed since 0.5.0 (the API is the same; all changes are in the vendored burn-flex):
 
 - **Convolutions split into cache-sized tasks.** The patched burn-flex used to build one im2col
@@ -488,11 +508,16 @@ dependencies):
 curl -L https://github.com/pytorch/hub/raw/master/images/dog.jpg -o benches/compare/dog.jpg
 cargo build --release            # the server binary for the HTTP row
 cd benches/compare
-cargo run --release              # all engines; add --features wgpu for the GPU row
+# Optional, for the FastAPI + ONNX Runtime row (skipped without it)
+uv venv fastapi-ort/.venv
+uv pip install -p fastapi-ort/.venv -r fastapi-ort/requirements.txt
+cargo build --release            # every engine binary; add --features wgpu for the GPU row
+target/release/compare
 ```
 
-`cargo run --release -- --only ort,tract --iters 100 --json results.json` selects engines and
-writes the raw reports. Each engine is also its own binary, for example
+Build before running: `cargo run` would rebuild only `compare`, not the engine binaries it
+starts. `target/release/compare --only ort,tract --iters 100 --json results.json` selects engines
+and writes the raw reports. Each engine is also its own binary, for example
 `target/release/cmp-ort --threads 1`. See [`benches/compare/src/main.rs`](benches/compare/src/main.rs).
 
 ### Furnace micro-benchmarks

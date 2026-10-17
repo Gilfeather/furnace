@@ -4,7 +4,7 @@
 
 use furnace::BackendKind;
 use furnace::model::load_built_in_model_with_backend;
-use furnace_compare::{Args, bench_in_process};
+use furnace_compare::{Args, FURNACE_VERSION, bench_in_process};
 
 fn main() {
     let args = Args::parse("backend");
@@ -14,7 +14,7 @@ fn main() {
     let mut report = bench_in_process(
         &args,
         &format!("furnace ({backend_name})"),
-        "furnace 0.4.0, Burn 0.22",
+        FURNACE_VERSION,
         "default".to_string(),
         // Default weight lookup finds resnet18.bpk in the furnace build output directory
         || load_built_in_model_with_backend("resnet18", backend, None).expect("load furnace"),
