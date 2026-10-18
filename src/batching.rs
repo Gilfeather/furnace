@@ -298,8 +298,9 @@ fn received(pending: Pending, arriving: &AtomicUsize) -> Pending {
 mod tests {
     use super::*;
     use crate::backend::BackendKind;
+    use crate::error::Result;
     use crate::model::BurnModel;
-    use burn::tensor::{Device, Tensor};
+    use crate::tensor::{HostTensor, IoSpec, Values};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Semaphore;
 
@@ -310,7 +311,6 @@ mod tests {
     /// was batched with what.
     #[derive(Debug)]
     struct Doubler {
-        device: Device,
         shape: Vec<usize>,
         batches: Arc<Mutex<Vec<usize>>>,
         delay: Duration,
@@ -323,9 +323,21 @@ mod tests {
     }
 
     impl BurnModel for Doubler {
-        fn predict(&self, input: Tensor<2>) -> Result<Tensor<2>> {
-            let [batch, _] = input.dims();
-            self.batches.lock().unwrap().push(batch);
+        fn name(&self) -> &str {
+            "doubler"
+        }
+        fn backend(&self) -> BackendKind {
+            BackendKind::Cpu
+        }
+        fn inputs(&self) -> Vec<IoSpec> {
+            vec![IoSpec::fp32("input", &self.shape)]
+        }
+        fn outputs(&self) -> Vec<IoSpec> {
+            vec![IoSpec::fp32("output", &self.shape)]
+        }
+        fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
+            let input = inputs.into_iter().next().unwrap();
+            self.batches.lock().unwrap().push(input.batch());
             let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(now, Ordering::SeqCst);
             if self.rendezvous > 0 && !self.met.load(Ordering::SeqCst) {
@@ -343,24 +355,14 @@ mod tests {
             }
             std::thread::sleep(self.delay);
             self.running.fetch_sub(1, Ordering::SeqCst);
-            let values = input.clone().into_data().try_to_vec::<f32>().unwrap();
+            let Values::F32(values) = input.values else {
+                panic!("f32 input");
+            };
             assert!(!values.contains(&-1.0), "poisoned input");
-            Ok(input.mul_scalar(2.0))
-        }
-        fn device(&self) -> &Device {
-            &self.device
-        }
-        fn get_input_shape(&self) -> &[usize] {
-            &self.shape
-        }
-        fn get_output_shape(&self) -> &[usize] {
-            &self.shape
-        }
-        fn get_name(&self) -> &str {
-            "doubler"
-        }
-        fn backend(&self) -> BackendKind {
-            BackendKind::Cpu
+            Ok(vec![HostTensor {
+                shape: input.shape,
+                values: Values::F32(values.iter().map(|v| v * 2.0).collect()),
+            }])
         }
     }
 
@@ -396,7 +398,6 @@ mod tests {
         let peak = Arc::new(AtomicUsize::new(0));
         let model = Arc::new(Model::new(
             Box::new(Doubler {
-                device: BackendKind::Cpu.device(),
                 shape: vec![WIDTH],
                 batches: batches.clone(),
                 delay,

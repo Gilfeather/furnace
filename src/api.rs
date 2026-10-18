@@ -363,6 +363,95 @@ impl From<Model> for ServedModel {
     }
 }
 
+/// Serve your own models from Rust, with everything the `furnace` binary does: dynamic
+/// batching, the Open Inference Protocol over HTTP (and gRPC), metrics, readiness, reloads, API
+/// keys, rate limits and TLS, all configured through [`ServerConfig`].
+///
+/// ```ignore
+/// let model = Model::from_fn("digits", BackendKind::Cpu, &[1, 28, 28], &[10],
+///     move |x: Tensor<4>| net.forward(x))?;
+/// Server::new().port(8080).model(model).serve().await?;
+/// ```
+///
+/// [`Server::router`] gives the HTTP API as an axum [`Router`] instead, to mount in your own
+/// application.
+pub struct Server {
+    config: ServerConfig,
+    models: Vec<ServedModel>,
+}
+
+impl Default for Server {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Server {
+    /// A server with [`ServerConfig::default`]: `127.0.0.1:3000`, batching on
+    pub fn new() -> Self {
+        Self::with_config(ServerConfig::default())
+    }
+
+    pub fn with_config(config: ServerConfig) -> Self {
+        Self {
+            config,
+            models: Vec::new(),
+        }
+    }
+
+    pub fn host(mut self, host: &str) -> Self {
+        self.config.host = host.to_string();
+        self
+    }
+
+    pub fn port(mut self, port: u16) -> Self {
+        self.config.port = port;
+        self
+    }
+
+    /// Change any other setting
+    pub fn configure(mut self, change: impl FnOnce(&mut ServerConfig)) -> Self {
+        change(&mut self.config);
+        self
+    }
+
+    /// Serve `model`; the first model added is the one `/predict` uses
+    pub fn model(mut self, model: Model) -> Self {
+        self.models.push(model.into());
+        self
+    }
+
+    /// Serve `model` and let `POST /admin/models/{name}/reload` replace it with what `reload`
+    /// returns (given the request's `weights` path, if any). Needs an admin token in the config.
+    pub fn reloadable_model(
+        mut self,
+        model: Model,
+        reload: impl Fn(Option<&std::path::Path>) -> Result<Model> + Send + Sync + 'static,
+    ) -> Self {
+        self.models.push(ServedModel {
+            model,
+            reload: Some(Arc::new(reload)),
+        });
+        self
+    }
+
+    /// The HTTP API as an axum router, to serve or mount yourself. Panics without a model.
+    pub fn router(self) -> Router {
+        router_with_models(self.models, &self.config)
+    }
+
+    /// Serve until Ctrl-C / SIGTERM
+    pub async fn serve(self) -> Result<()> {
+        if self.models.is_empty() {
+            return Err(ApiError::ServerStartup(
+                "no model to serve; add one with Server::model".to_string(),
+            )
+            .into());
+        }
+        start_server_with_models(self.config, self.models).await
+    }
+}
+
 /// What a reload replaces at once: the model with its batching workers and readiness
 struct Loaded {
     model: Arc<Model>,

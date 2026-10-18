@@ -5,12 +5,14 @@
 [![Burn](https://img.shields.io/badge/burn-0.22-orange)](https://github.com/tracel-ai/burn)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-A small, fast HTTP inference server for ONNX models, written entirely in Rust.
+A small, fast inference server for [Burn](https://github.com/tracel-ai/burn) models, written
+entirely in Rust.
 
-Furnace compiles your ONNX model into Rust at build time (with
-[burn-onnx](https://github.com/tracel-ai/burn-onnx)) and serves it from a single ~5 MB binary.
-No Python, no C++ runtime: the server starts in milliseconds and uses a fraction of the memory
-of a Python stack.
+Serve the Burn model you wrote with a few lines of Rust, or drop an ONNX file in `models/` and
+Furnace compiles it to Burn at build time (with [burn-onnx](https://github.com/tracel-ai/burn-onnx)).
+Either way you get the KServe / Triton protocol over HTTP and gRPC, dynamic batching, metrics,
+TLS and more, from a single small binary. No Python, no C++ runtime: the server starts in
+milliseconds and uses a fraction of the memory of a Python stack.
 
 | ResNet-18 over HTTP, CPU | Batch 1 | Batch 4 | Ready after | Memory (peak private) | Ships as |
 |---|---|---|---|---|---|
@@ -23,7 +25,8 @@ engines and how to reproduce: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ## Features
 
-- **Bring your own ONNX model**: put `foo.onnx` in `models/`, rebuild, run
+- **Serve your own Burn model** from Rust: `Server::new().model(Model::from_fn(...)).serve()`.
+- **Or bring an ONNX model**: put `foo.onnx` in `models/`, rebuild, run
   `furnace --model-name foo`. No hand-written Rust.
 - **Pure Rust**, CPU or GPU: `--backend cpu|wgpu|metal|cuda`.
 - **Weights stay outside the binary** in a memory-mapped `.bpk` file (or embed them with
@@ -76,7 +79,42 @@ curl -X POST http://localhost:3000/predict -H "Content-Type: application/json" \
   --data-binary @resnet18_single_sample.json
 ```
 
-## Your own models
+## Your own Burn models
+
+Furnace is also a library. Add it to your project (the ONNX import is not needed for this):
+
+```toml
+[dependencies]
+furnace-server = { version = "0.9", default-features = false }
+```
+
+A model that takes one float tensor and returns one is served by its `forward` as it is:
+
+```rust
+use burn::tensor::Tensor;
+use furnace::{BackendKind, Model, Server};
+
+#[tokio::main]
+async fn main() -> furnace::Result<()> {
+    let device = BackendKind::Cpu.device();
+    let mut net = DigitNet::new(&device); // your Burn Module
+    furnace::weights::load_burnpack(&mut net, "digits.bpk".as_ref())?;
+
+    let model = Model::from_fn("digits", BackendKind::Cpu, &[1, 28, 28], &[10],
+        move |images: Tensor<4>| net.forward(images))?;
+    Server::new().port(3000).model(model).serve().await
+}
+```
+
+It then answers `POST /predict` and `POST /v2/models/digits/infer`, batching concurrent requests
+together. A model with several inputs or outputs, or integer ones (token ids, masks), implements
+`furnace::BurnModel` to name its tensors and is served on `/v2/models/{name}/infer`.
+[`examples/serve_burn_model`](examples/serve_burn_model/main.rs) runs both kinds:
+`cargo run --release --example serve_burn_model`. `Server::router()` gives an axum router to
+mount in your own app, and `ServerConfig` (via `Server::configure`) sets everything the options
+below do.
+
+## ONNX models
 
 Every `models/<name>.onnx` becomes a built-in model at build time:
 
@@ -87,7 +125,7 @@ cargo build --release
 ```
 
 Inputs and outputs are `float32`, `int64` or `int32` tensors with the batch as their first
-dimension, as many as the model has: an image classifier's one tensor in and out, BERT's token
+dimension, as many as the model has: an image classifier's one tensor in and out, a text model's token
 ids and masks, a detector's several outputs. A model with one `float32` input and one output of
 fixed shapes is served on `/predict` too, with dynamic batching; any other takes its named
 tensors on [`/v2/models/{model}/infer`](docs/API.md#models-with-several-inputs-or-outputs).

@@ -203,28 +203,16 @@ pub fn render_registry(specs: &[ModelSpec]) -> String {
         out.push_str("use crate::tensor::HostTensor;\n\n");
     }
     for spec in specs {
-        let dims = |shape: &[usize]| {
-            shape
-                .iter()
-                .map(usize::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let simple = spec.simple();
-        let shapes = match &simple {
-            Some((input, output)) => format!(", [{}], [{}]", dims(input), dims(output)),
-            None => String::new(),
-        };
         writeln!(
             out,
-            "built_in_model!({module}, {name:?}, {file:?}, {batch:?}{shapes});",
+            "built_in_model!({module}, {name:?}, {file:?}, {batch:?});",
             module = spec.module,
             name = spec.name,
             file = format!("/models/{}.rs", spec.name),
             batch = spec.fixed_batch,
         )
         .unwrap();
-        render_io(&mut out, spec, simple.is_some());
+        render_io(&mut out, spec, spec.simple().is_some());
     }
     out.push_str(
         "\n/// Models compiled into this binary, sorted by name\npub static MODELS: &[ModelEntry] = &[",

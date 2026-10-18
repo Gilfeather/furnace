@@ -60,6 +60,15 @@ pub struct IoSpec {
 }
 
 impl IoSpec {
+    /// A tensor of `dtype` with per-item `shape` (`None` for a dimension each request fixes)
+    pub fn new(name: &str, dtype: DataType, shape: &[Option<usize>]) -> Self {
+        Self {
+            name: name.to_string(),
+            dtype,
+            shape: shape.to_vec(),
+        }
+    }
+
     /// An `f32` tensor with a fixed per-item shape
     pub fn fp32(name: &str, shape: &[usize]) -> Self {
         Self {

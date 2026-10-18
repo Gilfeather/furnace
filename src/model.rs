@@ -99,57 +99,133 @@ pub struct FlatInput {
     pub batch_size: usize,
 }
 
-/// A model that can run inference on flattened `[batch, features]` input.
+/// A model the server can run: what it takes, what it returns, and how to run it.
+///
+/// Implement this for your own Burn model to serve it with every feature of the server (named
+/// tensors over the v2 protocol, metrics, reloads, ...). A model that takes one float tensor and
+/// returns one needs none of this: see [`Model::from_fn`].
+///
+/// ```ignore
+/// #[derive(Debug)]
+/// struct Classifier { net: MyNet, device: Device }
+///
+/// impl BurnModel for Classifier {
+///     fn name(&self) -> &str { "classifier" }
+///     fn backend(&self) -> BackendKind { BackendKind::Cpu }
+///     fn inputs(&self) -> Vec<IoSpec> {
+///         vec![IoSpec::new("input_ids", DataType::Int64, &[Some(128)]),
+///              IoSpec::new("attention_mask", DataType::Int64, &[Some(128)])]
+///     }
+///     fn outputs(&self) -> Vec<IoSpec> { vec![IoSpec::fp32("logits", &[2])] }
+///     fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
+///         let [ids, mask] = <[HostTensor; 2]>::try_from(inputs).unwrap();
+///         let logits = self.net.forward(ids.into_int::<2>(&self.device)?,
+///                                       mask.into_int::<2>(&self.device)?);
+///         Ok(vec![HostTensor::from_float(logits)?])
+///     }
+/// }
+/// ```
 pub trait BurnModel: Send + Sync + std::fmt::Debug {
-    fn predict(&self, input: Tensor<2>) -> Result<Tensor<2>>;
-    /// Device the model's weights live on; inputs are created here.
-    fn device(&self) -> &Device;
-    /// Per-item input shape (without the batch dimension)
-    fn get_input_shape(&self) -> &[usize];
-    /// Per-item output shape (without the batch dimension)
-    fn get_output_shape(&self) -> &[usize];
-    fn get_name(&self) -> &str;
+    /// The name clients use: `/v2/models/{name}`, `/models/{name}/predict`
+    fn name(&self) -> &str;
+
+    /// The backend the model runs on, as reported by `/model/info`
     fn backend(&self) -> BackendKind;
 
-    /// The model's inputs in the order [`BurnModel::run`] takes them. By default one `f32`
-    /// tensor named `input` with [`BurnModel::get_input_shape`] per item.
-    fn inputs(&self) -> Vec<IoSpec> {
-        vec![IoSpec::fp32("input", self.get_input_shape())]
-    }
+    /// The inputs, in the order [`BurnModel::run`] takes them
+    fn inputs(&self) -> Vec<IoSpec>;
 
-    /// The model's outputs in the order [`BurnModel::run`] returns them
-    fn outputs(&self) -> Vec<IoSpec> {
-        vec![IoSpec::fp32("output", self.get_output_shape())]
-    }
+    /// The outputs, in the order [`BurnModel::run`] returns them
+    fn outputs(&self) -> Vec<IoSpec>;
 
-    /// Batch size the graph was exported with, if static
+    /// Run one batch. The server has already checked the inputs against
+    /// [`BurnModel::inputs`]: one tensor each, in that order, with the batch as the first
+    /// dimension, every fixed dimension as declared, and the same batch size throughout.
+    /// Blocking; the server calls it off the async runtime.
+    fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>>;
+
+    /// The batch size the model was built for, if it takes no other: larger batches are then
+    /// run in chunks of it
     fn fixed_batch(&self) -> Option<usize> {
         None
     }
+}
 
-    /// Run checked inputs, one tensor per entry of [`BurnModel::inputs`], each with the batch
-    /// first. By default through [`BurnModel::predict`], for models with one `f32` input.
-    fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
-        let [input] = <[HostTensor; 1]>::try_from(inputs).map_err(|inputs| {
-            ModelError::InvalidInput(format!("expected 1 input, got {}", inputs.len()))
-        })?;
-        let batch = input.batch();
-        let Values::F32(values) = input.values else {
-            return Err(ModelError::InvalidDataType("expected FP32".to_string()).into());
-        };
-        let per_item = values.len() / batch.max(1);
-        let output = self.predict(Tensor::from_data(
-            TensorData::new(values, [batch, per_item]),
-            self.device(),
-        ))?;
-        let mut shape = vec![batch];
-        shape.extend_from_slice(self.get_output_shape());
-        let flat = HostTensor::from_float(output)?;
-        Ok(vec![HostTensor {
-            shape,
-            values: flat.values,
-        }])
+/// [`Model::from_fn`]: a forward function from one float tensor to one
+struct FnModel<F, const DI: usize, const DO: usize> {
+    name: String,
+    backend: BackendKind,
+    device: Device,
+    input: IoSpec,
+    output: IoSpec,
+    forward: F,
+}
+
+impl<F, const DI: usize, const DO: usize> std::fmt::Debug for FnModel<F, DI, DO> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FnModel")
+            .field("name", &self.name)
+            .field("backend", &self.backend)
+            .finish_non_exhaustive()
     }
+}
+
+impl<F, const DI: usize, const DO: usize> BurnModel for FnModel<F, DI, DO>
+where
+    F: Fn(Tensor<DI>) -> Tensor<DO> + Send + Sync,
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn backend(&self) -> BackendKind {
+        self.backend
+    }
+
+    fn inputs(&self) -> Vec<IoSpec> {
+        vec![self.input.clone()]
+    }
+
+    fn outputs(&self) -> Vec<IoSpec> {
+        vec![self.output.clone()]
+    }
+
+    fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
+        let input = inputs
+            .into_iter()
+            .next()
+            .ok_or_else(|| ModelError::InvalidInput("expected 1 input".to_string()))?;
+        let output = (self.forward)(input.into_float::<DI>(&self.device)?);
+        Ok(vec![HostTensor::from_float(output)?])
+    }
+}
+
+/// One `f32` tensor in, one out, for the models below
+fn single_f32_run(
+    inputs: Vec<HostTensor>,
+    device: &Device,
+    forward: impl FnOnce(Tensor<2>) -> Result<Tensor<2>>,
+    output_shape: &[usize],
+) -> Result<Vec<HostTensor>> {
+    let input = inputs
+        .into_iter()
+        .next()
+        .ok_or_else(|| ModelError::InvalidInput("expected 1 input".to_string()))?;
+    let batch = input.batch();
+    let per_item: usize = input.shape[1..].iter().product();
+    let Values::F32(values) = input.values else {
+        return Err(ModelError::InvalidDataType("expected FP32".to_string()).into());
+    };
+    let output = forward(Tensor::from_data(
+        TensorData::new(values, [batch, per_item]),
+        device,
+    ))?;
+    let mut shape = vec![batch];
+    shape.extend_from_slice(output_shape);
+    Ok(vec![HostTensor {
+        shape,
+        values: HostTensor::from_float(output)?.values,
+    }])
 }
 
 /// File-based MLP model (`.bpk` weights + `.json` metadata)
@@ -173,28 +249,29 @@ impl MlpModel {
 }
 
 impl BurnModel for MlpModel {
-    fn predict(&self, input: Tensor<2>) -> Result<Tensor<2>> {
-        Ok(self.container.predict(input))
-    }
-
-    fn device(&self) -> &Device {
-        self.container.device()
-    }
-
-    fn get_input_shape(&self) -> &[usize] {
-        &self.input_shape
-    }
-
-    fn get_output_shape(&self) -> &[usize] {
-        &self.output_shape
-    }
-
-    fn get_name(&self) -> &str {
+    fn name(&self) -> &str {
         &self.container.metadata.name
     }
 
     fn backend(&self) -> BackendKind {
         self.container.backend
+    }
+
+    fn inputs(&self) -> Vec<IoSpec> {
+        vec![IoSpec::fp32("input", &self.input_shape)]
+    }
+
+    fn outputs(&self) -> Vec<IoSpec> {
+        vec![IoSpec::fp32("output", &self.output_shape)]
+    }
+
+    fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
+        single_f32_run(
+            inputs,
+            self.container.device(),
+            |x| Ok(self.container.predict(x)),
+            &self.output_shape,
+        )
     }
 }
 
@@ -221,36 +298,39 @@ impl DummyModel {
 }
 
 impl BurnModel for DummyModel {
-    fn predict(&self, input: Tensor<2>) -> Result<Tensor<2>> {
-        let [batch_size, _] = input.dims();
-        let output_size = self.output_shape.iter().product::<usize>();
-        Ok(Tensor::from_data(
-            TensorData::new(
-                vec![0.5f32; batch_size * output_size],
-                [batch_size, output_size],
-            ),
-            &self.device,
-        ))
-    }
-
-    fn device(&self) -> &Device {
-        &self.device
-    }
-
-    fn get_input_shape(&self) -> &[usize] {
-        &self.input_shape
-    }
-
-    fn get_output_shape(&self) -> &[usize] {
-        &self.output_shape
-    }
-
-    fn get_name(&self) -> &str {
+    fn name(&self) -> &str {
         &self.name
     }
 
     fn backend(&self) -> BackendKind {
         BackendKind::Cpu
+    }
+
+    fn inputs(&self) -> Vec<IoSpec> {
+        vec![IoSpec::fp32("input", &self.input_shape)]
+    }
+
+    fn outputs(&self) -> Vec<IoSpec> {
+        vec![IoSpec::fp32("output", &self.output_shape)]
+    }
+
+    fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
+        let output_size = self.output_shape.iter().product::<usize>();
+        single_f32_run(
+            inputs,
+            &self.device,
+            |input| {
+                let [batch_size, _] = input.dims();
+                Ok(Tensor::from_data(
+                    TensorData::new(
+                        vec![0.5f32; batch_size * output_size],
+                        [batch_size, output_size],
+                    ),
+                    &self.device,
+                ))
+            },
+            &self.output_shape,
+        )
     }
 }
 
@@ -260,7 +340,6 @@ impl BurnModel for DummyModel {
 #[derive(Debug)]
 pub struct DummyTensorsModel {
     fixed_batch: Option<usize>,
-    device: Device,
     runs: std::sync::atomic::AtomicUsize,
 }
 
@@ -268,7 +347,6 @@ impl DummyTensorsModel {
     pub fn new(fixed_batch: Option<usize>) -> Self {
         Self {
             fixed_batch,
-            device: BackendKind::Cpu.device(),
             runs: std::sync::atomic::AtomicUsize::new(0),
         }
     }
@@ -280,23 +358,7 @@ impl DummyTensorsModel {
 }
 
 impl BurnModel for DummyTensorsModel {
-    fn predict(&self, _input: Tensor<2>) -> Result<Tensor<2>> {
-        Err(ModelError::InferenceFailed("takes named tensors".to_string()).into())
-    }
-
-    fn device(&self) -> &Device {
-        &self.device
-    }
-
-    fn get_input_shape(&self) -> &[usize] {
-        &[]
-    }
-
-    fn get_output_shape(&self) -> &[usize] {
-        &[]
-    }
-
-    fn get_name(&self) -> &str {
+    fn name(&self) -> &str {
         "tensors"
     }
 
@@ -393,6 +455,56 @@ fn tensor_spec(spec: Option<&IoSpec>) -> TensorSpec {
 }
 
 impl Model {
+    /// Serve your own model (see [`BurnModel`])
+    pub fn custom(model: impl BurnModel + 'static) -> Self {
+        Self::new(Box::new(model), "burn", 0)
+    }
+
+    /// Serve a Burn forward function that takes one float tensor of rank `DI` (batch first) and
+    /// returns one of rank `DO`, e.g. a `Module`'s `forward`. `input_shape` and `output_shape` are
+    /// the per-item shapes, without the batch dimension. Such a model also serves `/predict`
+    /// and batches concurrent requests together.
+    ///
+    /// ```ignore
+    /// let device = BackendKind::Cpu.device();
+    /// let net = MyNet::new(&device); // load weights with furnace::weights::load_burnpack
+    /// let model = Model::from_fn("digits", BackendKind::Cpu, &[1, 28, 28], &[10],
+    ///     move |x: Tensor<4>| net.forward(x))?;
+    /// ```
+    pub fn from_fn<const DI: usize, const DO: usize, F>(
+        name: &str,
+        backend: BackendKind,
+        input_shape: &[usize],
+        output_shape: &[usize],
+        forward: F,
+    ) -> Result<Self>
+    where
+        F: Fn(Tensor<DI>) -> Tensor<DO> + Send + Sync + 'static,
+    {
+        for (what, shape, rank) in [("input", input_shape, DI), ("output", output_shape, DO)] {
+            if shape.len() + 1 != rank {
+                return Err(ModelError::InvalidArgument {
+                    arg: format!("{what}_shape"),
+                    value: format!("{shape:?}"),
+                    reason: format!(
+                        "the forward function's {what} has rank {rank}, so the per-item shape \
+                         needs {} dimensions (the batch comes first)",
+                        rank.saturating_sub(1)
+                    ),
+                }
+                .into());
+            }
+        }
+        Ok(Self::custom(FnModel {
+            name: name.to_string(),
+            backend,
+            device: backend.device(),
+            input: IoSpec::fp32("input", input_shape),
+            output: IoSpec::fp32("output", output_shape),
+            forward,
+        }))
+    }
+
     pub fn new(inner: Box<dyn BurnModel>, model_type: &'static str, model_size_bytes: u64) -> Self {
         let inputs = inner.inputs();
         let outputs = inner.outputs();
@@ -404,7 +516,7 @@ impl Model {
             _ => false,
         };
         let info = ModelInfo {
-            name: inner.get_name().to_string(),
+            name: inner.name().to_string(),
             version: "1.0.0".to_string(),
             input_spec: tensor_spec(inputs.first()),
             output_spec: tensor_spec(outputs.first()),
@@ -819,29 +931,27 @@ impl Model {
     }
 
     fn forward(&self, input: Vec<f32>, batch_size: usize) -> std::result::Result<Vec<f32>, String> {
-        let input_size: usize = self.info.input_spec.shape.iter().product();
-        let input_tensor = Tensor::from_data(
-            TensorData::new(input, [batch_size, input_size]),
-            self.inner.device(),
-        );
-
-        let output = self
-            .inner
-            .predict(input_tensor)
+        let mut shape = vec![batch_size];
+        shape.extend_from_slice(&self.info.input_spec.shape);
+        let input = HostTensor {
+            shape,
+            values: Values::F32(input),
+        };
+        let outputs = self
+            .run_in_chunks(vec![input], batch_size)
             .map_err(|e| e.to_string())?;
-
         let output_size: usize = self.info.output_spec.shape.iter().product();
-        let [out_batch, out_size] = output.dims();
-        if out_batch != batch_size || out_size != output_size {
-            return Err(format!(
-                "model returned shape [{out_batch}, {out_size}], expected [{batch_size}, {output_size}]"
-            ));
+        match outputs.into_iter().next() {
+            Some(HostTensor {
+                values: Values::F32(values),
+                ..
+            }) if values.len() == batch_size * output_size => Ok(values),
+            Some(output) => Err(format!(
+                "model returned shape {:?}, expected [{batch_size}, ..{:?}]",
+                output.shape, self.info.output_spec.shape
+            )),
+            None => Err("model returned no output".to_string()),
         }
-
-        output
-            .into_data()
-            .try_into_vec::<f32>()
-            .map_err(|e| format!("{e:?}"))
     }
 
     pub fn get_info(&self) -> &ModelInfo {

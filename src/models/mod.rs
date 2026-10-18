@@ -57,77 +57,10 @@ pub fn missing_input(expected: usize) -> FurnaceError {
 
 /// Defines module `$module` with the burn-onnx code generated for one model and a `Served`
 /// wrapper implementing [`BurnModel`]. The registry adds `Served::INPUTS`, `Served::OUTPUTS` and
-/// `Served::run_generated`. With per-item shapes given, the model is simple (one `f32` tensor
-/// in and one out) and also gets the flattened `[batch, features]` path used with batching.
+/// `Served::run_generated`, which calls the generated `forward`.
 #[allow(unused_macros)] // builds without models
 macro_rules! built_in_model {
-    (
-        $module:ident, $name:literal, $file:literal, $fixed_batch:expr,
-        [$($in_dim:literal),+], [$($out_dim:literal),+]
-    ) => {
-        built_in_model!(@module $module, $name, $file, $fixed_batch, {
-            const INPUT_SHAPE: &[usize] = &[$($in_dim),+];
-            const OUTPUT_SHAPE: &[usize] = &[$($out_dim),+];
-            const INPUT_SIZE: usize = 1 $(* $in_dim)+;
-            const OUTPUT_SIZE: usize = 1 $(* $out_dim)+;
-
-            impl Served {
-                fn forward(&self, input: Tensor<2>, batch_size: usize) -> Tensor<2> {
-                    let output = self.model.forward(input.reshape([batch_size, $($in_dim),+]));
-                    output.reshape([batch_size, OUTPUT_SIZE])
-                }
-
-                fn predict_flat(&self, input: Tensor<2>) -> Result<Tensor<2>> {
-                    let [batch_size, input_size] = input.dims();
-                    if input_size != INPUT_SIZE {
-                        return Err(ModelError::InputValidation {
-                            expected: INPUT_SHAPE.to_vec(),
-                            actual: vec![input_size],
-                        }
-                        .into());
-                    }
-                    match FIXED_BATCH {
-                        // Exported with a static batch size, which reshapes inside the graph may
-                        // depend on: feed it batches of exactly that size
-                        Some(chunk) if chunk != batch_size => {
-                            if batch_size % chunk != 0 {
-                                return Err(ModelError::InputValidation {
-                                    expected: vec![chunk],
-                                    actual: vec![batch_size],
-                                }
-                                .into());
-                            }
-                            let outputs = input
-                                .split(chunk, 0)
-                                .into_iter()
-                                .map(|part| self.forward(part, chunk))
-                                .collect();
-                            Ok(Tensor::cat(outputs, 0))
-                        }
-                        _ => Ok(self.forward(input, batch_size)),
-                    }
-                }
-            }
-        });
-    };
     ($module:ident, $name:literal, $file:literal, $fixed_batch:expr) => {
-        built_in_model!(@module $module, $name, $file, $fixed_batch, {
-            const INPUT_SHAPE: &[usize] = &[];
-            const OUTPUT_SHAPE: &[usize] = &[];
-
-            impl Served {
-                fn predict_flat(&self, _input: Tensor<2>) -> Result<Tensor<2>> {
-                    Err(ModelError::InferenceFailed(format!(
-                        "model '{}' has several or non-f32 inputs or outputs; send its named \
-                         tensors to /v2/models/{}/infer",
-                        $name, $name
-                    ))
-                    .into())
-                }
-            }
-        });
-    };
-    (@module $module:ident, $name:literal, $file:literal, $fixed_batch:expr, { $($shape_items:item)* }) => {
         pub mod $module {
             #[allow(clippy::all, unused)]
             mod generated {
@@ -135,7 +68,7 @@ macro_rules! built_in_model {
             }
             pub use generated::Model;
 
-            use burn::tensor::{Device, Tensor};
+            use burn::tensor::Device;
             use std::path::Path;
 
             use crate::backend::BackendKind;
@@ -143,15 +76,11 @@ macro_rules! built_in_model {
             use crate::model::BurnModel;
             use crate::tensor::{HostTensor, IoSpec};
 
-            const FIXED_BATCH: Option<usize> = $fixed_batch;
-
-            $($shape_items)*
-
             pub const ENTRY: super::ModelEntry = super::ModelEntry {
                 name: $name,
                 inputs: Served::INPUTS,
                 outputs: Served::OUTPUTS,
-                fixed_batch: FIXED_BATCH,
+                fixed_batch: $fixed_batch,
                 load: |backend, weights| Ok(Box::new(Served::load(backend, weights)?)),
             };
 
@@ -197,32 +126,12 @@ macro_rules! built_in_model {
             }
 
             impl BurnModel for Served {
-                fn predict(&self, input: Tensor<2>) -> Result<Tensor<2>> {
-                    self.predict_flat(input)
-                }
-
-                fn device(&self) -> &Device {
-                    &self.device
-                }
-
-                fn get_input_shape(&self) -> &[usize] {
-                    INPUT_SHAPE
-                }
-
-                fn get_output_shape(&self) -> &[usize] {
-                    OUTPUT_SHAPE
-                }
-
-                fn get_name(&self) -> &str {
+                fn name(&self) -> &str {
                     $name
                 }
 
                 fn backend(&self) -> BackendKind {
                     self.backend
-                }
-
-                fn fixed_batch(&self) -> Option<usize> {
-                    FIXED_BATCH
                 }
 
                 fn inputs(&self) -> Vec<IoSpec> {
@@ -235,6 +144,10 @@ macro_rules! built_in_model {
 
                 fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
                     self.run_generated(inputs)
+                }
+
+                fn fixed_batch(&self) -> Option<usize> {
+                    $fixed_batch
                 }
             }
         }
@@ -549,9 +462,7 @@ mod tests {
         let (inputs, outputs) = image_classifier();
         let source = render_registry(&[model_spec("my-net", &inputs, &outputs).unwrap()]);
         assert!(
-            source.contains(
-                r#"built_in_model!(my_net, "my-net", "/models/my-net.rs", None, [3, 224, 224], [1000]);"#
-            ),
+            source.contains(r#"built_in_model!(my_net, "my-net", "/models/my-net.rs", None);"#),
             "{source}"
         );
         // A simple model keeps the names input and output
