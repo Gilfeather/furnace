@@ -66,6 +66,7 @@ impl SentimentNet {
 #[derive(Debug)]
 pub struct Sentiment {
     pub net: SentimentNet,
+    pub backend: BackendKind,
     pub device: Device,
     pub seq_len: usize,
 }
@@ -76,7 +77,7 @@ impl BurnModel for Sentiment {
     }
 
     fn backend(&self) -> BackendKind {
-        BackendKind::Cpu
+        self.backend
     }
 
     fn inputs(&self) -> Vec<IoSpec> {

@@ -68,6 +68,7 @@ fn app() -> (axum::Router, DigitNet, SentimentNet) {
         )
         .model(Model::custom(Sentiment {
             net: sentiment.clone(),
+            backend,
             device,
             seq_len: 8,
         }))
