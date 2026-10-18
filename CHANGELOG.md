@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Furnace is now a library for serving your own Burn models too, not only ONNX files.
+## [0.9.0] - 2026-10-18
+
+Furnace is now a library for serving your own Burn models too, not only ONNX files: a
+`forward` function, or any model of named tensors (several inputs and outputs, `int64` token
+ids and masks), with everything the server does, batching included.
 
 ### Added
 - Serve models written in Burn from your own Rust code: `furnace::Server` (builder, or

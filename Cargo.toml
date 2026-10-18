@@ -2,7 +2,7 @@
 # Published as `furnace-server` (the `furnace` crate name belongs to another project); the
 # library and the binary are both still called `furnace`.
 name = "furnace-server"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Furnace Contributors"]
