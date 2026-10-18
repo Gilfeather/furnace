@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Furnace is now a library for serving your own Burn models too, not only ONNX files.
+
+### Added
+- Serve models written in Burn from your own Rust code: `furnace::Server` (builder, or
+  `router()` to mount the HTTP API in your app), `Model::from_fn` for a `forward` from one float
+  tensor to one (with `/predict` and dynamic batching), and `Model::custom` for any
+  `furnace::BurnModel`. `examples/serve_burn_model` serves a CNN and a text classifier with
+  integer inputs
+- Models with several inputs or outputs, `int64` / `int32` inputs, and dimensions fixed per
+  request. They take named tensors on `/v2/models/{model}/infer` (HTTP and gRPC), in
+  JSON or binary, return every output or those requested, and describe their tensors in the
+  model metadata and `/model/info` (`inputs`, `outputs`). Models with one `float32` input and
+  output work as before, `/predict` and dynamic batching included
+
+### Changed
+- `furnace::BurnModel`, the trait a served model implements, is now `name`, `backend`,
+  `inputs`, `outputs` and `run` (plus an optional `fixed_batch`): named tensors in host memory
+  instead of a flattened `Tensor<2>`. `predict`, `device`, `get_input_shape`,
+  `get_output_shape` and `get_name` are gone
+
 ## [0.8.0] - 2026-10-18
 
 Furnace grows from a fast model server into a production one. KServe and Triton clients work

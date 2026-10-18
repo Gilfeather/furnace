@@ -216,14 +216,14 @@ over HTTP, so clients written for NVIDIA Triton or KServe work unchanged:
 |---|---|
 | `GET /v2` | Server metadata (`extensions: ["binary_tensor_data"]`) |
 | `GET /v2/health/live`, `GET /v2/health/ready` | Liveness, readiness (same as `/healthz`, `/readyz`) |
-| `GET /v2/models/{model}[/versions/1]` | Model metadata: input `input`, output `output`, FP32, batch dimension `-1` |
+| `GET /v2/models/{model}[/versions/1]` | Model metadata: inputs and outputs with datatypes and shapes, `-1` for the batch |
 | `GET /v2/models/{model}[/versions/1]/ready` | Model readiness |
 | `POST /v2/models/{model}[/versions/1]/infer` | Inference |
 
-`{model}` is the served model's name (`resnet18`) and its only version is `1`. Inference takes
-one `FP32` tensor named `input` with shape `[batch, ...]` (or the item shape alone), with `data`
-flat or nested, and goes through the same batching, limits, timeout and metrics as
-`/predict`. Triton's binary tensor data extension, which `tritonclient.http` uses by default, is
+`{model}` is the served model's name (`resnet18`) and its only version is `1`. A model with one
+`float32` input and output takes one `FP32` tensor named `input` with shape `[batch, ...]` (or
+the item shape alone), with `data` flat or nested, and goes through the same batching, limits,
+timeout and metrics as `/predict`. Other models take named tensors; see below. Triton's binary tensor data extension, which `tritonclient.http` uses by default, is
 supported in both directions.
 
 ```python
@@ -239,6 +239,38 @@ logits = result.as_numpy("output")     # shape (2, 1000)
 ```
 
 Errors are `{"error": "..."}` (with Furnace's `code`, `details` and `timestamp` alongside).
+
+### Models with several inputs or outputs
+
+A model with several inputs or outputs, integer tensors, or dimensions fixed only per request
+takes its tensors by name. `GET /v2/models/{model}` lists them, e.g. for a text classifier:
+
+```json
+{ "name": "classifier",
+  "inputs":  [ { "name": "input_ids",      "datatype": "INT64", "shape": [-1, 128] },
+               { "name": "attention_mask", "datatype": "INT64", "shape": [-1, 128] } ],
+  "outputs": [ { "name": "logits",         "datatype": "FP32",  "shape": [-1, 2] } ] }
+```
+
+Send every input, in any order, as `FP32`, `INT64` or `INT32` (taken for `INT64` inputs) in JSON
+or as binary tensor data. Every output comes back unless `outputs` names some. Each request is
+one forward pass: these models are not batched with other requests. They are not served on
+`/predict`, which answers `400 NAMED_TENSORS_REQUIRED` pointing here. The CPU backend computes
+integers in 32 bits, so an integer input outside the `i32` range gets `400`.
+
+```python
+import numpy as np
+import tritonclient.http as httpclient
+
+client = httpclient.InferenceServerClient(url="localhost:3000")
+ids = np.array([[101, 7592, 2088, 102] + [0] * 124], dtype=np.int64)
+inputs = []
+for name, value in [("input_ids", ids), ("attention_mask", (ids != 0).astype(np.int64))]:
+    tensor = httpclient.InferInput(name, list(value.shape), "INT64")
+    tensor.set_data_from_numpy(value)
+    inputs.append(tensor)
+logits = client.infer("classifier", inputs).as_numpy("logits")
+```
 
 ### Over gRPC
 

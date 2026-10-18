@@ -47,6 +47,10 @@ pub enum ModelError {
     #[error("Invalid input data type: {0}")]
     InvalidDataType(String),
 
+    /// A named input tensor that does not fit the model (multi-tensor models)
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
     #[error("Invalid argument '{arg}': {value} - {reason}")]
     InvalidArgument {
         arg: String,
@@ -161,6 +165,9 @@ impl IntoResponse for FurnaceError {
                     msg.clone(),
                     None,
                 ),
+                ModelError::InvalidInput(msg) => {
+                    (StatusCode::BAD_REQUEST, "INVALID_INPUT", msg.clone(), None)
+                }
                 ModelError::InvalidArgument { arg, value, reason } => (
                     StatusCode::BAD_REQUEST,
                     "INVALID_ARGUMENT",

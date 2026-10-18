@@ -10,8 +10,12 @@ use std::net::SocketAddr;
 
 use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status};
 
-use super::v2::{INPUT_NAME, MODEL_VERSION, OUTPUT_NAME, check_input, resolve_model};
+use super::v2::{
+    INPUT_NAME, MODEL_VERSION, OUTPUT_NAME, check_input, decode_raw, encode_raw, match_input,
+    request_shape, resolve_model, select_outputs, values_datatype,
+};
 use super::*;
+use crate::tensor::{DataType, HostTensor, Values};
 
 /// Types and service generated from proto/open_inference_grpc.proto
 pub mod pb {
@@ -167,25 +171,22 @@ impl GrpcInferenceService for Service {
             .map_err(Status::not_found)?;
         let loaded = slot.get();
         let info = loaded.model.get_info();
-        let with_batch = |shape: &[usize]| {
-            std::iter::once(-1)
-                .chain(shape.iter().map(|&d| d as i64))
+        let metadata = |tensors: &[crate::tensor::TensorInfo]| {
+            tensors
+                .iter()
+                .map(|t| TensorMetadata {
+                    name: t.name.clone(),
+                    datatype: t.datatype.clone(),
+                    shape: t.shape.clone(),
+                })
                 .collect()
         };
         Ok(GrpcResponse::new(pb::ModelMetadataResponse {
             name: info.name.clone(),
             versions: vec![MODEL_VERSION.to_string()],
             platform: format!("furnace_{}", info.model_type),
-            inputs: vec![TensorMetadata {
-                name: INPUT_NAME.to_string(),
-                datatype: "FP32".to_string(),
-                shape: with_batch(&info.input_spec.shape),
-            }],
-            outputs: vec![TensorMetadata {
-                name: OUTPUT_NAME.to_string(),
-                datatype: "FP32".to_string(),
-                shape: with_batch(&info.output_spec.shape),
-            }],
+            inputs: metadata(&info.inputs),
+            outputs: metadata(&info.outputs),
             properties: Default::default(),
         }))
     }
@@ -217,6 +218,9 @@ async fn infer(
     let slot = resolve_model(state, &request.model_name, &request.model_version)
         .map_err(Status::not_found)?;
     let loaded = slot.get();
+    if !loaded.model.is_simple() {
+        return infer_named(state, &slot, &loaded, request).await;
+    }
     let arrival = loaded.batcher.as_ref().map(Batcher::arrival);
     let [input] = request.inputs.as_mut_slice() else {
         return Err(Status::invalid_argument(format!(
@@ -273,21 +277,10 @@ async fn infer(
         .clone()
         .try_acquire_owned()
         .map_err(|_| Status::resource_exhausted("Too many concurrent requests, retry later"))?;
-    let output = match run_inference(state, &loaded, arrival, data, batch_size, permit).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => {
-            return Err(match e {
-                FurnaceError::Model(
-                    ModelError::InputValidation { .. } | ModelError::InvalidDataType(_),
-                ) => Status::invalid_argument(e.to_string()),
-                _ => Status::internal(e.to_string()),
-            });
-        }
-        Err(response) if response.status() == StatusCode::GATEWAY_TIMEOUT => {
-            return Err(Status::deadline_exceeded("Inference exceeded the timeout"));
-        }
-        Err(_) => return Err(Status::internal("Inference failed")),
-    };
+    let output = run_inference(state, &loaded, arrival, data, batch_size, permit)
+        .await
+        .map_err(|response| response_status(&response))?
+        .map_err(error_status)?;
     state.observe_inference(&slot, start.elapsed());
 
     let info = loaded.model.get_info();
@@ -311,6 +304,141 @@ async fn infer(
             contents: None,
         }],
         raw_output_contents: vec![raw],
+    })
+}
+
+/// The gRPC status for a failed inference
+fn error_status(e: FurnaceError) -> Status {
+    match e {
+        FurnaceError::Model(
+            ModelError::InputValidation { .. }
+            | ModelError::InvalidDataType(_)
+            | ModelError::InvalidInput(_),
+        ) => Status::invalid_argument(e.to_string()),
+        _ => Status::internal(e.to_string()),
+    }
+}
+
+/// The gRPC status for an HTTP error response of the shared inference path
+fn response_status(response: &Response) -> Status {
+    if response.status() == StatusCode::GATEWAY_TIMEOUT {
+        Status::deadline_exceeded("Inference exceeded the timeout")
+    } else {
+        Status::internal("Inference failed")
+    }
+}
+
+/// Inference for a model of named tensors: `raw_input_contents` (one per input, as
+/// `tritonclient.grpc` sends them) or typed `contents`; outputs as `raw_output_contents`
+async fn infer_named(
+    state: &ServerState,
+    slot: &ModelSlot,
+    loaded: &Loaded,
+    mut request: pb::ModelInferRequest,
+) -> std::result::Result<pb::ModelInferResponse, Status> {
+    let model = &loaded.model;
+    let mut tensors: Vec<Option<HostTensor>> = vec![None; model.inputs().len()];
+    let raw_inputs = std::mem::take(&mut request.raw_input_contents);
+    if !raw_inputs.is_empty() && raw_inputs.len() != request.inputs.len() {
+        return Err(Status::invalid_argument(format!(
+            "{} raw_input_contents for {} inputs",
+            raw_inputs.len(),
+            request.inputs.len()
+        )));
+    }
+    for (i, input) in request.inputs.iter_mut().enumerate() {
+        let (index, wire) =
+            match_input(model, &input.name, &input.datatype).map_err(Status::invalid_argument)?;
+        if tensors[index].is_some() {
+            return Err(Status::invalid_argument(format!(
+                "Input '{}' is given twice",
+                input.name
+            )));
+        }
+        let shape = request_shape(model, index, &input.shape).map_err(Status::invalid_argument)?;
+        let elements: usize = shape.iter().product();
+        let values = match raw_inputs.get(i) {
+            Some(raw) => {
+                if raw.len() != elements * wire.size() {
+                    return Err(Status::invalid_argument(format!(
+                        "Input '{}': raw_input_contents has {} bytes; shape {:?} of {} needs {}",
+                        input.name,
+                        raw.len(),
+                        input.shape,
+                        wire.v2_name(),
+                        elements * wire.size()
+                    )));
+                }
+                decode_raw(wire, raw)
+            }
+            None => {
+                let contents = input.contents.take().unwrap_or_default();
+                let values = match wire {
+                    DataType::Fp32 => Values::F32(contents.fp32_contents),
+                    DataType::Int64 => Values::I64(contents.int64_contents),
+                    DataType::Int32 => {
+                        Values::I64(contents.int_contents.into_iter().map(i64::from).collect())
+                    }
+                };
+                if values.len() != elements {
+                    return Err(Status::invalid_argument(format!(
+                        "Input '{}' has shape {:?} ({elements} elements) but {} values",
+                        input.name,
+                        input.shape,
+                        values.len()
+                    )));
+                }
+                values
+            }
+        };
+        tensors[index] = Some(HostTensor { shape, values });
+    }
+    let inputs = tensors
+        .into_iter()
+        .zip(model.inputs())
+        .map(|(tensor, spec)| {
+            tensor.ok_or_else(|| Status::invalid_argument(format!("Missing input '{}'", spec.name)))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let selected = select_outputs(
+        model,
+        request.outputs.iter().map(|o| (o.name.as_str(), true)),
+        true,
+    )
+    .map_err(Status::invalid_argument)?;
+
+    let start = Instant::now();
+    let permit = state
+        .inference_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| Status::resource_exhausted("Too many concurrent requests, retry later"))?;
+    let outputs = run_general(state, loaded, inputs, permit)
+        .await
+        .map_err(|response| response_status(&response))?
+        .map_err(error_status)?;
+    state.observe_inference(slot, start.elapsed());
+
+    let mut tensors = Vec::with_capacity(selected.len());
+    let mut raw = Vec::with_capacity(selected.len());
+    for (index, _) in selected {
+        let output = &outputs[index];
+        tensors.push(InferOutputTensor {
+            name: model.outputs()[index].name.clone(),
+            datatype: values_datatype(&output.values).v2_name().to_string(),
+            shape: output.shape.iter().map(|&d| d as i64).collect(),
+            parameters: Default::default(),
+            contents: None,
+        });
+        raw.push(encode_raw(&output.values));
+    }
+    Ok(pb::ModelInferResponse {
+        model_name: model.get_info().name.clone(),
+        model_version: MODEL_VERSION.to_string(),
+        id: request.id,
+        parameters: Default::default(),
+        outputs: tensors,
+        raw_output_contents: raw,
     })
 }
 
@@ -377,6 +505,114 @@ mod tests {
             "{}",
             status.message()
         );
+    }
+
+    #[tokio::test]
+    async fn named_tensors() {
+        let model = Model::new(
+            Box::new(crate::model::DummyTensorsModel::new(None)),
+            "dummy",
+            0,
+        );
+        let mut client =
+            client_for(server_state(vec![model.into()], &ServerConfig::default())).await;
+        let metadata = client
+            .model_metadata(pb::ModelMetadataRequest {
+                name: "tensors".to_string(),
+                version: String::new(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(metadata.inputs[0].name, "ids");
+        assert_eq!(metadata.inputs[0].datatype, "INT64");
+        assert_eq!(metadata.outputs[1].shape, [-1]);
+
+        let tensor = |name: &str, datatype: &str, shape: Vec<i64>, contents| InferInputTensor {
+            name: name.to_string(),
+            datatype: datatype.to_string(),
+            shape,
+            parameters: Default::default(),
+            contents,
+        };
+        // Raw contents, as tritonclient.grpc sends them
+        let ids: Vec<u8> = [1i64, 2, 3, 4, 5, 6, 7, 8]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let scale: Vec<u8> = [0.5f32, 2.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let request = ModelInferRequest {
+            model_name: "tensors".to_string(),
+            model_version: String::new(),
+            id: "g1".to_string(),
+            parameters: Default::default(),
+            inputs: vec![
+                tensor("ids", "INT64", vec![2, 4], None),
+                tensor("scale", "FP32", vec![2], None),
+            ],
+            outputs: Vec::new(),
+            raw_input_contents: vec![ids, scale],
+        };
+        let response = client.model_infer(request).await.unwrap().into_inner();
+        assert_eq!(response.outputs.len(), 2);
+        assert_eq!(response.outputs[1].datatype, "INT64");
+        assert_eq!(
+            super::super::v2::decode_raw(DataType::Int64, &response.raw_output_contents[1]),
+            Values::I64(vec![10, 26])
+        );
+
+        // Typed contents, with INT32 ids and only one output asked for
+        let request = ModelInferRequest {
+            model_name: "tensors".to_string(),
+            model_version: String::new(),
+            id: String::new(),
+            parameters: Default::default(),
+            inputs: vec![
+                tensor(
+                    "ids",
+                    "INT32",
+                    vec![1, 4],
+                    Some(InferTensorContents {
+                        int_contents: vec![1, 1, 1, 1],
+                        ..Default::default()
+                    }),
+                ),
+                tensor(
+                    "scale",
+                    "FP32",
+                    vec![1],
+                    Some(InferTensorContents {
+                        fp32_contents: vec![3.0],
+                        ..Default::default()
+                    }),
+                ),
+            ],
+            outputs: vec![InferRequestedOutputTensor {
+                name: "scores".to_string(),
+                parameters: Default::default(),
+            }],
+            raw_input_contents: Vec::new(),
+        };
+        let response = client.model_infer(request).await.unwrap().into_inner();
+        assert_eq!(response.outputs.len(), 1);
+        assert_eq!(response.outputs[0].shape, [1, 4]);
+        assert_eq!(
+            super::super::v2::decode_raw(DataType::Fp32, &response.raw_output_contents[0]),
+            Values::F32(vec![3.0; 4])
+        );
+
+        let missing = ModelInferRequest {
+            model_name: "tensors".to_string(),
+            model_version: String::new(),
+            id: String::new(),
+            parameters: Default::default(),
+            inputs: vec![tensor("ids", "INT64", vec![1, 4], None)],
+            outputs: Vec::new(),
+            raw_input_contents: vec![vec![0; 32]],
+        };
+        let status = client.model_infer(missing).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("Missing input 'scale'"));
     }
 
     /// The gRPC service over the pure-Rust TLS, with mutual TLS, reached by a tonic client

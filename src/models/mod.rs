@@ -11,34 +11,56 @@
 use std::path::{Path, PathBuf};
 
 use crate::backend::BackendKind;
-use crate::error::{ModelError, Result};
+use crate::error::{FurnaceError, ModelError, Result};
 use crate::model::BurnModel;
+use crate::tensor::{DataType, IoSpec};
 
 /// Loads a built-in model on a backend, from a weight file or embedded weights
 type LoadFn = fn(BackendKind, Option<&Path>) -> Result<Box<dyn BurnModel>>;
+
+/// A built-in model's input or output, as the registry records it
+#[derive(Debug)]
+pub struct StaticIo {
+    pub name: &'static str,
+    pub dtype: DataType,
+    /// Per-item shape; `None` where the graph leaves the dimension open
+    pub shape: &'static [Option<usize>],
+}
+
+impl StaticIo {
+    pub fn spec(&self) -> IoSpec {
+        IoSpec {
+            name: self.name.to_string(),
+            dtype: self.dtype,
+            shape: self.shape.to_vec(),
+        }
+    }
+}
 
 /// A built-in model in the registry
 #[derive(Debug)]
 pub struct ModelEntry {
     /// Name used with `--model-name` and for the weight file: the ONNX file stem
     pub name: &'static str,
-    /// Per-item input shape (without the batch dimension)
-    pub input_shape: &'static [usize],
-    /// Per-item output shape (without the batch dimension)
-    pub output_shape: &'static [usize],
+    pub inputs: &'static [StaticIo],
+    pub outputs: &'static [StaticIo],
     /// Batch size the graph was exported with, if static; larger batches run in chunks of it
     pub fixed_batch: Option<usize>,
     load: LoadFn,
 }
 
+/// Error for a generated `run_generated` given fewer inputs than its model takes. Inputs are
+/// checked before that, so this only guards against a bug.
+pub fn missing_input(expected: usize) -> FurnaceError {
+    ModelError::InferenceFailed(format!("the model takes {expected} inputs")).into()
+}
+
 /// Defines module `$module` with the burn-onnx code generated for one model and a `Served`
-/// wrapper that adapts its `forward` to the flattened `[batch, features]` [`BurnModel`] API.
+/// wrapper implementing [`BurnModel`]. The registry adds `Served::INPUTS`, `Served::OUTPUTS` and
+/// `Served::run_generated`, which calls the generated `forward`.
 #[allow(unused_macros)] // builds without models
 macro_rules! built_in_model {
-    (
-        $module:ident, $name:literal, $file:literal,
-        [$($in_dim:literal),+], [$($out_dim:literal),+], $fixed_batch:expr
-    ) => {
+    ($module:ident, $name:literal, $file:literal, $fixed_batch:expr) => {
         pub mod $module {
             #[allow(clippy::all, unused)]
             mod generated {
@@ -46,31 +68,26 @@ macro_rules! built_in_model {
             }
             pub use generated::Model;
 
-            use burn::tensor::{Device, Tensor};
+            use burn::tensor::Device;
             use std::path::Path;
 
             use crate::backend::BackendKind;
             use crate::error::{ModelError, Result};
             use crate::model::BurnModel;
-
-            const INPUT_SHAPE: &[usize] = &[$($in_dim),+];
-            const OUTPUT_SHAPE: &[usize] = &[$($out_dim),+];
-            const INPUT_SIZE: usize = 1 $(* $in_dim)+;
-            const OUTPUT_SIZE: usize = 1 $(* $out_dim)+;
-            const FIXED_BATCH: Option<usize> = $fixed_batch;
+            use crate::tensor::{HostTensor, IoSpec};
 
             pub const ENTRY: super::ModelEntry = super::ModelEntry {
                 name: $name,
-                input_shape: INPUT_SHAPE,
-                output_shape: OUTPUT_SHAPE,
-                fixed_batch: FIXED_BATCH,
+                inputs: Served::INPUTS,
+                outputs: Served::OUTPUTS,
+                fixed_batch: $fixed_batch,
                 load: |backend, weights| Ok(Box::new(Served::load(backend, weights)?)),
             };
 
             #[derive(Debug)]
             pub struct Served {
-                model: Model,
-                device: Device,
+                pub(super) model: Model,
+                pub(super) device: Device,
                 backend: BackendKind,
             }
 
@@ -106,63 +123,31 @@ macro_rules! built_in_model {
                         backend,
                     })
                 }
-
-                fn forward(&self, input: Tensor<2>, batch_size: usize) -> Tensor<2> {
-                    let output = self.model.forward(input.reshape([batch_size, $($in_dim),+]));
-                    output.reshape([batch_size, OUTPUT_SIZE])
-                }
             }
 
             impl BurnModel for Served {
-                fn predict(&self, input: Tensor<2>) -> Result<Tensor<2>> {
-                    let [batch_size, input_size] = input.dims();
-                    if input_size != INPUT_SIZE {
-                        return Err(ModelError::InputValidation {
-                            expected: INPUT_SHAPE.to_vec(),
-                            actual: vec![input_size],
-                        }
-                        .into());
-                    }
-                    match FIXED_BATCH {
-                        // Exported with a static batch size, which reshapes inside the graph may
-                        // depend on: feed it batches of exactly that size
-                        Some(chunk) if chunk != batch_size => {
-                            if batch_size % chunk != 0 {
-                                return Err(ModelError::InputValidation {
-                                    expected: vec![chunk],
-                                    actual: vec![batch_size],
-                                }
-                                .into());
-                            }
-                            let outputs = input
-                                .split(chunk, 0)
-                                .into_iter()
-                                .map(|part| self.forward(part, chunk))
-                                .collect();
-                            Ok(Tensor::cat(outputs, 0))
-                        }
-                        _ => Ok(self.forward(input, batch_size)),
-                    }
-                }
-
-                fn device(&self) -> &Device {
-                    &self.device
-                }
-
-                fn get_input_shape(&self) -> &[usize] {
-                    INPUT_SHAPE
-                }
-
-                fn get_output_shape(&self) -> &[usize] {
-                    OUTPUT_SHAPE
-                }
-
-                fn get_name(&self) -> &str {
+                fn name(&self) -> &str {
                     $name
                 }
 
                 fn backend(&self) -> BackendKind {
                     self.backend
+                }
+
+                fn inputs(&self) -> Vec<IoSpec> {
+                    Self::INPUTS.iter().map(super::StaticIo::spec).collect()
+                }
+
+                fn outputs(&self) -> Vec<IoSpec> {
+                    Self::OUTPUTS.iter().map(super::StaticIo::spec).collect()
+                }
+
+                fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
+                    self.run_generated(inputs)
+                }
+
+                fn fixed_batch(&self) -> Option<usize> {
+                    $fixed_batch
                 }
             }
         }
@@ -288,14 +273,14 @@ impl BuiltInModel {
         self.0.name
     }
 
-    /// Per-item input shape (without the batch dimension)
-    pub fn input_shape(&self) -> &'static [usize] {
-        self.0.input_shape
+    /// The model's inputs, in the order its graph takes them
+    pub fn inputs(&self) -> &'static [StaticIo] {
+        self.0.inputs
     }
 
-    /// Per-item output shape (without the batch dimension)
-    pub fn output_shape(&self) -> &'static [usize] {
-        self.0.output_shape
+    /// The model's outputs
+    pub fn outputs(&self) -> &'static [StaticIo] {
+        self.0.outputs
     }
 
     /// Batch size the graph was exported with, if static (see [`ModelEntry::fixed_batch`])
@@ -327,20 +312,44 @@ mod build_registry;
 
 #[cfg(test)]
 mod tests {
-    use super::build_registry::{Io, IoType, ModelSpec, dedup, model_spec, render_registry};
+    use super::build_registry::{
+        Elem, Io, IoDesc, IoType, dedup, model_spec, normalize_name as build_normalize,
+        render_registry,
+    };
     use super::*;
 
-    fn f32_io(name: &str, dims: &[Option<usize>]) -> Io {
+    fn tensor(name: &str, elem: Elem, dims: &[Option<usize>]) -> Io {
         Io {
             name: name.to_string(),
-            ty: IoType::F32Tensor(dims.to_vec()),
+            ty: IoType::Tensor(elem, dims.to_vec()),
         }
     }
 
     fn image_classifier() -> (Vec<Io>, Vec<Io>) {
         (
-            vec![f32_io("data", &[None, Some(3), Some(224), Some(224)])],
-            vec![f32_io("logits", &[Some(1), Some(1000)])],
+            vec![tensor(
+                "data",
+                Elem::F32,
+                &[None, Some(3), Some(224), Some(224)],
+            )],
+            vec![tensor("logits", Elem::F32, &[Some(1), Some(1000)])],
+        )
+    }
+
+    /// The shape of bertsquad-12: four int64 inputs, one of rank 1; outputs of open shape
+    fn bert() -> (Vec<Io>, Vec<Io>) {
+        (
+            vec![
+                tensor("unique_ids", Elem::I64, &[None]),
+                tensor("segment_ids", Elem::I64, &[None, Some(256)]),
+                tensor("input_mask", Elem::I64, &[None, Some(256)]),
+                tensor("input_ids", Elem::I64, &[None, Some(256)]),
+            ],
+            vec![
+                tensor("start_logits", Elem::F32, &[None, None]),
+                tensor("end_logits", Elem::F32, &[None, None]),
+                tensor("unique_ids_out", Elem::I64, &[None]),
+            ],
         )
     }
 
@@ -348,49 +357,82 @@ mod tests {
     fn spec_from_single_float_io() {
         let (inputs, outputs) = image_classifier();
         let spec = model_spec("resnet18", &inputs, &outputs).unwrap();
+        assert_eq!(spec.module, "resnet18");
+        assert_eq!(spec.fixed_batch, None);
         assert_eq!(
-            spec,
-            ModelSpec {
-                name: "resnet18".to_string(),
-                module: "resnet18".to_string(),
-                input_shape: vec![3, 224, 224],
-                output_shape: vec![1000],
-                fixed_batch: None,
-            }
+            spec.inputs,
+            [IoDesc {
+                name: "data".to_string(),
+                elem: Elem::F32,
+                item: vec![Some(3), Some(224), Some(224)],
+            }]
         );
+        assert_eq!(spec.simple(), Some((vec![3, 224, 224], vec![1000])));
 
-        let fixed = [f32_io("data", &[Some(1), Some(3), Some(224), Some(224)])];
+        let fixed = [tensor(
+            "data",
+            Elem::F32,
+            &[Some(1), Some(3), Some(224), Some(224)],
+        )];
         let spec = model_spec("m", &fixed, &outputs).unwrap();
         assert_eq!(spec.fixed_batch, Some(1));
-        assert_eq!(spec.input_shape, [3, 224, 224]);
+        assert!(spec.simple().is_some());
+    }
+
+    #[test]
+    fn spec_for_several_and_integer_tensors() {
+        let (inputs, outputs) = bert();
+        let spec = model_spec("bertsquad", &inputs, &outputs).unwrap();
+        assert_eq!(spec.inputs.len(), 4);
+        assert_eq!(spec.inputs[0].item, []);
+        assert_eq!(spec.inputs[0].rank(), 1);
+        assert_eq!(spec.inputs[3].elem, Elem::I64);
+        assert_eq!(spec.outputs[0].item, [None]);
+        assert_eq!(spec.simple(), None);
+
+        // Open per-item dimensions are fine; so is a second output
+        let (inputs, mut outputs) = image_classifier();
+        outputs.push(tensor("boxes", Elem::F32, &[None, None, Some(4)]));
+        let spec = model_spec("detector", &inputs, &outputs).unwrap();
+        assert_eq!(spec.simple(), None);
+        let dynamic = [tensor("data", Elem::F32, &[None, Some(3), None, None])];
+        let spec = model_spec("m", &dynamic, &outputs[..1]).unwrap();
+        assert_eq!(spec.simple(), None, "open input dims are not simple");
+
+        // int32 inputs become integer tensors too, described as INT32
+        let ids = [tensor("ids", Elem::I32, &[None, Some(8)])];
+        let spec = model_spec("m", &ids, &outputs[..1]).unwrap();
+        assert_eq!(spec.simple(), None);
+        let source = render_registry(&[spec]);
+        assert!(
+            source.contains("let in0 = next()?.into_int::<2>(&self.device)?;"),
+            "{source}"
+        );
+        assert!(source.contains("dtype: DataType::Int32"), "{source}");
     }
 
     #[test]
     fn spec_rejects_unsupported_graphs() {
         let (inputs, outputs) = image_classifier();
-        let two_inputs = [inputs.clone(), inputs.clone()].concat();
-        let err = model_spec("m", &two_inputs, &outputs).unwrap_err();
-        assert!(err.contains("2 inputs (data, data)"), "{err}");
+        assert!(
+            model_spec("m", &[], &outputs)
+                .unwrap_err()
+                .contains("no inputs")
+        );
         assert!(
             model_spec("m", &inputs, &[])
                 .unwrap_err()
-                .contains("0 outputs")
+                .contains("no outputs")
         );
-
-        let int_input = [Io {
-            name: "ids".to_string(),
-            ty: IoType::Other("I64 tensor".to_string()),
+        let boolean = [Io {
+            name: "mask".to_string(),
+            ty: IoType::Other("Bool tensor".to_string()),
         }];
-        let err = model_spec("m", &int_input, &outputs).unwrap_err();
-        assert!(err.contains("'ids' is a I64 tensor"), "{err}");
-
-        let dynamic = [f32_io("data", &[None, Some(3), None, None])];
-        let err = model_spec("m", &dynamic, &outputs).unwrap_err();
-        assert!(err.contains("[?, 3, ?, ?]"), "{err}");
-
-        let rank1 = [f32_io("x", &[None])];
-        let err = model_spec("m", &inputs, &rank1).unwrap_err();
-        assert!(err.contains("rank 1"), "{err}");
+        let err = model_spec("m", &boolean, &outputs).unwrap_err();
+        assert!(err.contains("'mask' is a Bool tensor"), "{err}");
+        let scalar = [tensor("x", Elem::F32, &[])];
+        let err = model_spec("m", &inputs, &scalar).unwrap_err();
+        assert!(err.contains("scalar"), "{err}");
     }
 
     #[test]
@@ -420,18 +462,54 @@ mod tests {
         let (inputs, outputs) = image_classifier();
         let source = render_registry(&[model_spec("my-net", &inputs, &outputs).unwrap()]);
         assert!(
-            source.contains(
-                r#"built_in_model!(my_net, "my-net", "/models/my-net.rs", [3, 224, 224], [1000], None);"#
-            ),
+            source.contains(r#"built_in_model!(my_net, "my-net", "/models/my-net.rs", None);"#),
+            "{source}"
+        );
+        // A simple model keeps the names input and output
+        assert!(
+            source.contains(r#"name: "input", dtype: DataType::Fp32"#),
+            "{source}"
+        );
+        assert!(
+            source.contains("let out0 = self.model.forward(in0);"),
             "{source}"
         );
         assert!(source.contains("my_net::ENTRY,"), "{source}");
+
+        let (inputs, outputs) = bert();
+        let source = render_registry(&[model_spec("bert", &inputs, &outputs).unwrap()]);
+        assert!(
+            source.contains(r#"built_in_model!(bert, "bert", "/models/bert.rs", None);"#),
+            "{source}"
+        );
+        assert!(
+            source.contains("let in0 = next()?.into_int::<1>(&self.device)?;"),
+            "{source}"
+        );
+        assert!(
+            source.contains("let in3 = next()?.into_int::<2>(&self.device)?;"),
+            "{source}"
+        );
+        assert!(
+            source.contains("let (out0, out1, out2) = self.model.forward(in0, in1, in2, in3);"),
+            "{source}"
+        );
+        assert!(
+            source.contains(
+                "HostTensor::from_float::<2>(out0)?, HostTensor::from_float::<2>(out1)?, HostTensor::from_int::<1>(out2)?"
+            ),
+            "{source}"
+        );
+        assert!(
+            source.contains(r#"name: "input_ids", dtype: DataType::Int64, shape: &[Some(256)]"#),
+            "{source}"
+        );
     }
 
     #[test]
     fn name_normalization_matches_build_script() {
         for name in ["ResNet-18", "mobilenet_v2.opt", "MNIST"] {
-            assert_eq!(normalize_name(name), build_registry::normalize_name(name));
+            assert_eq!(normalize_name(name), build_normalize(name));
         }
     }
 
@@ -451,8 +529,8 @@ mod tests {
         for name in names {
             let model = BuiltInModel::from_name(name).unwrap();
             assert_eq!(model.name(), name);
-            assert!(!model.input_shape().is_empty());
-            assert!(!model.output_shape().is_empty());
+            assert!(!model.inputs().is_empty());
+            assert!(!model.outputs().is_empty());
         }
     }
 
@@ -461,16 +539,17 @@ mod tests {
     fn resnet18_is_registered_with_aliases() {
         let model = BuiltInModel::from_name("ResNet-18").unwrap();
         assert_eq!(model.name(), "resnet18");
-        assert_eq!(model.input_shape(), [3, 224, 224]);
-        assert_eq!(model.output_shape(), [1000]);
+        assert_eq!(model.inputs()[0].name, "input");
+        assert_eq!(model.inputs()[0].shape, [Some(3), Some(224), Some(224)]);
+        assert_eq!(model.outputs()[0].shape, [Some(1000)]);
     }
 
     #[cfg(model_mnist)]
     #[test]
     fn mnist_is_registered() {
         let model = BuiltInModel::from_name("mnist").unwrap();
-        assert_eq!(model.input_shape(), [1, 28, 28]);
-        assert_eq!(model.output_shape(), [10]);
+        assert_eq!(model.inputs()[0].shape, [Some(1), Some(28), Some(28)]);
+        assert_eq!(model.outputs()[0].shape, [Some(10)]);
         // mnist-8 is exported with batch 1 and reshapes to [1, 256] inside the graph
         assert_eq!(model.fixed_batch(), Some(1));
     }

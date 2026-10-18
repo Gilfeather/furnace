@@ -1310,6 +1310,8 @@
           "version",
           "input_spec",
           "output_spec",
+          "inputs",
+          "outputs",
           "model_type",
           "backend",
           "created_at",
@@ -1323,10 +1325,33 @@
             "type": "string"
           },
           "input_spec": {
-            "$ref": "#/components/schemas/TensorSpec"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TensorSpec"
+              }
+            ],
+            "description": "The first input; open dimensions are 0. See `inputs` for models with several"
           },
           "output_spec": {
-            "$ref": "#/components/schemas/TensorSpec"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TensorSpec"
+              }
+            ],
+            "description": "The first output; see `outputs`"
+          },
+          "inputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TensorInfo"
+            },
+            "description": "Every input, by the name POST /v2/models/{model}/infer takes. A simple model (one FP32 tensor in, one out) has one named `input`"
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TensorInfo"
+            }
           },
           "model_type": {
             "type": "string",
@@ -1532,14 +1557,18 @@
           },
           "datatype": {
             "type": "string",
-            "example": "FP32"
+            "enum": [
+              "FP32",
+              "INT64",
+              "INT32"
+            ]
           },
           "shape": {
             "type": "array",
             "items": {
               "type": "integer"
             },
-            "description": "-1 for the batch dimension"
+            "description": "-1 for the batch dimension and for dimensions fixed per request"
           }
         }
       },
@@ -1604,7 +1633,8 @@
               "properties": {
                 "name": {
                   "type": "string",
-                  "example": "input"
+                  "example": "input",
+                  "description": "`input` for a simple model; otherwise the model's input names (GET /v2/models/{model})"
                 },
                 "shape": {
                   "type": "array",
@@ -1614,7 +1644,12 @@
                 },
                 "datatype": {
                   "type": "string",
-                  "example": "FP32"
+                  "enum": [
+                    "FP32",
+                    "INT64",
+                    "INT32"
+                  ],
+                  "description": "INT32 is taken for INT64 inputs"
                 },
                 "parameters": {
                   "type": "object"
@@ -1684,7 +1719,11 @@
             "type": "string"
           },
           "datatype": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "FP32",
+              "INT64"
+            ]
           },
           "shape": {
             "type": "array",
@@ -1696,7 +1735,8 @@
             "type": "array",
             "items": {
               "type": "number"
-            }
+            },
+            "description": "Values in row-major order; integers for INT64"
           },
           "parameters": {
             "type": "object"
@@ -1845,6 +1885,34 @@
               }
             ],
             "description": "Successful inference latency, queueing included, in milliseconds"
+          }
+        }
+      },
+      "TensorInfo": {
+        "type": "object",
+        "required": [
+          "name",
+          "datatype",
+          "shape"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "datatype": {
+            "type": "string",
+            "enum": [
+              "FP32",
+              "INT64",
+              "INT32"
+            ]
+          },
+          "shape": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "Full shape: -1 for the batch dimension and for dimensions fixed per request"
           }
         }
       }

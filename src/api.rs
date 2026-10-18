@@ -37,6 +37,7 @@ use crate::model::{FlatInput, MAX_BATCH_SIZE, Model, ModelInfo, ModelStats};
 #[cfg(feature = "image")]
 use crate::preprocess::{ImageKind, image_input_size, preprocess_image};
 use crate::telemetry::{Histogram, Percentiles};
+use crate::tensor::HostTensor;
 
 /// Media type of the raw little-endian `f32` input/output format
 pub const OCTET_STREAM: &str = "application/octet-stream";
@@ -362,6 +363,95 @@ impl From<Model> for ServedModel {
     }
 }
 
+/// Serve your own models from Rust, with everything the `furnace` binary does: dynamic
+/// batching, the Open Inference Protocol over HTTP (and gRPC), metrics, readiness, reloads, API
+/// keys, rate limits and TLS, all configured through [`ServerConfig`].
+///
+/// ```ignore
+/// let model = Model::from_fn("digits", BackendKind::Cpu, &[1, 28, 28], &[10],
+///     move |x: Tensor<4>| net.forward(x))?;
+/// Server::new().port(8080).model(model).serve().await?;
+/// ```
+///
+/// [`Server::router`] gives the HTTP API as an axum [`Router`] instead, to mount in your own
+/// application.
+pub struct Server {
+    config: ServerConfig,
+    models: Vec<ServedModel>,
+}
+
+impl Default for Server {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Server {
+    /// A server with [`ServerConfig::default`]: `127.0.0.1:3000`, batching on
+    pub fn new() -> Self {
+        Self::with_config(ServerConfig::default())
+    }
+
+    pub fn with_config(config: ServerConfig) -> Self {
+        Self {
+            config,
+            models: Vec::new(),
+        }
+    }
+
+    pub fn host(mut self, host: &str) -> Self {
+        self.config.host = host.to_string();
+        self
+    }
+
+    pub fn port(mut self, port: u16) -> Self {
+        self.config.port = port;
+        self
+    }
+
+    /// Change any other setting
+    pub fn configure(mut self, change: impl FnOnce(&mut ServerConfig)) -> Self {
+        change(&mut self.config);
+        self
+    }
+
+    /// Serve `model`; the first model added is the one `/predict` uses
+    pub fn model(mut self, model: Model) -> Self {
+        self.models.push(model.into());
+        self
+    }
+
+    /// Serve `model` and let `POST /admin/models/{name}/reload` replace it with what `reload`
+    /// returns (given the request's `weights` path, if any). Needs an admin token in the config.
+    pub fn reloadable_model(
+        mut self,
+        model: Model,
+        reload: impl Fn(Option<&std::path::Path>) -> Result<Model> + Send + Sync + 'static,
+    ) -> Self {
+        self.models.push(ServedModel {
+            model,
+            reload: Some(Arc::new(reload)),
+        });
+        self
+    }
+
+    /// The HTTP API as an axum router, to serve or mount yourself. Panics without a model.
+    pub fn router(self) -> Router {
+        router_with_models(self.models, &self.config)
+    }
+
+    /// Serve until Ctrl-C / SIGTERM
+    pub async fn serve(self) -> Result<()> {
+        if self.models.is_empty() {
+            return Err(ApiError::ServerStartup(
+                "no model to serve; add one with Server::model".to_string(),
+            )
+            .into());
+        }
+        start_server_with_models(self.config, self.models).await
+    }
+}
+
 /// What a reload replaces at once: the model with its batching workers and readiness
 struct Loaded {
     model: Arc<Model>,
@@ -379,10 +469,14 @@ impl Loaded {
         let ready = loaded.ready.clone();
         std::thread::spawn(move || {
             match model.warm_up() {
-                Ok(elapsed) => info!(
+                Ok(Some(elapsed)) => info!(
                     "🔥 Warm-up inference of {} took {:.1}ms",
                     model.get_info().name,
                     elapsed.as_secs_f64() * 1e3
+                ),
+                Ok(None) => info!(
+                    "No warm-up for {}: an input's shape is only fixed per request",
+                    model.get_info().name
                 ),
                 Err(e) => warn!("Warm-up inference failed: {e}"),
             }
@@ -394,8 +488,8 @@ impl Loaded {
     fn new(model: Model, batching: BatchConfig) -> Self {
         let model = Arc::new(model);
         Self {
-            batcher: batching
-                .enabled()
+            // Only simple models batch: their requests are flat buffers of one shape
+            batcher: (batching.enabled() && model.is_simple())
                 .then(|| Batcher::new(model.clone(), batching)),
             model,
             ready: Arc::new(AtomicBool::new(false)),
@@ -909,6 +1003,24 @@ fn unknown_model_response(state: &ServerState, name: &str) -> Response {
 async fn predict_with(state: &AppState, slot: &ModelSlot, request: Request) -> Response {
     // The model as of now: a reload during this request does not affect it
     let loaded = slot.get();
+    if !loaded.model.is_simple() {
+        let info = loaded.model.get_info();
+        return create_error_response(
+            StatusCode::BAD_REQUEST,
+            "NAMED_TENSORS_REQUIRED",
+            &format!(
+                "Model '{}' takes named tensors ({}); send them to POST /v2/models/{}/infer",
+                info.name,
+                info.inputs
+                    .iter()
+                    .map(|t| format!("{} {}", t.name, t.datatype))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                info.name
+            ),
+            None,
+        );
+    }
     // Tell the batcher a request is on its way in, so a batch about to start can wait
     // for it while its body is received and decoded
     let arrival = loaded.batcher.as_ref().map(Batcher::arrival);
@@ -1026,9 +1138,9 @@ async fn predict_with(state: &AppState, slot: &ModelSlot, request: Request) -> R
                 FurnaceError::Model(ModelError::InputValidation { .. }) => {
                     (StatusCode::BAD_REQUEST, "INPUT_VALIDATION_FAILED")
                 }
-                FurnaceError::Model(ModelError::InvalidDataType(_)) => {
-                    (StatusCode::BAD_REQUEST, "INVALID_INPUT_VALUE")
-                }
+                FurnaceError::Model(
+                    ModelError::InvalidDataType(_) | ModelError::InvalidInput(_),
+                ) => (StatusCode::BAD_REQUEST, "INVALID_INPUT_VALUE"),
                 FurnaceError::Model(ModelError::InferenceFailed(_)) => {
                     (StatusCode::INTERNAL_SERVER_ERROR, "INFERENCE_FAILED")
                 }
@@ -1069,27 +1181,57 @@ async fn run_inference(
     let joined = match state.request_timeout {
         Some(timeout) => match tokio::time::timeout(timeout, task.wait()).await {
             Ok(joined) => joined,
-            Err(_) => {
-                warn!("Inference exceeded timeout of {:?}", timeout);
-                return Err(Box::new(create_error_response(
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "INFERENCE_TIMEOUT",
-                    &format!("Inference exceeded timeout of {}ms", timeout.as_millis()),
-                    None,
-                )));
-            }
+            Err(_) => return Err(Box::new(timeout_response(timeout))),
         },
         None => task.wait().await,
     };
 
-    joined.ok_or_else(|| {
-        Box::new(create_error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INFERENCE_FAILED",
-            "Inference task panicked",
-            None,
-        ))
+    joined.ok_or_else(|| Box::new(panicked_response()))
+}
+
+/// Run one request of named tensors ([`Model::infer`]) on its own blocking thread, under the
+/// timeout. Models with several or non-`f32` tensors are served this way, without batching.
+async fn run_general(
+    state: &ServerState,
+    loaded: &Loaded,
+    inputs: Vec<HostTensor>,
+    permit: OwnedSemaphorePermit,
+) -> std::result::Result<Result<Vec<HostTensor>>, Box<Response>> {
+    let model = loaded.model.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        model.infer(inputs)
+    });
+    let joined = match state.request_timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, task).await {
+            Ok(joined) => joined,
+            Err(_) => return Err(Box::new(timeout_response(timeout))),
+        },
+        None => task.await,
+    };
+    joined.map_err(|e| {
+        error!("Inference task failed: {}", e);
+        Box::new(panicked_response())
     })
+}
+
+fn timeout_response(timeout: Duration) -> Response {
+    warn!("Inference exceeded timeout of {:?}", timeout);
+    create_error_response(
+        StatusCode::GATEWAY_TIMEOUT,
+        "INFERENCE_TIMEOUT",
+        &format!("Inference exceeded timeout of {}ms", timeout.as_millis()),
+        None,
+    )
+}
+
+fn panicked_response() -> Response {
+    create_error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "INFERENCE_FAILED",
+        "Inference task panicked",
+        None,
+    )
 }
 
 /// An inference in progress: queued for the batcher, or on its own blocking thread
@@ -1872,15 +2014,20 @@ async fn reload_model(
             ))
             .into());
         }
-        if info.input_spec.shape != previous_info.input_spec.shape
-            || info.output_spec.shape != previous_info.output_spec.shape
-        {
+        if info.inputs != previous_info.inputs || info.outputs != previous_info.outputs {
+            let describe = |tensors: &[crate::tensor::TensorInfo]| {
+                tensors
+                    .iter()
+                    .map(|t| format!("{} {} {:?}", t.name, t.datatype, t.shape))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
             return Err(ModelError::InvalidFormat(format!(
-                "The reloaded model takes {:?} -> {:?}, the served one {:?} -> {:?}",
-                info.input_spec.shape,
-                info.output_spec.shape,
-                previous_info.input_spec.shape,
-                previous_info.output_spec.shape
+                "The reloaded model takes [{}] -> [{}], the served one [{}] -> [{}]",
+                describe(&info.inputs),
+                describe(&info.outputs),
+                describe(&previous_info.inputs),
+                describe(&previous_info.outputs)
             ))
             .into());
         }
@@ -1891,7 +2038,7 @@ async fn reload_model(
             .warm_up()
             .map_err(ModelError::InferenceFailed)?;
         loaded.ready.store(true, Ordering::Release);
-        Ok((loaded, warm_up.as_secs_f64() * 1e3))
+        Ok((loaded, warm_up.map_or(0.0, |d| d.as_secs_f64() * 1e3)))
     });
     match task.await {
         Ok(Ok((loaded, warm_up_ms))) => {
@@ -2261,6 +2408,7 @@ pub(crate) mod tests {
         assert_matches_schema(&spec, "ModelInfo", &info["model_info"]);
         assert_matches_schema(&spec, "ModelStats", &info["stats"]);
         assert_matches_schema(&spec, "TensorSpec", &info["model_info"]["input_spec"]);
+        assert_matches_schema(&spec, "TensorInfo", &info["model_info"]["inputs"][0]);
         assert_matches_schema(&spec, "ModelInfoResponse", &get("/models/test_model").await);
         assert_matches_schema(&spec, "ModelMetrics", &metrics["models"][0]);
         let models = get("/models").await;
