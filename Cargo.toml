@@ -2,11 +2,11 @@
 # Published as `furnace-server` (the `furnace` crate name belongs to another project); the
 # library and the binary are both still called `furnace`.
 name = "furnace-server"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Furnace Contributors"]
-description = "Lightweight pure-Rust HTTP inference server for ONNX models, powered by Burn"
+description = "Inference server for Burn models, in pure Rust: serve your own Burn modules or ONNX files over the KServe / Triton protocol"
 documentation = "https://docs.rs/furnace-server"
 homepage = "https://github.com/Gilfeather/furnace"
 repository = "https://github.com/Gilfeather/furnace"
@@ -30,6 +30,10 @@ exclude = [
     "default.nix",
     "flake.nix",
 ]
+
+[package.metadata.docs.rs]
+# Document the gRPC, TLS and image input APIs too
+features = ["grpc", "tls", "image"]
 
 [lib]
 name = "furnace"

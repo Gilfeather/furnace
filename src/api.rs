@@ -31,7 +31,7 @@ mod v2;
 
 use crate::access::{Access, RateLimit, Rejection, constant_time_eq, presented_key};
 pub use crate::batching::BatchConfig;
-use crate::batching::{Arrival, Batcher};
+use crate::batching::{Arrival, Batcher, NamedInput};
 use crate::error::{ApiError, FurnaceError, ModelError, Result};
 use crate::model::{FlatInput, MAX_BATCH_SIZE, Model, ModelInfo, ModelStats};
 #[cfg(feature = "image")]
@@ -457,6 +457,8 @@ struct Loaded {
     model: Arc<Model>,
     /// `None` when batching is off: every request runs its own forward pass
     batcher: Option<Batcher>,
+    /// For models of named tensors with fixed per-item shapes
+    named_batcher: Option<Batcher<NamedInput>>,
     /// Set once the warm-up inference has run
     ready: Arc<AtomicBool>,
 }
@@ -490,6 +492,8 @@ impl Loaded {
         Self {
             // Only simple models batch: their requests are flat buffers of one shape
             batcher: (batching.enabled() && model.is_simple())
+                .then(|| Batcher::new(model.clone(), batching)),
+            named_batcher: (batching.enabled() && model.batches_named())
                 .then(|| Batcher::new(model.clone(), batching)),
             model,
             ready: Arc::new(AtomicBool::new(false)),
@@ -1194,14 +1198,29 @@ async fn run_inference(
 async fn run_general(
     state: &ServerState,
     loaded: &Loaded,
+    arrival: Option<Arrival<'_, NamedInput>>,
     inputs: Vec<HostTensor>,
     permit: OwnedSemaphorePermit,
 ) -> std::result::Result<Result<Vec<HostTensor>>, Box<Response>> {
-    let model = loaded.model.clone();
-    let task = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        model.infer(inputs)
-    });
+    let task = async {
+        match (&loaded.named_batcher, arrival) {
+            // Batched with concurrent requests; a dropped sender means the batch panicked
+            (Some(batcher), Some(arrival)) => batcher
+                .submit(arrival, NamedInput(inputs), permit)
+                .await
+                .ok(),
+            _ => {
+                let model = loaded.model.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    model.infer(inputs)
+                })
+                .await
+                .inspect_err(|e| error!("Inference task failed: {}", e))
+                .ok()
+            }
+        }
+    };
     let joined = match state.request_timeout {
         Some(timeout) => match tokio::time::timeout(timeout, task).await {
             Ok(joined) => joined,
@@ -1209,10 +1228,7 @@ async fn run_general(
         },
         None => task.await,
     };
-    joined.map_err(|e| {
-        error!("Inference task failed: {}", e);
-        Box::new(panicked_response())
-    })
+    joined.ok_or_else(|| Box::new(panicked_response()))
 }
 
 fn timeout_response(timeout: Duration) -> Response {
@@ -2004,7 +2020,7 @@ async fn reload_model(
     let weights = request.weights.clone();
     let start = Instant::now();
     let task = tokio::task::spawn_blocking(move || -> Result<(Loaded, f64)> {
-        let model = reload(weights.as_deref())?;
+        let mut model = reload(weights.as_deref())?;
         let previous_info = previous.model.get_info();
         let info = model.get_info();
         if info.name != previous_info.name {

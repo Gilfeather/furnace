@@ -1,4 +1,8 @@
-//! Dynamic batching: concurrent `/predict` requests share forward passes.
+//! Dynamic batching: concurrent requests share forward passes.
+//!
+//! A batcher runs one kind of job: flat `f32` inputs ([`FlatInput`], models with one float
+//! tensor in and out) or named tensors ([`NamedInput`], models whose inputs all have fixed
+//! per-item shapes, so that requests can be joined along the batch dimension).
 //!
 //! A few worker threads run the model's forward passes, one batch each at a time, and
 //! requests wait for them in a shared queue. While some worker is idle, every request gets
@@ -25,6 +29,47 @@ use tracing::{debug, error};
 
 use crate::error::Result;
 use crate::model::{FlatInput, Model};
+use crate::tensor::HostTensor;
+
+/// A request a [`Batcher`] can run together with others of its kind
+pub trait BatchJob: Send + Sized + 'static {
+    /// What the request receives back
+    type Output: Send + 'static;
+
+    /// Items in the request: its share of a batch
+    fn items(&self) -> usize;
+
+    /// Run the requests as one forward pass, each getting its own result
+    fn run_many(model: &Model, jobs: Vec<Self>) -> Vec<Result<Self::Output>>;
+}
+
+impl BatchJob for FlatInput {
+    type Output = Vec<f32>;
+
+    fn items(&self) -> usize {
+        self.batch_size
+    }
+
+    fn run_many(model: &Model, jobs: Vec<Self>) -> Vec<Result<Vec<f32>>> {
+        model.predict_many(jobs)
+    }
+}
+
+/// One request's named tensors, in the order of the model's inputs
+#[derive(Debug)]
+pub struct NamedInput(pub Vec<HostTensor>);
+
+impl BatchJob for NamedInput {
+    type Output = Vec<HostTensor>;
+
+    fn items(&self) -> usize {
+        self.0.first().map_or(0, HostTensor::batch)
+    }
+
+    fn run_many(model: &Model, jobs: Vec<Self>) -> Vec<Result<Vec<HostTensor>>> {
+        model.infer_many(jobs.into_iter().map(|job| job.0).collect())
+    }
+}
 
 /// How requests are grouped into batches
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,31 +102,31 @@ impl BatchConfig {
 }
 
 /// What a queued request receives: its outputs, or its own error
-pub type Reply = Result<Vec<f32>>;
+pub type Reply<J = FlatInput> = Result<<J as BatchJob>::Output>;
 
-struct Pending {
-    input: FlatInput,
+struct Pending<J: BatchJob> {
+    input: J,
     queued_at: Instant,
-    reply: oneshot::Sender<Reply>,
+    reply: oneshot::Sender<Reply<J>>,
     /// Released once the request is answered, so queued requests count against
     /// `--max-concurrent-requests` like running ones
     permit: OwnedSemaphorePermit,
 }
 
-enum Message {
-    Request(Pending),
+enum Message<J: BatchJob> {
+    Request(Pending<J>),
     /// A request that was on its way in gave up, so a worker may stop waiting for it
     Wake,
 }
 
 /// Handle to the batching workers; they stop when the last handle is dropped
-pub struct Batcher {
-    sender: mpsc::Sender<Message>,
+pub struct Batcher<J: BatchJob = FlatInput> {
+    sender: mpsc::Sender<Message<J>>,
     /// Requests between entering `/predict` and reaching a worker (or failing)
     arriving: Arc<AtomicUsize>,
 }
 
-impl Batcher {
+impl<J: BatchJob> Batcher<J> {
     pub fn new(model: Arc<Model>, config: BatchConfig) -> Self {
         let (sender, receiver) = mpsc::channel();
         let arriving = Arc::new(AtomicUsize::new(0));
@@ -112,7 +157,7 @@ impl Batcher {
 
     /// Announce a request that will probably be submitted soon. Hold the guard while
     /// receiving and decoding its body, then pass it to [`Batcher::submit`].
-    pub fn arrival(&self) -> Arrival<'_> {
+    pub fn arrival(&self) -> Arrival<'_, J> {
         self.arriving.fetch_add(1, Ordering::SeqCst);
         Arrival {
             batcher: self,
@@ -124,10 +169,10 @@ impl Batcher {
     /// in panicked.
     pub fn submit(
         &self,
-        mut arrival: Arrival<'_>,
-        input: FlatInput,
+        mut arrival: Arrival<'_, J>,
+        input: J,
         permit: OwnedSemaphorePermit,
-    ) -> oneshot::Receiver<Reply> {
+    ) -> oneshot::Receiver<Reply<J>> {
         let (reply, receiver) = oneshot::channel();
         let pending = Pending {
             input,
@@ -144,12 +189,12 @@ impl Batcher {
 }
 
 /// See [`Batcher::arrival`]
-pub struct Arrival<'a> {
-    batcher: &'a Batcher,
+pub struct Arrival<'a, J: BatchJob = FlatInput> {
+    batcher: &'a Batcher<J>,
     submitted: bool,
 }
 
-impl Drop for Arrival<'_> {
+impl<J: BatchJob> Drop for Arrival<'_, J> {
     fn drop(&mut self) {
         if !self.submitted {
             self.batcher.arriving.fetch_sub(1, Ordering::SeqCst);
@@ -158,16 +203,16 @@ impl Drop for Arrival<'_> {
     }
 }
 
-struct Worker {
+struct Worker<J: BatchJob> {
     model: Arc<Model>,
     config: BatchConfig,
-    queue: Arc<Mutex<Queue>>,
+    queue: Arc<Mutex<Queue<J>>>,
     arriving: Arc<AtomicUsize>,
     /// Workers running a batch
     busy: Arc<AtomicUsize>,
 }
 
-impl Worker {
+impl<J: BatchJob> Worker<J> {
     fn run(self) {
         loop {
             // One worker at a time collects a batch; the others are busy or wait their turn
@@ -186,8 +231,8 @@ impl Worker {
         }
     }
 
-    fn run_batch(&self, batch: Vec<Pending>) {
-        let items: usize = batch.iter().map(|p| p.input.batch_size).sum();
+    fn run_batch(&self, batch: Vec<Pending<J>>) {
+        let items: usize = batch.iter().map(|p| p.input.items()).sum();
         debug!(
             "Running a batch of {} request(s), {} item(s)",
             batch.len(),
@@ -200,7 +245,7 @@ impl Worker {
             .unzip();
         // Without unwinding (release builds abort on panic) this is a plain call. With it,
         // a panicking model drops the replies, failing only this batch's requests.
-        match catch_unwind(AssertUnwindSafe(|| self.model.predict_many(inputs))) {
+        match catch_unwind(AssertUnwindSafe(|| J::run_many(&self.model, inputs))) {
             Ok(results) => {
                 for ((reply, permit), result) in replies.into_iter().zip(results) {
                     // Free the slot before answering, so a client that reads /metrics right
@@ -215,20 +260,20 @@ impl Worker {
     }
 }
 
-struct Queue {
-    receiver: mpsc::Receiver<Message>,
+struct Queue<J: BatchJob> {
+    receiver: mpsc::Receiver<Message<J>>,
     /// A request that did not fit into the previous batch; it starts the next one
-    carry: Option<Pending>,
+    carry: Option<Pending<J>>,
 }
 
-impl Queue {
+impl<J: BatchJob> Queue<J> {
     /// Wait for the next batch; `None` once every [`Batcher`] handle is gone
     fn next_batch(
         &mut self,
         config: &BatchConfig,
         arriving: &AtomicUsize,
         busy: &AtomicUsize,
-    ) -> Option<Vec<Pending>> {
+    ) -> Option<Vec<Pending<J>>> {
         let first = loop {
             let pending = match self.carry.take() {
                 Some(pending) => pending,
@@ -249,7 +294,7 @@ impl Queue {
         }
 
         let deadline = first.queued_at + config.batch_timeout;
-        let mut items = first.input.batch_size;
+        let mut items = first.input.items();
         let mut batch = vec![first];
         while items < config.max_batch_size {
             let message = match self.receiver.try_recv() {
@@ -277,11 +322,11 @@ impl Queue {
             if pending.reply.is_closed() {
                 continue;
             }
-            if items + pending.input.batch_size > config.max_batch_size {
+            if items + pending.input.items() > config.max_batch_size {
                 self.carry = Some(pending);
                 break;
             }
-            items += pending.input.batch_size;
+            items += pending.input.items();
             batch.push(pending);
         }
         Some(batch)
@@ -289,7 +334,7 @@ impl Queue {
 }
 
 /// A worker has the request now, so it no longer counts as arriving
-fn received(pending: Pending, arriving: &AtomicUsize) -> Pending {
+fn received<J: BatchJob>(pending: Pending<J>, arriving: &AtomicUsize) -> Pending<J> {
     arriving.fetch_sub(1, Ordering::SeqCst);
     pending
 }
@@ -364,6 +409,52 @@ mod tests {
                 values: Values::F32(values.iter().map(|v| v * 2.0).collect()),
             }])
         }
+    }
+
+    #[test]
+    fn named_tensor_requests_arriving_together_share_a_batch() {
+        let model = Arc::new(Model::new(
+            Box::new(crate::model::DummyTensorsModel::new(None)),
+            "dummy",
+            0,
+        ));
+        let batcher: Batcher<NamedInput> = Batcher::new(
+            model.clone(),
+            BatchConfig {
+                max_batch_size: 8,
+                batch_timeout: Duration::from_secs(5),
+                workers: 1,
+            },
+        );
+        let request = |id: i64| {
+            vec![
+                HostTensor {
+                    shape: vec![1, 4],
+                    values: Values::I64(vec![id; 4]),
+                },
+                HostTensor {
+                    shape: vec![1],
+                    values: Values::F32(vec![1.0]),
+                },
+            ]
+        };
+        let slots = Arc::new(Semaphore::new(8));
+        // All three are announced before any is queued, so the worker waits for them all
+        let arrivals: Vec<_> = (0..3).map(|_| batcher.arrival()).collect();
+        let receivers: Vec<_> = arrivals
+            .into_iter()
+            .zip(1..)
+            .map(|(arrival, id)| {
+                let permit = slots.clone().try_acquire_owned().unwrap();
+                batcher.submit(arrival, NamedInput(request(id)), permit)
+            })
+            .collect();
+        for (receiver, id) in receivers.into_iter().zip(1i64..) {
+            let outputs = receiver.blocking_recv().unwrap().unwrap();
+            assert_eq!(outputs[1].values, Values::I64(vec![4 * id]));
+        }
+        let stats = model.get_stats();
+        assert_eq!((stats.batch_count, stats.batched_items), (1, 3));
     }
 
     struct Setup {

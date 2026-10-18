@@ -64,6 +64,7 @@ async fn main() -> furnace::Result<()> {
         )?)
         .model(Model::custom(Sentiment {
             net: sentiment,
+            backend,
             device,
             seq_len: 8,
         }))

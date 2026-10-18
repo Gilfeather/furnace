@@ -545,6 +545,7 @@ async fn infer_named(
     state: &ServerState,
     slot: &ModelSlot,
     loaded: &Loaded,
+    arrival: Option<crate::batching::Arrival<'_, crate::batching::NamedInput>>,
     mut request: InferRequest,
     binary: &[u8],
 ) -> Response {
@@ -572,7 +573,7 @@ async fn infer_named(
             return busy_response();
         }
     };
-    let mut outputs = match run_general(state, loaded, inputs, permit).await {
+    let mut outputs = match run_general(state, loaded, arrival, inputs, permit).await {
         Ok(Ok(outputs)) => outputs,
         Ok(Err(e)) => {
             let status = match e {
@@ -662,6 +663,7 @@ async fn infer(
     let loaded = slot.get();
     // As in `/predict`: a batch about to start may wait for this request's body
     let arrival = loaded.batcher.as_ref().map(Batcher::arrival);
+    let named_arrival = loaded.named_batcher.as_ref().map(Batcher::arrival);
     let header_len = match request.headers().get(&INFERENCE_HEADER_CONTENT_LENGTH) {
         None => None,
         Some(value) => match value
@@ -706,7 +708,7 @@ async fn infer(
         }
     };
     if !loaded.model.is_simple() {
-        return infer_named(&state, &slot, &loaded, request, binary).await;
+        return infer_named(&state, &slot, &loaded, named_arrival, request, binary).await;
     }
     let (data, batch_size) = match decode_input(&loaded.model, &mut request, binary) {
         Ok(input) => input,
@@ -1171,6 +1173,38 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let error = String::from_utf8_lossy(&body);
         assert!(error.contains("/v2/models/tensors/infer"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_named_tensor_requests_are_answered_each_their_own() {
+        let app = tensors_app();
+        let request = |id: i64| {
+            infer_at(
+                "tensors",
+                serde_json::json!({
+                    "inputs": [
+                        { "name": "ids", "shape": [1, 4], "datatype": "INT64", "data": [id, id, id, id] },
+                        { "name": "scale", "shape": [1], "datatype": "FP32", "data": [1.0] },
+                    ],
+                    "outputs": [{ "name": "count" }],
+                }),
+            )
+        };
+        let tasks: Vec<_> = (1..=32)
+            .map(|id| {
+                let app = app.clone();
+                tokio::spawn(async move { (id, send(app, request(id)).await) })
+            })
+            .collect();
+        for task in tasks {
+            let (id, (status, body)) = task.await.unwrap();
+            assert_eq!(status, StatusCode::OK);
+            let response: InferResponse = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                response.outputs[0].data,
+                Some(OutputData::I64(vec![4 * id]))
+            );
+        }
     }
 
     #[tokio::test]

@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Furnace is now a library for serving your own Burn models too, not only ONNX files.
+## [0.9.0] - 2026-10-18
+
+Furnace is now a library for serving your own Burn models too, not only ONNX files: a
+`forward` function, or any model of named tensors (several inputs and outputs, `int64` token
+ids and masks), with everything the server does, batching included.
 
 ### Added
 - Serve models written in Burn from your own Rust code: `furnace::Server` (builder, or
@@ -18,14 +22,20 @@ Furnace is now a library for serving your own Burn models too, not only ONNX fil
 - Models with several inputs or outputs, `int64` / `int32` inputs, and dimensions fixed per
   request. They take named tensors on `/v2/models/{model}/infer` (HTTP and gRPC), in
   JSON or binary, return every output or those requested, and describe their tensors in the
-  model metadata and `/model/info` (`inputs`, `outputs`). Models with one `float32` input and
-  output work as before, `/predict` and dynamic batching included
+  model metadata and `/model/info` (`inputs`, `outputs`). When every input has a fixed shape per
+  item, concurrent requests are batched together; an invalid one (wrong shape, an integer the
+  backend cannot hold) is refused on its own without failing the rest. Models with one
+  `float32` input and output work as before, `/predict` and dynamic batching included
 
 ### Changed
 - `furnace::BurnModel`, the trait a served model implements, is now `name`, `backend`,
   `inputs`, `outputs` and `run` (plus an optional `fixed_batch`): named tensors in host memory
   instead of a flattened `Tensor<2>`. `predict`, `device`, `get_input_shape`,
   `get_output_shape` and `get_name` are gone
+
+### Fixed
+- A request still running on a model while it was reloaded was missing from the model's
+  statistics: the old and the new model now share them
 
 ## [0.8.0] - 2026-10-18
 

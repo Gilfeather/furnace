@@ -9,10 +9,10 @@ The same API as an OpenAPI 3 spec: [openapi.json](openapi.json).
 | `GET /readyz` | Readiness: every model's warm-up inference has run |
 | `GET /metrics` | Request, error and latency counters |
 | `GET /model/info` | Input and output shapes, backend, per-model statistics |
-| `POST /predict` | Inference: JSON, raw `float32`, or (with `--features image`) a JPEG/PNG |
+| `POST /predict` | Inference for models with one float tensor in and out: JSON, raw `float32`, or (with `--features image`) a JPEG/PNG |
 | `GET /models`, `GET /models/{model}`, `POST /models/{model}/predict` | The same, per model, when serving several |
 | `POST /admin/models/{model}/reload` | Reload a model without downtime (with `--admin-token`) |
-| `/v2/...` | The same inference over the KServe / Triton Open Inference Protocol |
+| `/v2/...` | Inference over the KServe / Triton Open Inference Protocol, for every model, by named tensors |
 
 ## `GET /healthz` (alias `GET /health`)
 
@@ -25,7 +25,8 @@ The same API as an OpenAPI 3 spec: [openapi.json](openapi.json).
 `200 {"status": "ready"}` once the warm-up inference has run, `503 {"status": "warming_up"}`
 before. At startup the server runs one all-zero input through the model in the background, so
 lazy initialization (weight transforms, buffer pools, the first touch of the memory-mapped
-weights) is not paid by a real request. Requests are accepted from the start; point a load
+weights) is not paid by a real request. A model with an input whose shape is only fixed per
+request has no input to warm up with and is ready at once. Requests are accepted from the start; point a load
 balancer's or Kubernetes' readiness probe here and the liveness probe at `/healthz`.
 
 ## `GET /metrics`
@@ -253,8 +254,10 @@ takes its tensors by name. `GET /v2/models/{model}` lists them, e.g. for a text 
 ```
 
 Send every input, in any order, as `FP32`, `INT64` or `INT32` (taken for `INT64` inputs) in JSON
-or as binary tensor data. Every output comes back unless `outputs` names some. Each request is
-one forward pass: these models are not batched with other requests. They are not served on
+or as binary tensor data. Every output comes back unless `outputs` names some. When every input
+has a fixed shape per item, concurrent requests are batched together like `/predict`'s; a model
+with an input whose shape each request fixes (a sequence length, say) runs one request per
+forward pass. Such models are not served on
 `/predict`, which answers `400 NAMED_TENSORS_REQUIRED` pointing here. The CPU backend computes
 integers in 32 bits, so an integer input outside the `i32` range gets `400`.
 
