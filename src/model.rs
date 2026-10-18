@@ -10,6 +10,7 @@ use crate::backend::BackendKind;
 use crate::burn_model::{BurnModelContainer, create_sample_model};
 use crate::error::{ModelError, Result};
 use crate::models::{BuiltInModel, resolve_weights};
+use crate::tensor::{DataType, HostTensor, IoSpec, TensorInfo, Values};
 use crate::types::TensorSpec;
 
 /// Hard upper bound on the number of items in one inference batch
@@ -19,8 +20,13 @@ pub const MAX_BATCH_SIZE: usize = 1000;
 pub struct ModelInfo {
     pub name: String,
     pub version: String,
+    /// The first input. For a model with several, see `inputs`
     pub input_spec: TensorSpec,
+    /// The first output. For a model with several, see `outputs`
     pub output_spec: TensorSpec,
+    /// Every input, with the names `/v2/models/{model}/infer` takes
+    pub inputs: Vec<TensorInfo>,
+    pub outputs: Vec<TensorInfo>,
     pub model_type: String,
     pub backend: String,
     pub created_at: String,
@@ -104,6 +110,46 @@ pub trait BurnModel: Send + Sync + std::fmt::Debug {
     fn get_output_shape(&self) -> &[usize];
     fn get_name(&self) -> &str;
     fn backend(&self) -> BackendKind;
+
+    /// The model's inputs in the order [`BurnModel::run`] takes them. By default one `f32`
+    /// tensor named `input` with [`BurnModel::get_input_shape`] per item.
+    fn inputs(&self) -> Vec<IoSpec> {
+        vec![IoSpec::fp32("input", self.get_input_shape())]
+    }
+
+    /// The model's outputs in the order [`BurnModel::run`] returns them
+    fn outputs(&self) -> Vec<IoSpec> {
+        vec![IoSpec::fp32("output", self.get_output_shape())]
+    }
+
+    /// Batch size the graph was exported with, if static
+    fn fixed_batch(&self) -> Option<usize> {
+        None
+    }
+
+    /// Run checked inputs, one tensor per entry of [`BurnModel::inputs`], each with the batch
+    /// first. By default through [`BurnModel::predict`], for models with one `f32` input.
+    fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
+        let [input] = <[HostTensor; 1]>::try_from(inputs).map_err(|inputs| {
+            ModelError::InvalidInput(format!("expected 1 input, got {}", inputs.len()))
+        })?;
+        let batch = input.batch();
+        let Values::F32(values) = input.values else {
+            return Err(ModelError::InvalidDataType("expected FP32".to_string()).into());
+        };
+        let per_item = values.len() / batch.max(1);
+        let output = self.predict(Tensor::from_data(
+            TensorData::new(values, [batch, per_item]),
+            self.device(),
+        ))?;
+        let mut shape = vec![batch];
+        shape.extend_from_slice(self.get_output_shape());
+        let flat = HostTensor::from_float(output)?;
+        Ok(vec![HostTensor {
+            shape,
+            values: flat.values,
+        }])
+    }
 }
 
 /// File-based MLP model (`.bpk` weights + `.json` metadata)
@@ -208,32 +254,162 @@ impl BurnModel for DummyModel {
     }
 }
 
+/// A model of named tensors for tests: `ids` (INT64, 4 per item) and `scale` (FP32, one per
+/// item) in; `scores` (FP32, `ids * scale`) and `count` (INT64, the sum of `ids`) out. With a
+/// fixed batch it refuses any other batch size, like a graph exported that way.
+#[derive(Debug)]
+pub struct DummyTensorsModel {
+    fixed_batch: Option<usize>,
+    device: Device,
+    runs: std::sync::atomic::AtomicUsize,
+}
+
+impl DummyTensorsModel {
+    pub fn new(fixed_batch: Option<usize>) -> Self {
+        Self {
+            fixed_batch,
+            device: BackendKind::Cpu.device(),
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Forward passes so far
+    pub fn runs(&self) -> usize {
+        self.runs.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl BurnModel for DummyTensorsModel {
+    fn predict(&self, _input: Tensor<2>) -> Result<Tensor<2>> {
+        Err(ModelError::InferenceFailed("takes named tensors".to_string()).into())
+    }
+
+    fn device(&self) -> &Device {
+        &self.device
+    }
+
+    fn get_input_shape(&self) -> &[usize] {
+        &[]
+    }
+
+    fn get_output_shape(&self) -> &[usize] {
+        &[]
+    }
+
+    fn get_name(&self) -> &str {
+        "tensors"
+    }
+
+    fn backend(&self) -> BackendKind {
+        BackendKind::Cpu
+    }
+
+    fn inputs(&self) -> Vec<IoSpec> {
+        vec![
+            IoSpec {
+                name: "ids".to_string(),
+                dtype: DataType::Int64,
+                shape: vec![Some(4)],
+            },
+            IoSpec {
+                name: "scale".to_string(),
+                dtype: DataType::Fp32,
+                shape: vec![],
+            },
+        ]
+    }
+
+    fn outputs(&self) -> Vec<IoSpec> {
+        vec![
+            IoSpec::fp32("scores", &[4]),
+            IoSpec {
+                name: "count".to_string(),
+                dtype: DataType::Int64,
+                shape: vec![],
+            },
+        ]
+    }
+
+    fn fixed_batch(&self) -> Option<usize> {
+        self.fixed_batch
+    }
+
+    fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
+        self.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (Values::I64(ids), Values::F32(scale)) = (&inputs[0].values, &inputs[1].values) else {
+            return Err(ModelError::InferenceFailed("unexpected types".to_string()).into());
+        };
+        let batch = inputs[0].batch();
+        if self.fixed_batch.is_some_and(|fixed| fixed != batch) {
+            return Err(ModelError::InferenceFailed(format!("got a batch of {batch}")).into());
+        }
+        let scores = ids
+            .chunks(4)
+            .zip(scale)
+            .flat_map(|(ids, s)| ids.iter().map(move |&id| id as f32 * s))
+            .collect();
+        let counts = ids.chunks(4).map(|ids| ids.iter().sum()).collect();
+        Ok(vec![
+            HostTensor {
+                shape: vec![batch, 4],
+                values: Values::F32(scores),
+            },
+            HostTensor {
+                shape: vec![batch],
+                values: Values::I64(counts),
+            },
+        ])
+    }
+}
+
 /// A loaded model plus its metadata and runtime statistics
 #[derive(Debug)]
 pub struct Model {
     inner: Box<dyn BurnModel>,
     info: ModelInfo,
     model_type: &'static str,
+    inputs: Vec<IoSpec>,
+    outputs: Vec<IoSpec>,
+    /// One `f32` tensor in and one out, both with fixed per-item shapes
+    simple: bool,
     stats: Mutex<ModelStats>,
+}
+
+/// The legacy single-tensor description: per-item shape (open dimensions as 0) and dtype
+fn tensor_spec(spec: Option<&IoSpec>) -> TensorSpec {
+    TensorSpec {
+        shape: spec
+            .map(|s| s.shape.iter().map(|d| d.unwrap_or(0)).collect())
+            .unwrap_or_default(),
+        dtype: match spec.map(|s| s.dtype) {
+            Some(DataType::Int64) => "int64",
+            Some(DataType::Int32) => "int32",
+            _ => "float32",
+        }
+        .to_string(),
+        min_value: None,
+        max_value: None,
+    }
 }
 
 impl Model {
     pub fn new(inner: Box<dyn BurnModel>, model_type: &'static str, model_size_bytes: u64) -> Self {
+        let inputs = inner.inputs();
+        let outputs = inner.outputs();
+        let simple = match (inputs.as_slice(), outputs.as_slice()) {
+            ([input], [output]) => [input, output].iter().all(|spec| {
+                spec.dtype == DataType::Fp32
+                    && spec.static_shape().is_some_and(|shape| !shape.is_empty())
+            }),
+            _ => false,
+        };
         let info = ModelInfo {
             name: inner.get_name().to_string(),
             version: "1.0.0".to_string(),
-            input_spec: TensorSpec {
-                shape: inner.get_input_shape().to_vec(),
-                dtype: "float32".to_string(),
-                min_value: None,
-                max_value: None,
-            },
-            output_spec: TensorSpec {
-                shape: inner.get_output_shape().to_vec(),
-                dtype: "float32".to_string(),
-                min_value: None,
-                max_value: None,
-            },
+            input_spec: tensor_spec(inputs.first()),
+            output_spec: tensor_spec(outputs.first()),
+            inputs: inputs.iter().map(TensorInfo::from).collect(),
+            outputs: outputs.iter().map(TensorInfo::from).collect(),
             model_type: model_type.to_string(),
             backend: inner.backend().to_string(),
             created_at: Utc::now().to_rfc3339(),
@@ -244,8 +420,174 @@ impl Model {
             inner,
             info,
             model_type,
+            inputs,
+            outputs,
+            simple,
             stats: Mutex::new(ModelStats::new()),
         }
+    }
+
+    /// Whether the model takes one `f32` tensor and returns one, with fixed per-item shapes.
+    /// Such models serve `/predict` and batch concurrent requests together; the others take
+    /// named tensors through [`Model::infer`].
+    pub fn is_simple(&self) -> bool {
+        self.simple
+    }
+
+    pub fn inputs(&self) -> &[IoSpec] {
+        &self.inputs
+    }
+
+    pub fn outputs(&self) -> &[IoSpec] {
+        &self.outputs
+    }
+
+    /// Run one request of named tensors: `inputs` in the order of [`Model::inputs`], each with
+    /// the batch as its first dimension. Returns the outputs in the order of [`Model::outputs`].
+    /// Blocking, like [`Model::predict_batch`].
+    pub fn infer(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
+        let start = Instant::now();
+        let result = self.check_inputs(&inputs).and_then(|batch| {
+            let outputs = self.run_in_chunks(inputs, batch)?;
+            self.check_outputs(&outputs, batch)?;
+            Ok((outputs, batch))
+        });
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+        match result {
+            Ok((outputs, batch)) => {
+                stats.record_batch(batch);
+                stats.record_success(elapsed_ms);
+                Ok(outputs)
+            }
+            Err(e) => {
+                stats.record_error();
+                Err(e)
+            }
+        }
+    }
+
+    /// The batch size, if the inputs fit the model
+    fn check_inputs(&self, inputs: &[HostTensor]) -> Result<usize> {
+        let invalid = |message: String| -> crate::error::FurnaceError {
+            ModelError::InvalidInput(message).into()
+        };
+        if inputs.len() != self.inputs.len() {
+            return Err(invalid(format!(
+                "expected {} inputs ({}), got {}",
+                self.inputs.len(),
+                self.inputs
+                    .iter()
+                    .map(|i| i.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                inputs.len()
+            )));
+        }
+        let mut batch = None;
+        for (spec, tensor) in self.inputs.iter().zip(inputs) {
+            let name = &spec.name;
+            match (&tensor.values, spec.dtype.is_int()) {
+                (Values::F32(values), false) => {
+                    if let Some(pos) = values.iter().position(|v| !v.is_finite()) {
+                        return Err(invalid(format!(
+                            "'{name}' has a non-finite value at index {pos}"
+                        )));
+                    }
+                }
+                (Values::I64(_), true) => {}
+                _ => {
+                    return Err(invalid(format!(
+                        "'{name}' must be {}",
+                        spec.dtype.v2_name()
+                    )));
+                }
+            }
+            let item = tensor.shape.get(1..).unwrap_or_default();
+            let fits = item.len() == spec.shape.len()
+                && item
+                    .iter()
+                    .zip(&spec.shape)
+                    .all(|(&d, want)| want.is_none_or(|w| w == d) && d > 0);
+            if !fits {
+                return Err(invalid(format!(
+                    "'{name}' has shape {:?}; the model takes {:?} (-1: any)",
+                    tensor.shape,
+                    spec.v2_shape()
+                )));
+            }
+            let expected_len: usize = tensor.shape.iter().product();
+            if tensor.values.len() != expected_len {
+                return Err(invalid(format!(
+                    "'{name}' has shape {:?} ({expected_len} values) but {} values",
+                    tensor.shape,
+                    tensor.values.len()
+                )));
+            }
+            match batch {
+                None => batch = Some(tensor.batch()),
+                Some(b) if b != tensor.batch() => {
+                    return Err(invalid(format!(
+                        "inputs disagree on the batch size: {b} and {} ('{name}')",
+                        tensor.batch()
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+        let batch = batch.unwrap_or(0);
+        Self::check_batch_size(batch)?;
+        Ok(batch)
+    }
+
+    /// Run the inputs, in chunks of the graph's fixed batch size if it has one
+    fn run_in_chunks(&self, inputs: Vec<HostTensor>, batch: usize) -> Result<Vec<HostTensor>> {
+        let chunk = match self.inner.fixed_batch() {
+            Some(chunk) if chunk != batch => chunk,
+            _ => return self.inner.run(inputs),
+        };
+        if !batch.is_multiple_of(chunk) {
+            return Err(ModelError::InvalidInput(format!(
+                "the model runs batches of {chunk}; got {batch} items"
+            ))
+            .into());
+        }
+        let mut per_output: Vec<Vec<HostTensor>> = Vec::new();
+        for start in (0..batch).step_by(chunk) {
+            let part = inputs
+                .iter()
+                .map(|t| t.slice_batch(start, start + chunk))
+                .collect();
+            for (i, output) in self.inner.run(part)?.into_iter().enumerate() {
+                if per_output.len() <= i {
+                    per_output.push(Vec::new());
+                }
+                per_output[i].push(output);
+            }
+        }
+        per_output
+            .into_iter()
+            .map(HostTensor::concat_batch)
+            .collect()
+    }
+
+    fn check_outputs(&self, outputs: &[HostTensor], batch: usize) -> Result<()> {
+        if outputs.len() != self.outputs.len() {
+            return Err(ModelError::InferenceFailed(format!(
+                "model returned {} outputs, expected {}",
+                outputs.len(),
+                self.outputs.len()
+            ))
+            .into());
+        }
+        if let Some(output) = outputs.iter().find(|o| o.batch() != batch) {
+            return Err(ModelError::InferenceFailed(format!(
+                "model returned shape {:?} for a batch of {batch}",
+                output.shape
+            ))
+            .into());
+        }
+        Ok(())
     }
 
     pub fn predict(&self, input: Vec<f32>) -> Result<Vec<f32>> {
@@ -443,11 +785,37 @@ impl Model {
     /// Run one all-zero input through the model without touching the statistics, so the first
     /// real request does not pay for lazy initialization (weight transforms, buffer pools,
     /// page faults on the memory-mapped weights). Returns how long it took.
-    pub fn warm_up(&self) -> std::result::Result<std::time::Duration, String> {
-        let input_size: usize = self.info.input_spec.shape.iter().product();
+    ///
+    /// A model with an input whose shape is only fixed per request cannot be warmed up without
+    /// guessing it, and is skipped (`Ok(None)`).
+    pub fn warm_up(&self) -> std::result::Result<Option<std::time::Duration>, String> {
         let start = Instant::now();
-        self.forward(vec![0.0; input_size], 1)?;
-        Ok(start.elapsed())
+        if self.simple {
+            let input_size: usize = self.info.input_spec.shape.iter().product();
+            self.forward(vec![0.0; input_size], 1)?;
+            return Ok(Some(start.elapsed()));
+        }
+        let batch = self.inner.fixed_batch().unwrap_or(1);
+        let Some(inputs) = self
+            .inputs
+            .iter()
+            .map(|spec| {
+                let mut shape = vec![batch];
+                shape.extend(spec.static_shape()?);
+                let len = shape.iter().product();
+                let values = if spec.dtype.is_int() {
+                    Values::I64(vec![0; len])
+                } else {
+                    Values::F32(vec![0.0; len])
+                };
+                Some(HostTensor { shape, values })
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Ok(None);
+        };
+        self.inner.run(inputs).map_err(|e| e.to_string())?;
+        Ok(Some(start.elapsed()))
     }
 
     fn forward(&self, input: Vec<f32>, batch_size: usize) -> std::result::Result<Vec<f32>, String> {
@@ -591,6 +959,91 @@ mod tests {
     fn get_test_model() -> Model {
         let dummy = DummyModel::new("test".to_string(), vec![784], vec![10]);
         Model::new(Box::new(dummy), "dummy", 0)
+    }
+
+    fn tensors(ids: Vec<i64>, scale: Vec<f32>) -> Vec<HostTensor> {
+        vec![
+            HostTensor {
+                shape: vec![scale.len(), 4],
+                values: Values::I64(ids),
+            },
+            HostTensor {
+                shape: vec![scale.len()],
+                values: Values::F32(scale),
+            },
+        ]
+    }
+
+    #[test]
+    fn named_tensors_in_and_out() {
+        let model = Model::new(Box::new(DummyTensorsModel::new(None)), "dummy", 0);
+        assert!(!model.is_simple());
+        let info = model.get_info();
+        assert_eq!(info.inputs[0].datatype, "INT64");
+        assert_eq!(info.inputs[0].shape, [-1, 4]);
+        assert_eq!(info.inputs[1].shape, [-1]);
+        assert_eq!(info.input_spec.dtype, "int64");
+
+        let outputs = model
+            .infer(tensors(vec![1, 2, 3, 4, 5, 6, 7, 8], vec![0.5, 2.0]))
+            .unwrap();
+        assert_eq!(outputs[0].shape, [2, 4]);
+        assert_eq!(
+            outputs[0].values,
+            Values::F32(vec![0.5, 1.0, 1.5, 2.0, 10.0, 12.0, 14.0, 16.0])
+        );
+        assert_eq!(outputs[1].values, Values::I64(vec![10, 26]));
+        assert_eq!(model.get_stats().success_count, 1);
+        // A model whose inputs are all fixed per item is warmed up
+        assert!(model.warm_up().unwrap().is_some());
+    }
+
+    #[test]
+    fn named_tensors_are_checked() {
+        let model = Model::new(Box::new(DummyTensorsModel::new(None)), "dummy", 0);
+        let check = |inputs: Vec<HostTensor>, expected: &str| {
+            let err = model.infer(inputs).unwrap_err().to_string();
+            assert!(err.contains(expected), "{expected:?} not in {err:?}");
+        };
+        let mut inputs = tensors(vec![1, 2, 3, 4], vec![1.0]);
+        inputs.pop();
+        check(inputs, "expected 2 inputs (ids, scale)");
+        let mut swapped = tensors(vec![1, 2, 3, 4], vec![1.0]);
+        swapped.swap(0, 1);
+        check(swapped, "'ids' must be INT64");
+        let mut short = tensors(vec![1, 2, 3], vec![1.0]);
+        short[0].shape = vec![1, 3];
+        check(short, "'ids' has shape [1, 3]");
+        check(
+            tensors(vec![1, 2, 3, 4, 5, 6, 7, 8], vec![1.0]),
+            "'ids' has shape [1, 4] (4 values) but 8 values",
+        );
+        let mut disagree = tensors(vec![1, 2, 3, 4, 5, 6, 7, 8], vec![1.0, 2.0]);
+        disagree[1] = HostTensor {
+            shape: vec![1],
+            values: Values::F32(vec![1.0]),
+        };
+        check(disagree, "disagree on the batch size");
+        check(
+            tensors(vec![1, 2, 3, 4], vec![f32::NAN]),
+            "'scale' has a non-finite value",
+        );
+        assert_eq!(model.get_stats().error_count, 6);
+    }
+
+    #[test]
+    fn fixed_batch_graphs_run_in_chunks() {
+        let model = Model::new(Box::new(DummyTensorsModel::new(Some(2))), "dummy", 0);
+        let outputs = model
+            .infer(tensors((1..=24).collect(), vec![1.0; 6]))
+            .unwrap();
+        assert_eq!(outputs[0].shape, [6, 4]);
+        assert_eq!(outputs[1].values, Values::I64(vec![10, 26, 42, 58, 74, 90]));
+        let err = model
+            .infer(tensors((1..=12).collect(), vec![1.0; 3]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("runs batches of 2"), "{err}");
     }
 
     #[test]

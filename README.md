@@ -86,9 +86,12 @@ cargo build --release
 ./target/release/furnace --model-name mnist
 ```
 
-A model needs one `float32` input and one `float32` output, each with the batch as the first
-dimension and every other dimension fixed (e.g. `[N, 3, 224, 224]`). Models that don't fit,
-or that burn-onnx can't convert (it supports opsets 1–24), are skipped with a build warning
+Inputs and outputs are `float32`, `int64` or `int32` tensors with the batch as their first
+dimension, as many as the model has: an image classifier's one tensor in and out, BERT's token
+ids and masks, a detector's several outputs. A model with one `float32` input and one output of
+fixed shapes is served on `/predict` too, with dynamic batching; any other takes its named
+tensors on [`/v2/models/{model}/infer`](docs/API.md#models-with-several-inputs-or-outputs).
+Models that burn-onnx can't convert (it supports opsets 1–24) are skipped with a build warning
 saying why. If conversion fails, [onnx-simplifier](https://github.com/daquexian/onnx-simplifier)
 often helps. `furnace --help` lists the models in a build.
 

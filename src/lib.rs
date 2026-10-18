@@ -12,6 +12,7 @@ pub mod models;
 #[cfg(feature = "image")]
 pub mod preprocess;
 pub mod telemetry;
+pub mod tensor;
 pub mod threads;
 #[cfg(feature = "tls")]
 pub mod tls;

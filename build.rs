@@ -64,7 +64,7 @@ fn main() {
 
 #[cfg(feature = "onnx")]
 mod onnx {
-    use super::registry::{self, Io, IoType, ModelSpec};
+    use super::registry::{self, Elem, Io, IoType, ModelSpec};
     use burn_onnx::{LoadStrategy, ModelGen};
     use onnx_ir::{ArgType, DType, Message, OnnxGraphBuilder};
     use std::fs;
@@ -128,12 +128,20 @@ mod onnx {
         let graph = OnnxGraphBuilder::new()
             .parse_file(onnx_path)
             .map_err(|e| format!("could not parse the ONNX graph: {e}"))?;
-        let spec = registry::model_spec(
-            name,
-            &graph.inputs.iter().map(io).collect::<Vec<_>>(),
-            &graph.outputs.iter().map(io).collect::<Vec<_>>(),
-        )?;
+        let mut inputs: Vec<Io> = graph.inputs.iter().map(io).collect();
+        let mut outputs: Vec<Io> = graph.outputs.iter().map(io).collect();
         drop(graph);
+        // onnx-ir turns names into identifiers (`input_ids:0` -> `input_ids_0`); clients use
+        // the graph's own, so serve those
+        let (input_names, output_names) = graph_io_names(onnx_path)?;
+        for (args, names) in [(&mut inputs, input_names), (&mut outputs, output_names)] {
+            if args.len() == names.len() {
+                for (arg, name) in args.iter_mut().zip(names) {
+                    arg.name = name;
+                }
+            }
+        }
+        let spec = registry::model_spec(name, &inputs, &outputs)?;
 
         // burn-onnx panics on graphs it can't convert; don't fail the whole build over one model
         let input: PathBuf = onnx_path.to_path_buf();
@@ -188,12 +196,40 @@ mod onnx {
         Ok(path)
     }
 
+    /// The graph's input names (initializers left out, as onnx-ir does) and output names, in
+    /// order, as written in the ONNX file
+    fn graph_io_names(onnx_path: &Path) -> Result<(Vec<String>, Vec<String>), String> {
+        let bytes = fs::read(onnx_path).map_err(|e| format!("could not read the file: {e}"))?;
+        let model = onnx_ir::ModelProto::parse_from_bytes(&bytes)
+            .map_err(|e| format!("could not parse the ONNX graph: {e}"))?;
+        let initializers: std::collections::HashSet<&str> = model
+            .graph
+            .initializer
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        let inputs = model
+            .graph
+            .input
+            .iter()
+            .filter(|i| !initializers.contains(i.name.as_str()))
+            .map(|i| i.name.clone())
+            .collect();
+        let outputs = model.graph.output.iter().map(|o| o.name.clone()).collect();
+        Ok((inputs, outputs))
+    }
+
     fn io(arg: &onnx_ir::Argument) -> Io {
         let ty = match &arg.ty {
-            ArgType::Tensor(t) if t.dtype == DType::F32 => {
-                IoType::F32Tensor(t.static_shape.clone().unwrap_or_else(|| vec![None; t.rank]))
+            ArgType::Tensor(t) => {
+                let dims = t.static_shape.clone().unwrap_or_else(|| vec![None; t.rank]);
+                match t.dtype {
+                    DType::F32 => IoType::Tensor(Elem::F32, dims),
+                    DType::I64 => IoType::Tensor(Elem::I64, dims),
+                    DType::I32 => IoType::Tensor(Elem::I32, dims),
+                    other => IoType::Other(format!("{other:?} tensor")),
+                }
             }
-            ArgType::Tensor(t) => IoType::Other(format!("{:?} tensor", t.dtype)),
             ArgType::ScalarTensor(dtype) | ArgType::ScalarNative(dtype) => {
                 IoType::Other(format!("{dtype:?} scalar"))
             }

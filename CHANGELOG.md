@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Models with several inputs or outputs, `int64` / `int32` inputs, and dimensions fixed per
+  request. They take named tensors on `/v2/models/{model}/infer` (HTTP and gRPC), in
+  JSON or binary, return every output or those requested, and describe their tensors in the
+  model metadata and `/model/info` (`inputs`, `outputs`). Models with one `float32` input and
+  output work as before, `/predict` and dynamic batching included
+
 ## [0.8.0] - 2026-10-18
 
 Furnace grows from a fast model server into a production one. KServe and Triton clients work

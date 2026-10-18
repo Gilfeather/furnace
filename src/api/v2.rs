@@ -2,12 +2,17 @@
 //! KServe can talk to Furnace unchanged:
 //! <https://github.com/kserve/open-inference-protocol/blob/main/specification/protocol/inference_rest.md>.
 //!
-//! Supported: server and model metadata, liveness and readiness, and inference with `FP32`
-//! tensors, as JSON (flat or nested `data`) or with Triton's binary tensor data extension (the
-//! default of `tritonclient.http`). The model has one input named `input` and one output named
-//! `output`; the first dimension of a tensor's shape is the batch. Inference goes through the
-//! same path as `POST /predict`: dynamic batching, the concurrency limit, the timeout and the
-//! metrics.
+//! Supported: server and model metadata, liveness and readiness, and inference with `FP32`,
+//! `INT64` and `INT32` tensors, as JSON (flat or nested `data`) or with Triton's binary tensor
+//! data extension (the default of `tritonclient.http`). The first dimension of a tensor's shape
+//! is the batch.
+//!
+//! A simple model (one `f32` tensor in, one out) has one input named `input` and one output
+//! named `output`, and goes through the same path as `POST /predict`: dynamic batching, the
+//! concurrency limit, the timeout and the metrics. Any other model takes its graph's inputs by
+//! name and returns its outputs (all, or those requested), one request per forward pass.
+
+use crate::tensor::{DataType, HostTensor, Values};
 
 use std::fmt;
 
@@ -132,25 +137,22 @@ async fn model_metadata(State(state): State<AppState>, Path(path): Path<ModelPat
     };
     let loaded = slot.get();
     let info = loaded.model.get_info();
-    let with_batch = |shape: &[usize]| {
-        std::iter::once(-1)
-            .chain(shape.iter().map(|&d| d as i64))
+    let metadata = |tensors: &[crate::tensor::TensorInfo]| {
+        tensors
+            .iter()
+            .map(|t| TensorMetadata {
+                name: t.name.clone(),
+                datatype: t.datatype.clone(),
+                shape: t.shape.clone(),
+            })
             .collect()
     };
     Json(ModelMetadata {
         name: info.name.clone(),
         versions: vec![MODEL_VERSION.to_string()],
         platform: format!("furnace_{}", info.model_type),
-        inputs: vec![TensorMetadata {
-            name: INPUT_NAME.to_string(),
-            datatype: "FP32".to_string(),
-            shape: with_batch(&info.input_spec.shape),
-        }],
-        outputs: vec![TensorMetadata {
-            name: OUTPUT_NAME.to_string(),
-            datatype: "FP32".to_string(),
-            shape: with_batch(&info.output_spec.shape),
-        }],
+        inputs: metadata(&info.inputs),
+        outputs: metadata(&info.outputs),
     })
     .into_response()
 }
@@ -199,7 +201,8 @@ struct InferInput {
     datatype: String,
     #[serde(default)]
     parameters: Parameters,
-    data: Option<TensorData32>,
+    /// Decoded once the input's datatype is known
+    data: Option<Box<serde_json::value::RawValue>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -283,9 +286,368 @@ pub struct OutputTensor {
     pub shape: Vec<usize>,
     /// Present unless the output is sent as binary tensor data
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<Vec<f32>>,
+    pub data: Option<OutputData>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<serde_json::Value>,
+}
+
+/// An output's values in JSON
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OutputData {
+    I64(Vec<i64>),
+    F32(Vec<f32>),
+}
+
+/// Integer tensor data from a flat or nested JSON array; non-integers are an error
+struct FlattenInts<'a>(&'a mut Vec<i64>);
+
+impl<'de> DeserializeSeed<'de> for FlattenInts<'_> {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> std::result::Result<(), D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for FlattenInts<'_> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("an integer or an array of integers")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<(), A::Error> {
+        if let Some(hint) = seq.size_hint() {
+            self.0.reserve(hint);
+        }
+        while seq.next_element_seed(FlattenInts(self.0))?.is_some() {}
+        Ok(())
+    }
+
+    fn visit_i64<E: de::Error>(self, v: i64) -> std::result::Result<(), E> {
+        self.0.push(v);
+        Ok(())
+    }
+
+    fn visit_u64<E: de::Error>(self, v: u64) -> std::result::Result<(), E> {
+        self.0
+            .push(i64::try_from(v).map_err(|_| E::custom(format!("{v} is too large")))?);
+        Ok(())
+    }
+}
+
+/// Raw little-endian tensor bytes as values: `INT32` widens to `i64`
+pub(super) fn decode_raw(datatype: DataType, bytes: &[u8]) -> Values {
+    match datatype {
+        DataType::Fp32 => Values::F32(
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect(),
+        ),
+        DataType::Int64 => Values::I64(
+            bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|b| i64::from_le_bytes(*b))
+                .collect(),
+        ),
+        DataType::Int32 => Values::I64(
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| i64::from(i32::from_le_bytes(*b)))
+                .collect(),
+        ),
+    }
+}
+
+/// Values as raw little-endian bytes
+pub(super) fn encode_raw(values: &Values) -> Vec<u8> {
+    match values {
+        Values::F32(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+        Values::I64(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+    }
+}
+
+/// The wire datatype of an output's values
+pub(super) fn values_datatype(values: &Values) -> DataType {
+    match values {
+        Values::F32(_) => DataType::Fp32,
+        Values::I64(_) => DataType::Int64,
+    }
+}
+
+/// Where a request's tensor matches the model's input: its index, and the datatype it was sent
+/// as. Shared with the gRPC transport.
+pub(super) fn match_input(
+    model: &Model,
+    name: &str,
+    datatype: &str,
+) -> std::result::Result<(usize, DataType), String> {
+    let inputs = model.inputs();
+    let Some(index) = inputs.iter().position(|spec| spec.name == name) else {
+        return Err(format!(
+            "Unknown input '{name}'; the model takes {}",
+            inputs
+                .iter()
+                .map(|spec| format!("{} ({})", spec.name, spec.dtype.v2_name()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    };
+    let spec = &inputs[index];
+    let wire = DataType::from_v2_name(datatype)
+        .filter(|wire| match spec.dtype {
+            DataType::Fp32 => *wire == DataType::Fp32,
+            DataType::Int64 | DataType::Int32 => wire.is_int(),
+        })
+        .ok_or_else(|| {
+            format!(
+                "Input '{name}' is {datatype}; the model takes {}",
+                spec.dtype.v2_name()
+            )
+        })?;
+    Ok((index, wire))
+}
+
+/// A request tensor's full shape, adding a batch of one when it was left out. Shared with the
+/// gRPC transport.
+pub(super) fn request_shape(
+    model: &Model,
+    index: usize,
+    shape: &[i64],
+) -> std::result::Result<Vec<usize>, String> {
+    let mut dims: Vec<usize> = shape
+        .iter()
+        .map(|&d| usize::try_from(d).map_err(|_| format!("Invalid shape {shape:?}")))
+        .collect::<std::result::Result<_, _>>()?;
+    if dims.len() == model.inputs()[index].shape.len() {
+        dims.insert(0, 1);
+    }
+    Ok(dims)
+}
+
+/// Requested outputs as (index into the model's outputs, sent as binary); all of them when the
+/// request names none. Shared with the gRPC transport.
+pub(super) fn select_outputs<'a>(
+    model: &Model,
+    requested: impl Iterator<Item = (&'a str, bool)>,
+    all_binary: bool,
+) -> std::result::Result<Vec<(usize, bool)>, String> {
+    let outputs = model.outputs();
+    let selected: Vec<(usize, bool)> = requested
+        .map(|(name, binary)| {
+            outputs
+                .iter()
+                .position(|spec| spec.name == name)
+                .map(|index| (index, binary || all_binary))
+                .ok_or_else(|| {
+                    format!(
+                        "Unknown output '{name}'; the model returns {}",
+                        outputs
+                            .iter()
+                            .map(|spec| spec.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+        })
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(if selected.is_empty() {
+        (0..outputs.len()).map(|i| (i, all_binary)).collect()
+    } else {
+        selected
+    })
+}
+
+/// The request's tensors, in the order of the model's inputs
+fn decode_named_inputs(
+    model: &Model,
+    request: &mut InferRequest,
+    binary: &[u8],
+) -> std::result::Result<Vec<HostTensor>, String> {
+    let mut tensors: Vec<Option<HostTensor>> = vec![None; model.inputs().len()];
+    // Binary data of the inputs follows the JSON in the order the inputs are listed
+    let mut offset = 0;
+    for input in &mut request.inputs {
+        let (index, wire) = match_input(model, &input.name, &input.datatype)?;
+        if tensors[index].is_some() {
+            return Err(format!("Input '{}' is given twice", input.name));
+        }
+        let shape = request_shape(model, index, &input.shape)?;
+        let elements: usize = shape.iter().product();
+        let values = match (input.parameters.binary_data_size, input.data.take()) {
+            (Some(size), _) => {
+                let end = offset + size;
+                if size != elements * wire.size() || end > binary.len() {
+                    return Err(format!(
+                        "Input '{}': binary_data_size is {size} bytes; shape {:?} of {} needs {}                          and {} are left in the body",
+                        input.name,
+                        input.shape,
+                        wire.v2_name(),
+                        elements * wire.size(),
+                        binary.len() - offset.min(binary.len())
+                    ));
+                }
+                let values = decode_raw(wire, &binary[offset..end]);
+                offset = end;
+                values
+            }
+            (None, Some(raw)) => {
+                let values = if wire == DataType::Fp32 {
+                    serde_json::from_str::<TensorData32>(raw.get()).map(|d| Values::F32(d.0))
+                } else {
+                    let mut ints = Vec::new();
+                    let mut deserializer = serde_json::Deserializer::from_str(raw.get());
+                    FlattenInts(&mut ints)
+                        .deserialize(&mut deserializer)
+                        .map(|()| Values::I64(ints))
+                };
+                let values =
+                    values.map_err(|e| format!("Input '{}': invalid data: {e}", input.name))?;
+                if values.len() != elements {
+                    return Err(format!(
+                        "Input '{}' has shape {:?} ({elements} elements) but {} values",
+                        input.name,
+                        input.shape,
+                        values.len()
+                    ));
+                }
+                values
+            }
+            (None, None) => {
+                return Err(format!(
+                    "Input '{}' has neither data nor binary_data_size",
+                    input.name
+                ));
+            }
+        };
+        tensors[index] = Some(HostTensor { shape, values });
+    }
+    tensors
+        .into_iter()
+        .zip(model.inputs())
+        .map(|(tensor, spec)| tensor.ok_or_else(|| format!("Missing input '{}'", spec.name)))
+        .collect()
+}
+
+/// Inference for a model of named tensors
+async fn infer_named(
+    state: &ServerState,
+    slot: &ModelSlot,
+    loaded: &Loaded,
+    mut request: InferRequest,
+    binary: &[u8],
+) -> Response {
+    let model = &loaded.model;
+    let inputs = match decode_named_inputs(model, &mut request, binary) {
+        Ok(inputs) => inputs,
+        Err(message) => return v2_error(StatusCode::BAD_REQUEST, &message),
+    };
+    let all_binary = request.parameters.binary_data_output == Some(true);
+    let requested = request
+        .outputs
+        .iter()
+        .flatten()
+        .map(|o| (o.name.as_str(), o.parameters.binary_data == Some(true)));
+    let selected = match select_outputs(model, requested, all_binary) {
+        Ok(selected) => selected,
+        Err(message) => return v2_error(StatusCode::BAD_REQUEST, &message),
+    };
+
+    let start_time = Instant::now();
+    let permit = match state.inference_slots.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            warn!("All inference slots busy, rejecting request");
+            return busy_response();
+        }
+    };
+    let mut outputs = match run_general(state, loaded, inputs, permit).await {
+        Ok(Ok(outputs)) => outputs,
+        Ok(Err(e)) => {
+            let status = match e {
+                FurnaceError::Model(
+                    ModelError::InputValidation { .. }
+                    | ModelError::InvalidDataType(_)
+                    | ModelError::InvalidInput(_),
+                ) => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            return v2_error(status, &e.to_string());
+        }
+        Err(response) => return *response,
+    };
+    state.observe_inference(slot, start_time.elapsed());
+
+    let mut raw = Vec::new();
+    let mut tensors = Vec::with_capacity(selected.len());
+    for (index, binary) in selected {
+        let output = std::mem::replace(
+            &mut outputs[index],
+            HostTensor {
+                shape: Vec::new(),
+                values: Values::F32(Vec::new()),
+            },
+        );
+        let datatype = values_datatype(&output.values).v2_name().to_string();
+        let name = model.outputs()[index].name.clone();
+        let (data, parameters) = if binary {
+            let bytes = encode_raw(&output.values);
+            let size = bytes.len();
+            raw.extend(bytes);
+            (None, Some(serde_json::json!({ "binary_data_size": size })))
+        } else {
+            let data = match output.values {
+                Values::F32(v) => OutputData::F32(v),
+                Values::I64(v) => OutputData::I64(v),
+            };
+            (Some(data), None)
+        };
+        tensors.push(OutputTensor {
+            name,
+            datatype,
+            shape: output.shape,
+            data,
+            parameters,
+        });
+    }
+    let response = InferResponse {
+        model_name: model.get_info().name.clone(),
+        model_version: MODEL_VERSION.to_string(),
+        id: request.id.clone(),
+        outputs: tensors,
+    };
+    if raw.is_empty() {
+        return Json(response).into_response();
+    }
+    binary_response(&response, raw)
+}
+
+/// The binary tensor data extension's response: the JSON header, then the raw output bytes
+fn binary_response(header: &InferResponse, raw: Vec<u8>) -> Response {
+    let mut body = serde_json::to_vec(header).expect("serializable response");
+    let json_len = body.len();
+    body.extend(raw);
+    let total = body.len();
+    (
+        [
+            (CONTENT_TYPE, HeaderValue::from_static(OCTET_STREAM)),
+            (INFERENCE_HEADER_CONTENT_LENGTH, HeaderValue::from(json_len)),
+            (CONTENT_LENGTH, HeaderValue::from(total)),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 async fn infer(
@@ -343,6 +705,9 @@ async fn infer(
             );
         }
     };
+    if !loaded.model.is_simple() {
+        return infer_named(&state, &slot, &loaded, request, binary).await;
+    }
     let (data, batch_size) = match decode_input(&loaded.model, &mut request, binary) {
         Ok(input) => input,
         Err(message) => return v2_error(StatusCode::BAD_REQUEST, &message),
@@ -378,7 +743,9 @@ async fn infer(
         Ok(Err(e)) => {
             let status = match e {
                 FurnaceError::Model(
-                    ModelError::InputValidation { .. } | ModelError::InvalidDataType(_),
+                    ModelError::InputValidation { .. }
+                    | ModelError::InvalidDataType(_)
+                    | ModelError::InvalidInput(_),
                 ) => StatusCode::BAD_REQUEST,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
@@ -405,31 +772,16 @@ async fn infer(
         }],
     };
     if !binary_output {
-        return Json(response(Some(output), None)).into_response();
+        return Json(response(Some(OutputData::F32(output)), None)).into_response();
     }
 
     // Binary tensor data: the JSON header, then the output's raw little-endian bytes
-    let raw_len = output.len() * size_of::<f32>();
+    let raw = encode_raw(&Values::F32(output));
     let header = response(
         None,
-        Some(serde_json::json!({ "binary_data_size": raw_len })),
+        Some(serde_json::json!({ "binary_data_size": raw.len() })),
     );
-    let mut body = serde_json::to_vec(&header).expect("serializable response");
-    let json_len = body.len();
-    body.reserve(raw_len);
-    for value in &output {
-        body.extend_from_slice(&value.to_le_bytes());
-    }
-    let total = body.len();
-    (
-        [
-            (CONTENT_TYPE, HeaderValue::from_static(OCTET_STREAM)),
-            (INFERENCE_HEADER_CONTENT_LENGTH, HeaderValue::from(json_len)),
-            (CONTENT_LENGTH, HeaderValue::from(total)),
-        ],
-        body,
-    )
-        .into_response()
+    binary_response(&header, raw)
 }
 
 /// Check an input tensor's name, datatype and shape against the model; returns its batch size.
@@ -506,7 +858,9 @@ fn decode_input(
                 .map(|b| f32::from_le_bytes(*b))
                 .collect()
         }
-        (None, Some(TensorData32(values))) => {
+        (None, Some(raw)) => {
+            let TensorData32(values) =
+                serde_json::from_str(raw.get()).map_err(|e| format!("Invalid input data: {e}"))?;
             if values.len() != elements {
                 return Err(format!(
                     "Input shape {:?} has {elements} elements, data has {}",
@@ -648,7 +1002,7 @@ mod tests {
             assert_eq!(output.name, "output");
             assert_eq!(output.datatype, "FP32");
             assert_eq!(output.shape, vec![2, 10]);
-            assert_eq!(output.data.as_ref().unwrap(), &expected);
+            assert_eq!(output.data, Some(OutputData::F32(expected.clone())));
         }
 
         // A single item may leave out the batch dimension
@@ -659,7 +1013,10 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let response: InferResponse = serde_json::from_slice(&response).unwrap();
         assert_eq!(response.outputs[0].shape, vec![1, 10]);
-        assert_eq!(response.outputs[0].data.as_ref().unwrap(), &expected[..10]);
+        assert_eq!(
+            response.outputs[0].data,
+            Some(OutputData::F32(expected[..10].to_vec()))
+        );
     }
 
     #[tokio::test]
@@ -716,6 +1073,205 @@ mod tests {
             .map(|b| f32::from_le_bytes(*b))
             .collect();
         assert_eq!(values, expected);
+    }
+
+    fn tensors_app() -> Router {
+        let model = Model::new(
+            Box::new(crate::model::DummyTensorsModel::new(None)),
+            "dummy",
+            0,
+        );
+        crate::api::router(model, &ServerConfig::default())
+    }
+
+    fn infer_at(model: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .uri(format!("/v2/models/{model}/infer"))
+            .method("POST")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn named_tensors_metadata_and_json() {
+        let app = tensors_app();
+        let (status, body) = send(app.clone(), get("/v2/models/tensors")).await;
+        assert_eq!(status, StatusCode::OK);
+        let model: ModelMetadata = serde_json::from_slice(&body).unwrap();
+        let described: Vec<_> = model
+            .inputs
+            .iter()
+            .chain(&model.outputs)
+            .map(|t| (t.name.as_str(), t.datatype.as_str(), t.shape.clone()))
+            .collect();
+        assert_eq!(
+            described,
+            [
+                ("ids", "INT64", vec![-1, 4]),
+                ("scale", "FP32", vec![-1]),
+                ("scores", "FP32", vec![-1, 4]),
+                ("count", "INT64", vec![-1]),
+            ]
+        );
+
+        // Inputs in any order, nested or flat; INT32 is taken for an INT64 input
+        let body = serde_json::json!({
+            "id": "q1",
+            "inputs": [
+                { "name": "scale", "shape": [2], "datatype": "FP32", "data": [0.5, 2.0] },
+                { "name": "ids", "shape": [2, 4], "datatype": "INT32", "data": [[1, 2, 3, 4], [5, 6, 7, 8]] },
+            ],
+        });
+        let (status, body) = send(app.clone(), infer_at("tensors", body)).await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let response: InferResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response.id.as_deref(), Some("q1"));
+        let scores = &response.outputs[0];
+        assert_eq!(
+            (scores.name.as_str(), scores.datatype.as_str()),
+            ("scores", "FP32")
+        );
+        assert_eq!(scores.shape, [2, 4]);
+        assert_eq!(
+            scores.data,
+            Some(OutputData::F32(vec![
+                0.5, 1.0, 1.5, 2.0, 10.0, 12.0, 14.0, 16.0
+            ]))
+        );
+        let count = &response.outputs[1];
+        assert_eq!(
+            (count.name.as_str(), count.datatype.as_str()),
+            ("count", "INT64")
+        );
+        assert_eq!(count.data, Some(OutputData::I64(vec![10, 26])));
+
+        // Only the outputs asked for, in that order
+        let body = serde_json::json!({
+            "inputs": [
+                { "name": "ids", "shape": [1, 4], "datatype": "INT64", "data": [1, 1, 1, 1] },
+                { "name": "scale", "shape": [1], "datatype": "FP32", "data": [3.0] },
+            ],
+            "outputs": [{ "name": "count" }],
+        });
+        let (status, body) = send(app.clone(), infer_at("tensors", body)).await;
+        assert_eq!(status, StatusCode::OK);
+        let response: InferResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response.outputs.len(), 1);
+        assert_eq!(response.outputs[0].data, Some(OutputData::I64(vec![4])));
+
+        // /predict cannot take named tensors and says where to send them
+        let request = Request::builder()
+            .uri("/predict")
+            .method("POST")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"input": [1, 2, 3, 4]}"#))
+            .unwrap();
+        let (status, body) = send(app.clone(), request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error = String::from_utf8_lossy(&body);
+        assert!(error.contains("/v2/models/tensors/infer"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn named_tensors_binary_in_and_out() {
+        let app = tensors_app();
+        let ids: Vec<u8> = [1i64, 2, 3, 4]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let scale = 2.0f32.to_le_bytes();
+        let header = serde_json::json!({
+            "inputs": [
+                { "name": "ids", "shape": [1, 4], "datatype": "INT64",
+                  "parameters": { "binary_data_size": ids.len() } },
+                { "name": "scale", "shape": [1], "datatype": "FP32",
+                  "parameters": { "binary_data_size": 4 } },
+            ],
+            "outputs": [
+                { "name": "scores", "parameters": { "binary_data": true } },
+                { "name": "count" },
+            ],
+        })
+        .to_string();
+        let mut body = header.clone().into_bytes();
+        body.extend_from_slice(&ids);
+        body.extend_from_slice(&scale);
+        let request = Request::builder()
+            .uri("/v2/models/tensors/infer")
+            .method("POST")
+            .header(CONTENT_TYPE, OCTET_STREAM)
+            .header(INFERENCE_HEADER_CONTENT_LENGTH, header.len())
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json_len: usize = response.headers()[&INFERENCE_HEADER_CONTENT_LENGTH]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let (json, raw) = body.split_at(json_len);
+        let header: InferResponse = serde_json::from_slice(json).unwrap();
+        // scores as raw bytes, count as JSON
+        assert_eq!(header.outputs[0].data, None);
+        assert_eq!(raw.len(), 16);
+        assert_eq!(
+            decode_raw(DataType::Fp32, raw),
+            Values::F32(vec![2.0, 4.0, 6.0, 8.0])
+        );
+        assert_eq!(header.outputs[1].data, Some(OutputData::I64(vec![10])));
+    }
+
+    #[tokio::test]
+    async fn named_tensors_invalid_requests() {
+        let app = tensors_app();
+        let ids = serde_json::json!({ "name": "ids", "shape": [1, 4], "datatype": "INT64", "data": [1, 2, 3, 4] });
+        let scale =
+            serde_json::json!({ "name": "scale", "shape": [1], "datatype": "FP32", "data": [1.0] });
+        let cases = [
+            (
+                serde_json::json!({ "inputs": [ids] }),
+                "Missing input 'scale'",
+            ),
+            (
+                serde_json::json!({ "inputs": [ids, scale, { "name": "extra", "shape": [1], "datatype": "FP32", "data": [1] }] }),
+                "Unknown input 'extra'",
+            ),
+            (
+                serde_json::json!({ "inputs": [ids, ids, scale] }),
+                "given twice",
+            ),
+            (
+                serde_json::json!({ "inputs": [{ "name": "ids", "shape": [1, 4], "datatype": "FP32", "data": [1, 2, 3, 4] }, scale] }),
+                "Input 'ids' is FP32; the model takes INT64",
+            ),
+            (
+                serde_json::json!({ "inputs": [{ "name": "ids", "shape": [1, 4], "datatype": "INT64", "data": [1.5, 2, 3, 4] }, scale] }),
+                "invalid data",
+            ),
+            (
+                serde_json::json!({ "inputs": [{ "name": "ids", "shape": [1, 3], "datatype": "INT64", "data": [1, 2, 3] }, scale] }),
+                "'ids' has shape [1, 3]",
+            ),
+            (
+                serde_json::json!({ "inputs": [ids, scale], "outputs": [{ "name": "logits" }] }),
+                "Unknown output 'logits'",
+            ),
+        ];
+        for (body, expected) in cases {
+            let (status, response) = send(app.clone(), infer_at("tensors", body.clone())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            let error: serde_json::Value = serde_json::from_slice(&response).unwrap();
+            let message = error["error"].as_str().unwrap();
+            assert!(
+                message.contains(expected),
+                "{expected:?} not in {message:?}"
+            );
+        }
     }
 
     #[tokio::test]
