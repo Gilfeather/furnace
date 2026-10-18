@@ -253,7 +253,7 @@ impl HostTensor {
 }
 
 /// The range of the integers `device` stores, found from the dtype it gives a new tensor
-fn int_range(device: &Device) -> (i64, i64) {
+pub fn int_range(device: &Device) -> (i64, i64) {
     use burn::tensor::DType;
     let probe = Tensor::<1, Int>::from_data(TensorData::new(vec![0i64], [1]), device);
     match probe.dtype() {

@@ -434,6 +434,8 @@ pub struct Model {
     outputs: Vec<IoSpec>,
     /// One `f32` tensor in and one out, both with fixed per-item shapes
     simple: bool,
+    /// The range of the backend's integers, for integer inputs
+    int_range: (i64, i64),
     stats: Mutex<ModelStats>,
 }
 
@@ -508,6 +510,7 @@ impl Model {
     pub fn new(inner: Box<dyn BurnModel>, model_type: &'static str, model_size_bytes: u64) -> Self {
         let inputs = inner.inputs();
         let outputs = inner.outputs();
+        let int_range = crate::tensor::int_range(&inner.backend().device());
         let simple = match (inputs.as_slice(), outputs.as_slice()) {
             ([input], [output]) => [input, output].iter().all(|spec| {
                 spec.dtype == DataType::Fp32
@@ -532,11 +535,18 @@ impl Model {
             inner,
             info,
             model_type,
+            int_range,
             inputs,
             outputs,
             simple,
             stats: Mutex::new(ModelStats::new()),
         }
+    }
+
+    /// Whether concurrent requests of named tensors can be joined into one batch: every input
+    /// has a fixed per-item shape. (Simple models batch on the flat path instead.)
+    pub fn batches_named(&self) -> bool {
+        !self.simple && self.inputs.iter().all(|spec| spec.static_shape().is_some())
     }
 
     /// Whether the model takes one `f32` tensor and returns one, with fixed per-item shapes.
@@ -558,25 +568,92 @@ impl Model {
     /// the batch as its first dimension. Returns the outputs in the order of [`Model::outputs`].
     /// Blocking, like [`Model::predict_batch`].
     pub fn infer(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
-        let start = Instant::now();
-        let result = self.check_inputs(&inputs).and_then(|batch| {
-            let outputs = self.run_in_chunks(inputs, batch)?;
-            self.check_outputs(&outputs, batch)?;
-            Ok((outputs, batch))
-        });
-        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
-        match result {
-            Ok((outputs, batch)) => {
-                stats.record_batch(batch);
-                stats.record_success(elapsed_ms);
-                Ok(outputs)
-            }
-            Err(e) => {
-                stats.record_error();
-                Err(e)
+        self.infer_many(vec![inputs])
+            .pop()
+            .expect("one request yields one result")
+    }
+
+    /// Several requests of named tensors as one forward pass, joined along the batch
+    /// dimension, the outputs split back. Each request is checked on its own, so an invalid one
+    /// gets its own error and the rest still run. Blocking, like [`Model::predict_batch`].
+    pub fn infer_many(&self, requests: Vec<Vec<HostTensor>>) -> Vec<Result<Vec<HostTensor>>> {
+        let mut results: Vec<Option<Result<Vec<HostTensor>>>> =
+            (0..requests.len()).map(|_| None).collect();
+        let mut valid = Vec::with_capacity(requests.len());
+        let mut errors = 0;
+        for (i, inputs) in requests.into_iter().enumerate() {
+            match self.check_inputs(&inputs) {
+                Ok(batch) => valid.push((i, inputs, batch)),
+                Err(e) => {
+                    results[i] = Some(Err(e));
+                    errors += 1;
+                }
             }
         }
+
+        let start = Instant::now();
+        let total: usize = valid.iter().map(|(_, _, batch)| batch).sum();
+        let batches: Vec<(usize, usize)> = valid.iter().map(|(i, _, b)| (*i, *b)).collect();
+        let output = match valid.len() {
+            0 => None,
+            1 => {
+                let (_, inputs, _) = valid.pop().expect("one valid request");
+                Some(self.run_checked(inputs, total))
+            }
+            _ => Some(
+                join_requests(valid.into_iter().map(|(_, inputs, _)| inputs).collect())
+                    .and_then(|inputs| self.run_checked(inputs, total)),
+            ),
+        };
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+        for _ in 0..errors {
+            stats.record_error();
+        }
+        if let Some(output) = output {
+            stats.record_batch(total);
+            match output {
+                Ok(outputs) if batches.len() == 1 => {
+                    stats.record_success(elapsed_ms);
+                    results[batches[0].0] = Some(Ok(outputs));
+                }
+                Ok(outputs) => {
+                    let mut offset = 0;
+                    for (i, batch) in batches {
+                        let mine = outputs
+                            .iter()
+                            .map(|output| output.slice_batch(offset, offset + batch))
+                            .collect();
+                        offset += batch;
+                        stats.record_success(elapsed_ms);
+                        results[i] = Some(Ok(mine));
+                    }
+                }
+                // A lone request keeps its error; a shared failure is reported to each
+                Err(e) if batches.len() == 1 => {
+                    stats.record_error();
+                    results[batches[0].0] = Some(Err(e));
+                }
+                Err(e) => {
+                    let message = e.to_string();
+                    for (i, _) in batches {
+                        stats.record_error();
+                        results[i] = Some(Err(ModelError::InferenceFailed(message.clone()).into()));
+                    }
+                }
+            }
+        }
+        results
+            .into_iter()
+            .map(|r| r.expect("every request has a result"))
+            .collect()
+    }
+
+    fn run_checked(&self, inputs: Vec<HostTensor>, batch: usize) -> Result<Vec<HostTensor>> {
+        let outputs = self.run_in_chunks(inputs, batch)?;
+        self.check_outputs(&outputs, batch)?;
+        Ok(outputs)
     }
 
     /// The batch size, if the inputs fit the model
@@ -607,7 +684,16 @@ impl Model {
                         )));
                     }
                 }
-                (Values::I64(_), true) => {}
+                (Values::I64(values), true) => {
+                    let (min, max) = self.int_range;
+                    if let Some(pos) = values.iter().position(|v| !(min..=max).contains(v)) {
+                        return Err(invalid(format!(
+                            "'{name}' has {} at index {pos}, outside {min}..={max}, the range \
+                             of this backend's integers",
+                            values[pos]
+                        )));
+                    }
+                }
                 _ => {
                     return Err(invalid(format!(
                         "'{name}' must be {}",
@@ -983,6 +1069,18 @@ impl Model {
     }
 }
 
+/// Requests' tensors joined along the batch dimension, input by input
+fn join_requests(requests: Vec<Vec<HostTensor>>) -> Result<Vec<HostTensor>> {
+    let count = requests.first().map_or(0, Vec::len);
+    let mut columns: Vec<Vec<HostTensor>> = (0..count).map(|_| Vec::new()).collect();
+    for inputs in requests {
+        for (column, tensor) in columns.iter_mut().zip(inputs) {
+            column.push(tensor);
+        }
+    }
+    columns.into_iter().map(HostTensor::concat_batch).collect()
+}
+
 /// Load a file-based MLP model from `<path>.bpk` + `<path>.json` on the CPU backend
 pub fn load_model(path: &Path) -> Result<Model> {
     load_model_with_backend(path, BackendKind::Cpu)
@@ -1139,6 +1237,44 @@ mod tests {
             "'scale' has a non-finite value",
         );
         assert_eq!(model.get_stats().error_count, 6);
+    }
+
+    #[test]
+    fn requests_of_named_tensors_share_a_forward_pass() {
+        let model = Model::new(Box::new(DummyTensorsModel::new(None)), "dummy", 0);
+        assert!(model.batches_named());
+        let mut bad_shape = tensors(vec![1, 2, 3, 4], vec![1.0]);
+        bad_shape[0].shape = vec![2, 2];
+        let results = model.infer_many(vec![
+            tensors(vec![1, 2, 3, 4], vec![1.0]),
+            bad_shape,
+            tensors(vec![1, 1, 1, 1, 2, 2, 2, 2], vec![2.0, 0.5]),
+            tensors(vec![i64::from(i32::MAX) + 1, 0, 0, 0], vec![1.0]),
+        ]);
+        // The two valid requests ran as one batch of three items and got their own rows back
+        let first = results[0].as_ref().unwrap();
+        assert_eq!(first[0].shape, [1, 4]);
+        assert_eq!(first[1].values, Values::I64(vec![10]));
+        let third = results[2].as_ref().unwrap();
+        assert_eq!(third[0].shape, [2, 4]);
+        assert_eq!(
+            third[0].values,
+            Values::F32(vec![2.0, 2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0])
+        );
+        assert_eq!(third[1].values, Values::I64(vec![4, 8]));
+        // The invalid ones got their own errors, before reaching the model
+        assert!(
+            results[1]
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("'ids'")
+        );
+        let range = results[3].as_ref().unwrap_err().to_string();
+        assert!(range.contains("outside"), "{range}");
+        let stats = model.get_stats();
+        assert_eq!((stats.batch_count, stats.batched_items), (1, 3));
+        assert_eq!((stats.success_count, stats.error_count), (2, 2));
     }
 
     #[test]

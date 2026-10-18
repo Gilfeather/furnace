@@ -119,7 +119,8 @@ async fn main() -> furnace::Result<()> {
 
 It then answers `POST /predict` and `POST /v2/models/digits/infer`, batching concurrent requests
 together. A model with several inputs or outputs, or integer ones (token ids, masks), implements
-`furnace::BurnModel` to name its tensors and is served on `/v2/models/{name}/infer`.
+`furnace::BurnModel` to name its tensors and is served on `/v2/models/{name}/infer`, batched too
+when its inputs have fixed shapes.
 [`examples/serve_burn_model`](examples/serve_burn_model/main.rs) runs both kinds:
 `cargo run --release --example serve_burn_model`. `Server::router()` gives an axum router to
 mount in your own app, and `Server::configure` reaches every `ServerConfig` setting: batching,

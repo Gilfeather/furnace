@@ -254,8 +254,10 @@ takes its tensors by name. `GET /v2/models/{model}` lists them, e.g. for a text 
 ```
 
 Send every input, in any order, as `FP32`, `INT64` or `INT32` (taken for `INT64` inputs) in JSON
-or as binary tensor data. Every output comes back unless `outputs` names some. Each request is
-one forward pass: these models are not batched with other requests. They are not served on
+or as binary tensor data. Every output comes back unless `outputs` names some. When every input
+has a fixed shape per item, concurrent requests are batched together like `/predict`'s; a model
+with an input whose shape each request fixes (a sequence length, say) runs one request per
+forward pass. Such models are not served on
 `/predict`, which answers `400 NAMED_TENSORS_REQUIRED` pointing here. The CPU backend computes
 integers in 32 bits, so an integer input outside the `i32` range gets `400`.
 

@@ -18,8 +18,10 @@ Furnace is now a library for serving your own Burn models too, not only ONNX fil
 - Models with several inputs or outputs, `int64` / `int32` inputs, and dimensions fixed per
   request. They take named tensors on `/v2/models/{model}/infer` (HTTP and gRPC), in
   JSON or binary, return every output or those requested, and describe their tensors in the
-  model metadata and `/model/info` (`inputs`, `outputs`). Models with one `float32` input and
-  output work as before, `/predict` and dynamic batching included
+  model metadata and `/model/info` (`inputs`, `outputs`). When every input has a fixed shape per
+  item, concurrent requests are batched together; an invalid one (wrong shape, an integer the
+  backend cannot hold) is refused on its own without failing the rest. Models with one
+  `float32` input and output work as before, `/predict` and dynamic batching included
 
 ### Changed
 - `furnace::BurnModel`, the trait a served model implements, is now `name`, `backend`,
