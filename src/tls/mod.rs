@@ -6,7 +6,7 @@
 //! already open keep theirs). A file that fails to load is logged and the previous
 //! certificate stays in use, so a half-written renewal does not take the server down.
 //!
-//! rustls runs the protocol, with the pure-Rust crypto provider in [`provider`] (RustCrypto
+//! rustls runs the protocol, with the pure-Rust crypto provider in `tls/provider.rs` (RustCrypto
 //! primitives, TLS 1.3, ECDSA and Ed25519 keys).
 
 mod provider;
