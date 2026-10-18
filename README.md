@@ -28,13 +28,17 @@ engines and how to reproduce: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 - **Serve your own Burn model** from Rust: `Server::new().model(Model::from_fn(...)).serve()`.
 - **Or bring an ONNX model**: put `foo.onnx` in `models/`, rebuild, run
   `furnace --model-name foo`. No hand-written Rust.
+- **KServe / Triton Open Inference Protocol** over HTTP and gRPC: Triton and KServe clients work
+  unchanged. Tensors are FP32, INT64 or INT32, several in and out, in JSON or binary.
+- **Several models per process**, each swappable for new weights without downtime.
+- **Dynamic batching** of concurrent requests.
 - **Pure Rust**, CPU or GPU: `--backend cpu|wgpu|metal|cuda`.
 - **Weights stay outside the binary** in a memory-mapped `.bpk` file (or embed them with
   `--features embed-weights`).
-- **JSON or raw `float32`** requests, and optionally JPEG/PNG with ImageNet preprocessing
-  (`--features image`).
+- **Plain `/predict`** with JSON or raw `float32`, and optionally JPEG/PNG with ImageNet
+  preprocessing (`--features image`).
 - **Production basics**: request size limits, input validation, backpressure (`503`),
-  timeouts (`504`), `/metrics`, graceful shutdown.
+  timeouts (`504`), Prometheus metrics, readiness after a warm-up, graceful shutdown.
 - **Security**: HTTPS and mutual TLS with certificate reload, in pure Rust (`--features tls`);
   API keys; per-client rate limits.
 
@@ -43,8 +47,9 @@ engines and how to reproduce: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 - **Release binaries** for Linux (x86_64, musl, aarch64), macOS (Intel, Apple Silicon) and
   Windows come with `resnet18.bpk` on the [releases page](https://github.com/Gilfeather/furnace/releases).
   Put both in one directory and run `./furnace --model-name resnet18`.
-- **crates.io** (package `furnace-server`, command `furnace`). Models are compiled in, so point
-  the build at your `.onnx` files:
+- **As a library**, to serve your own Burn models: see [below](#your-own-burn-models).
+- **crates.io** (package `furnace-server`, command `furnace`). ONNX models are compiled in, so
+  point the build at your `.onnx` files:
 
   ```bash
   FURNACE_MODELS_DIR=/path/to/models cargo install furnace-server
@@ -79,13 +84,19 @@ curl -X POST http://localhost:3000/predict -H "Content-Type: application/json" \
   --data-binary @resnet18_single_sample.json
 ```
 
+Or serve two models written in Burn, with no ONNX file at all:
+`cargo run --release --example serve_burn_model` (see [below](#your-own-burn-models)).
+
 ## Your own Burn models
 
-Furnace is also a library. Add it to your project (the ONNX import is not needed for this):
+Furnace is also a library (from version 0.9). Add it next to Burn; the ONNX import is not needed
+for this:
 
 ```toml
 [dependencies]
 furnace-server = { version = "0.9", default-features = false }
+burn = "0.22"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
 A model that takes one float tensor and returns one is served by its `forward` as it is:
@@ -111,8 +122,8 @@ together. A model with several inputs or outputs, or integer ones (token ids, ma
 `furnace::BurnModel` to name its tensors and is served on `/v2/models/{name}/infer`.
 [`examples/serve_burn_model`](examples/serve_burn_model/main.rs) runs both kinds:
 `cargo run --release --example serve_burn_model`. `Server::router()` gives an axum router to
-mount in your own app, and `ServerConfig` (via `Server::configure`) sets everything the options
-below do.
+mount in your own app, and `Server::configure` reaches every `ServerConfig` setting: batching,
+limits, gRPC, TLS, API keys and the rest of the options below.
 
 ## ONNX models
 
@@ -137,13 +148,13 @@ often helps. `furnace --help` lists the models in a build.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /predict` | Inference |
+| `POST /predict` | Inference, for models with one float tensor in and out |
 | `GET /healthz` / `GET /readyz` | Liveness / readiness (after the warm-up inference) |
 | `GET /model/info` | Input/output shapes and statistics |
 | `GET /models`, `POST /models/{model}/predict` | Several models side by side ([details](docs/API.md#several-models)) |
 | `POST /admin/models/{model}/reload` | Swap in a model, e.g. new weights, without downtime ([details](docs/API.md#reloading-a-model)) |
 | `GET /metrics` | Counters and latency percentiles as JSON, or the Prometheus format for a scraper |
-| `/v2/...` | KServe / Triton Open Inference Protocol: Triton and KServe clients work unchanged |
+| `/v2/...` | KServe / Triton Open Inference Protocol: any model, by named tensors; Triton and KServe clients work unchanged |
 
 `/predict` takes each input flattened (ResNet-18: `3 × 224 × 224 = 150,528` floats, CHW,
 ImageNet-normalized) and returns raw logits:
@@ -183,8 +194,9 @@ server's log lines for that request. Full reference, including errors:
 | `-l, --log-level <LEVEL>` | `info` | `RUST_LOG` sets per-module levels; `FURNACE_ENV=production` switches to JSON logs |
 | `--config <PATH>` | | Read options from a TOML file (also `FURNACE_CONFIG`); the command line overrides it. See [`furnace.example.toml`](furnace.example.toml) |
 
-`--model-path <PATH>` serves a Burn MLP saved as `<PATH>.bpk` + `<PATH>.json` instead (see
-`examples/basic_mnist_create.rs`).
+`--model-path <PATH>` serves the sample MLP format (`<PATH>.bpk` + `<PATH>.json`, see
+`examples/basic_mnist_create.rs`). For your own Burn architectures, use the
+[library](#your-own-burn-models).
 
 ## Deploying
 
