@@ -2020,7 +2020,7 @@ async fn reload_model(
     let weights = request.weights.clone();
     let start = Instant::now();
     let task = tokio::task::spawn_blocking(move || -> Result<(Loaded, f64)> {
-        let model = reload(weights.as_deref())?;
+        let mut model = reload(weights.as_deref())?;
         let previous_info = previous.model.get_info();
         let info = model.get_info();
         if info.name != previous_info.name {

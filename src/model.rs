@@ -436,7 +436,9 @@ pub struct Model {
     simple: bool,
     /// The range of the backend's integers, for integer inputs
     int_range: (i64, i64),
-    stats: Mutex<ModelStats>,
+    /// Shared with the model this one replaced on a reload, so requests still running on the
+    /// old one are counted too
+    stats: std::sync::Arc<Mutex<ModelStats>>,
 }
 
 /// The legacy single-tensor description: per-item shape (open dimensions as 0) and dtype
@@ -539,7 +541,7 @@ impl Model {
             inputs,
             outputs,
             simple,
-            stats: Mutex::new(ModelStats::new()),
+            stats: std::sync::Arc::new(Mutex::new(ModelStats::new())),
         }
     }
 
@@ -973,11 +975,10 @@ impl Model {
         Ok(())
     }
 
-    /// One forward pass over validated input; the error is the failure message
-    /// Continue `previous`'s statistics, so a reloaded model's counters do not restart at zero
-    pub fn adopt_stats(&self, previous: &Model) {
-        let carried = previous.get_stats();
-        *self.stats.lock().unwrap_or_else(|e| e.into_inner()) = carried;
+    /// Continue `previous`'s statistics, so a reloaded model's counters do not restart at zero.
+    /// The two share them from now on: requests still running on `previous` count as well.
+    pub fn adopt_stats(&mut self, previous: &Model) {
+        self.stats = previous.stats.clone();
     }
 
     /// Run one all-zero input through the model without touching the statistics, so the first
@@ -1016,6 +1017,7 @@ impl Model {
         Ok(Some(start.elapsed()))
     }
 
+    /// One forward pass over validated input; the error is the failure message
     fn forward(&self, input: Vec<f32>, batch_size: usize) -> std::result::Result<Vec<f32>, String> {
         let mut shape = vec![batch_size];
         shape.extend_from_slice(&self.info.input_spec.shape);
@@ -1386,6 +1388,19 @@ mod tests {
                 ModelError::InvalidDataType(_)
             ))
         ));
+    }
+
+    #[test]
+    fn a_reloaded_model_shares_its_predecessors_stats() {
+        let old = get_test_model();
+        old.predict(vec![0.5; 784]).unwrap();
+        let mut new = get_test_model();
+        new.adopt_stats(&old);
+        // A request that was still running on the old model when it was replaced
+        old.predict(vec![0.5; 784]).unwrap();
+        new.predict(vec![0.5; 784]).unwrap();
+        assert_eq!(new.get_stats().success_count, 3);
+        assert_eq!(old.get_stats().success_count, 3);
     }
 
     #[test]

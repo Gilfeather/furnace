@@ -33,6 +33,10 @@ ids and masks), with everything the server does, batching included.
   instead of a flattened `Tensor<2>`. `predict`, `device`, `get_input_shape`,
   `get_output_shape` and `get_name` are gone
 
+### Fixed
+- A request still running on a model while it was reloaded was missing from the model's
+  statistics: the old and the new model now share them
+
 ## [0.8.0] - 2026-10-18
 
 Furnace grows from a fast model server into a production one. KServe and Triton clients work
