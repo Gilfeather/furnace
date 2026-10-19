@@ -4,8 +4,11 @@
 //! ```bash
 //! cargo build --release
 //! target/release/furnace-burn-bench [--models digits,resnet18,encoder] [--clients 1,4,16]
-//!     [--backend cpu|wgpu] [--label TEXT] [--json PATH]
+//!     [--backend cpu|wgpu] [--runs N] [--label TEXT] [--json PATH]
 //! ```
+//!
+//! `--runs N` starts every server N times, the servers taking turns, and reports the median of
+//! each figure.
 //!
 //! For each model it measures, in this order:
 //!
@@ -553,6 +556,8 @@ struct ModelResult {
 struct Report {
     label: String,
     backend: String,
+    /// Each server's figures are the medians of this many runs
+    runs: usize,
     furnace_version: &'static str,
     models: Vec<ModelResult>,
 }
@@ -682,6 +687,30 @@ async fn bench_server(
     }
 }
 
+fn median(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let n = values.len();
+    (values[(n - 1) / 2] + values[n / 2]) / 2.0
+}
+
+/// One server's runs as one result: the median of each figure on its own
+fn median_server(runs: Vec<ServerResult>) -> ServerResult {
+    let of = |f: &dyn Fn(&ServerResult) -> f64| median(runs.iter().map(f).collect());
+    ServerResult {
+        server: runs[0].server,
+        ready_ms: of(&|s| s.ready_ms),
+        peak_private_mb: of(&|s| s.peak_private_mb),
+        load: (0..runs[0].load.len())
+            .map(|i| Load {
+                clients: runs[0].load[i].clients,
+                requests_per_second: of(&|s| s.load[i].requests_per_second),
+                p50_ms: of(&|s| s.load[i].p50_ms),
+                p95_ms: of(&|s| s.load[i].p95_ms),
+            })
+            .collect(),
+    }
+}
+
 /// The Python with FastAPI, uvicorn and numpy: `$FURNACE_BENCH_PYTHON`, else the virtual
 /// environment of `benches/compare/fastapi-ort`
 fn python() -> std::path::PathBuf {
@@ -794,9 +823,14 @@ async fn main() {
         .split(',')
         .map(|n| n.parse().unwrap_or_else(|_| fail("bad --clients")))
         .collect();
+    let runs: usize = flag("--runs").map_or(1, |n| match n.parse() {
+        Ok(n) if n > 0 => n,
+        _ => fail("bad --runs"),
+    });
     let mut report = Report {
         label: flag("--label").unwrap_or_default(),
         backend: backend_name.clone(),
+        runs,
         furnace_version: furnace_version(),
         models: Vec::new(),
     };
@@ -806,22 +840,25 @@ async fn main() {
         let direct = tokio::task::spawn_blocking(move || direct(which, backend))
             .await
             .expect("direct run");
-        let mut servers = Vec::new();
         let mut kinds = vec!["furnace", "hand-written"];
         // Python serves only a model it can run: the echo
         if which == Which::Echo {
             kinds.extend(["fastapi", "fastapi x4"]);
         }
-        for kind in kinds {
-            // A laptop that has just run a heavy load is slower for a while
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            eprintln!("{}: {kind}", which.name());
-            servers.push(bench_server(kind, which, &backend_name, &clients, &batching).await);
+        // The servers take turns, so a slow stretch of the machine hits each of them alike
+        let mut samples: Vec<Vec<ServerResult>> = kinds.iter().map(|_| Vec::new()).collect();
+        for run in 1..=runs {
+            for (kind, samples) in kinds.iter().zip(&mut samples) {
+                // A laptop that has just run a heavy load is slower for a while
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                eprintln!("{}: {kind} (run {run} of {runs})", which.name());
+                samples.push(bench_server(kind, which, &backend_name, &clients, &batching).await);
+            }
         }
         report.models.push(ModelResult {
             model: which,
             direct,
-            servers,
+            servers: samples.into_iter().map(median_server).collect(),
         });
     }
 
@@ -919,10 +956,15 @@ async fn overhead(which: Which, backend: BackendKind, n: usize, batching: &[Stri
 
 fn print_report(report: &Report) {
     println!(
-        "furnace {} on {}{}
+        "furnace {} on {}{}{}
 ",
         report.furnace_version,
         report.backend,
+        if report.runs > 1 {
+            format!(", medians of {} runs", report.runs)
+        } else {
+            String::new()
+        },
         if report.label.is_empty() {
             String::new()
         } else {
