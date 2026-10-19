@@ -503,8 +503,8 @@ async fn a_full_scheduler_answers_503() {
         model,
         mock::byte_pipeline(),
         SchedulerConfig {
-            workers: 1,
             max_waiting: 1,
+            ..SchedulerConfig::default()
         },
     );
     let app = Server::new().llm(engine).router();
@@ -657,6 +657,29 @@ async fn concurrent_streams_interleave_token_by_token() {
         second_started_text,
         "the second stream waited for the first to finish"
     );
+}
+
+#[tokio::test]
+async fn a_burst_of_requests_starts_together() {
+    let model = MockStepModel::new("mock", &"x".repeat(50)).token_delay(Duration::from_millis(100));
+    let decodes = model.decodes();
+    let engine = scheduled(model);
+    let request = || GenerateRequest::text("go").with_params(SamplingParams::greedy());
+    // A running stream keeps the worker in a decode step while four more requests arrive
+    let mut running = engine.generate(request()).unwrap();
+    assert!(matches!(running.recv().await, Some(Event::Started { .. })));
+    assert!(matches!(running.recv().await, Some(Event::Text(_))));
+    let mut burst: Vec<_> = (0..4)
+        .map(|_| engine.generate(request()).unwrap())
+        .collect();
+    let before = decodes.get();
+    for events in &mut burst {
+        assert!(matches!(events.recv().await, Some(Event::Started { .. })));
+        assert!(matches!(events.recv().await, Some(Event::Text(_))));
+    }
+    // All four were prefilled after the step under way, not one per step
+    let steps = decodes.get() - before;
+    assert!(steps <= 1, "the burst took {steps} steps to start");
 }
 
 #[tokio::test]

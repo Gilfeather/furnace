@@ -2,9 +2,10 @@
 //! an [`LlmEngine`].
 //!
 //! Worker threads hold the running sequences. Each iteration a worker drops the sequences whose
-//! client went away, starts at most one queued request (its prefill), then runs one decode step
-//! over the others: at batch 1 that is a round over them, token by token, so concurrent streams
-//! interleave and a long request never holds the model for the others. Sampling runs on the
+//! client went away, starts queued requests (their prefills) up to a budget of prompt tokens,
+//! then runs one decode step over all of them: at batch 1 that is a round over them, token by
+//! token, so concurrent streams interleave and a long request never holds the model for the
+//! others. Sampling runs on the
 //! worker, on the host logits. Detokenization and stop strings run on the async side, one task
 //! per request, which ends the request by dropping its channel, exactly as a disconnect does.
 
@@ -76,6 +77,10 @@ pub struct SchedulerConfig {
     pub workers: usize,
     /// Requests waiting for a sequence slot before new ones get 503
     pub max_waiting: usize,
+    /// Prompt tokens a worker prefills between two decode steps, so a burst of arrivals starts
+    /// together while the running streams wait at most about this much prefill per token. A
+    /// longer prompt still starts, alone.
+    pub max_prefill_tokens: usize,
 }
 
 impl Default for SchedulerConfig {
@@ -83,6 +88,7 @@ impl Default for SchedulerConfig {
         Self {
             workers: 1,
             max_waiting: 256,
+            max_prefill_tokens: 512,
         }
     }
 }
@@ -130,6 +136,7 @@ struct Shared<M: StepModel> {
     /// Sequences running, over every worker
     running: AtomicUsize,
     max_sequences: usize,
+    max_prefill_tokens: usize,
     stop: AtomicBool,
     stats: SchedulerStats,
 }
@@ -164,6 +171,7 @@ impl<M: StepModel> Scheduled<M> {
         let max_context = model.max_context();
         let shared = Arc::new(Shared {
             max_sequences: model.max_sequences().max(1),
+            max_prefill_tokens: config.max_prefill_tokens,
             model,
             eos_ids: pipeline.eos_ids().to_vec(),
             queue: Mutex::new(VecDeque::new()),
@@ -411,7 +419,7 @@ fn work<M: StepModel>(shared: &Arc<Shared<M>>) {
         // Drop the sequences whose client went away, or whose stop string matched
         running.retain(|r| !r.steps.is_closed());
 
-        let job = {
+        let jobs = {
             let mut queue = lock(&shared.queue);
             loop {
                 if shared.stop.load(Ordering::Acquire) {
@@ -424,19 +432,26 @@ fn work<M: StepModel>(shared: &Arc<Shared<M>>) {
                 }
                 queue = shared.wake.wait(queue).unwrap_or_else(|e| e.into_inner());
             }
-            match queue.front() {
-                Some(_) if reserve(shared) => queue.pop_front(),
-                _ => None,
+            // Within the prefill budget; the first one in any case
+            let mut jobs = Vec::new();
+            let mut budget = shared.max_prefill_tokens;
+            while let Some(job) = queue.front() {
+                if (!jobs.is_empty() && job.prompt.len() > budget) || !reserve(shared) {
+                    break;
+                }
+                budget = budget.saturating_sub(job.prompt.len());
+                jobs.extend(queue.pop_front());
             }
+            jobs
         };
 
-        // At most one prefill per iteration, so the running streams wait one prefill at most
-        let mut admitted = None;
-        if let Some(job) = job {
+        // The new sequences join this iteration's decode step, so their second token comes one
+        // step after their first, as everyone's does
+        for job in jobs {
             let slot = Slot {
                 running: release.clone(),
             };
-            admitted = start(shared, job, slot);
+            running.extend(start(shared, job, slot));
         }
 
         if !running.is_empty() {
@@ -475,7 +490,6 @@ fn work<M: StepModel>(shared: &Arc<Shared<M>>) {
                 None => false,
             });
         }
-        running.extend(admitted);
     }
 }
 
