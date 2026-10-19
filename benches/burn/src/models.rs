@@ -4,7 +4,9 @@
 use burn::module::Module;
 use burn::nn::conv::{Conv2d, Conv2dConfig};
 use burn::nn::pool::{AdaptiveAvgPool2d, AdaptiveAvgPool2dConfig, MaxPool2d, MaxPool2dConfig};
-use burn::nn::transformer::{TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput};
+use burn::nn::transformer::{
+    TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
+};
 use burn::nn::{
     BatchNorm, BatchNormConfig, Embedding, EmbeddingConfig, Linear, LinearConfig, PaddingConfig2d,
     Relu,
@@ -125,7 +127,9 @@ impl ResNet18 {
     }
 
     pub fn forward(&self, images: Tensor<4>) -> Tensor<2> {
-        let x = self.relu.forward(self.stem_bn.forward(self.stem.forward(images)));
+        let x = self
+            .relu
+            .forward(self.stem_bn.forward(self.stem.forward(images)));
         let mut x = self.max_pool.forward(x);
         for block in &self.blocks {
             x = block.forward(x);

@@ -20,6 +20,10 @@
 //!
 //! Each server is loaded by N clients, each on its own keep-alive connection, sending batch-1
 //! requests back to back. `serve KIND MODEL PORT [--backend B]` runs one server on its own.
+//!
+//! `overhead MODEL [N]` calls each server's router in this process, without a network, one
+//! request at a time, and prints the time per request: the server's own CPU cost around
+//! `forward`.
 
 mod models;
 
@@ -44,6 +48,8 @@ enum Which {
     Digits,
     Resnet18,
     Encoder,
+    /// Returns its input: what is left is the server's own cost
+    Echo,
 }
 
 impl Which {
@@ -52,7 +58,10 @@ impl Which {
             "digits" => Self::Digits,
             "resnet18" => Self::Resnet18,
             "encoder" => Self::Encoder,
-            _ => fail(&format!("unknown model {name}: digits, resnet18 or encoder")),
+            "echo" => Self::Echo,
+            _ => fail(&format!(
+                "unknown model {name}: digits, resnet18, encoder or echo"
+            )),
         }
     }
 
@@ -61,6 +70,7 @@ impl Which {
             Self::Digits => "digits",
             Self::Resnet18 => "resnet18",
             Self::Encoder => "encoder",
+            Self::Echo => "echo",
         }
     }
 
@@ -70,6 +80,7 @@ impl Which {
             Self::Digits => Some([1, 28, 28]),
             Self::Resnet18 => Some([3, 224, 224]),
             Self::Encoder => None,
+            Self::Echo => Some([1, 1, 10]),
         }
     }
 
@@ -78,13 +89,14 @@ impl Which {
             Self::Digits => 10,
             Self::Resnet18 => 1000,
             Self::Encoder => 2,
+            Self::Echo => 10,
         }
     }
 
     /// Timed requests per client: enough for a few seconds of load at 16 clients
     fn requests_per_client(self) -> usize {
         match self {
-            Self::Digits => 400,
+            Self::Digits | Self::Echo => 400,
             Self::Resnet18 => 30,
             Self::Encoder => 40,
         }
@@ -162,6 +174,7 @@ enum Net {
     Digits(DigitNet),
     Resnet18(ResNet18),
     Encoder(TextEncoder),
+    Echo,
 }
 
 impl Net {
@@ -170,6 +183,7 @@ impl Net {
             Which::Digits => Self::Digits(DigitNet::new(device)),
             Which::Resnet18 => Self::Resnet18(ResNet18::new(device)),
             Which::Encoder => Self::Encoder(TextEncoder::new(device)),
+            Which::Echo => Self::Echo,
         }
     }
 
@@ -177,9 +191,8 @@ impl Net {
     fn run(&self, which: Which, batch: usize, input: Input, device: &Device) -> Vec<f32> {
         let output = match (self, input) {
             (Self::Digits(net), Input::Images(v)) => net.forward(images(which, batch, v, device)),
-            (Self::Resnet18(net), Input::Images(v)) => {
-                net.forward(images(which, batch, v, device))
-            }
+            (Self::Resnet18(net), Input::Images(v)) => net.forward(images(which, batch, v, device)),
+            (Self::Echo, Input::Images(v)) => echo(images(which, batch, v, device)),
             (Self::Encoder(net), Input::Text(ids, mask)) => {
                 net.forward(tokens(batch, ids, device), tokens(batch, mask, device))
             }
@@ -191,6 +204,10 @@ impl Net {
             .try_into_vec::<f32>()
             .expect("f32 output")
     }
+}
+
+fn echo(x: Tensor<4>) -> Tensor<2> {
+    x.flatten::<2>(1, 3)
 }
 
 fn images(which: Which, batch: usize, values: Vec<f32>, device: &Device) -> Tensor<4> {
@@ -247,16 +264,21 @@ impl BurnModel for TextModel {
 fn furnace_model(which: Which, backend: BackendKind) -> Model {
     let device = backend.device();
     let model = match Net::new(which, &device) {
-        Net::Digits(net) => {
-            Model::from_fn("digits", backend, &[1, 28, 28], &[10], move |x: Tensor<4>| {
-                net.forward(x)
-            })
-        }
-        Net::Resnet18(net) => {
-            Model::from_fn("resnet18", backend, &[3, 224, 224], &[1000], move |x: Tensor<4>| {
-                net.forward(x)
-            })
-        }
+        Net::Digits(net) => Model::from_fn(
+            "digits",
+            backend,
+            &[1, 28, 28],
+            &[10],
+            move |x: Tensor<4>| net.forward(x),
+        ),
+        Net::Resnet18(net) => Model::from_fn(
+            "resnet18",
+            backend,
+            &[3, 224, 224],
+            &[1000],
+            move |x: Tensor<4>| net.forward(x),
+        ),
+        Net::Echo => Model::from_fn("echo", backend, &[1, 1, 10], &[10], echo),
         Net::Encoder(net) => Ok(Model::custom(TextModel {
             net,
             backend,
@@ -370,6 +392,17 @@ struct Request {
 fn request(kind: &str, which: Which, port: u16) -> Request {
     let raw = make_input(which, 1).to_bytes();
     let output_bytes = 4 * which.outputs();
+    if kind == "furnace /predict" {
+        return Request {
+            url: format!("http://127.0.0.1:{port}/predict"),
+            headers: vec![
+                ("content-type", "application/octet-stream".into()),
+                ("accept", "application/octet-stream".into()),
+            ],
+            body: raw.into(),
+            output_bytes,
+        };
+    }
     if kind == "hand-written" {
         return Request {
             url: format!("http://127.0.0.1:{port}/infer"),
@@ -561,7 +594,14 @@ async fn bench_server(
     let exe = std::env::current_exe().expect("own path");
     let start = Instant::now();
     let mut child = std::process::Command::new(exe)
-        .args(["serve", kind, which.name(), &port.to_string(), "--backend", backend])
+        .args([
+            "serve",
+            kind,
+            which.name(),
+            &port.to_string(),
+            "--backend",
+            backend,
+        ])
         .args(batching)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -616,7 +656,9 @@ fn parse_backend(name: &str) -> BackendKind {
         "cpu" => BackendKind::Cpu,
         #[cfg(feature = "wgpu")]
         "wgpu" => BackendKind::Wgpu,
-        _ => fail(&format!("unknown backend {name} (wgpu needs --features wgpu)")),
+        _ => fail(&format!(
+            "unknown backend {name} (wgpu needs --features wgpu)"
+        )),
     }
 }
 
@@ -637,6 +679,24 @@ async fn main() {
         .flatten()
         .collect();
 
+    // `--log LEVEL`: log as furnace's command line does (its default is `info`)
+    if let Some(level) = flag("--log") {
+        tracing_subscriber::fmt()
+            .with_target(false)
+            .with_thread_ids(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_env_filter(tracing_subscriber::EnvFilter::new(level))
+            .with_timer(tracing_subscriber::fmt::time::ChronoLocal::rfc_3339())
+            .with_writer(std::io::stderr)
+            .init();
+    }
+    if args.first().map(String::as_str) == Some("overhead") {
+        let which = Which::parse(args.get(1).map_or("digits", String::as_str));
+        let n = args.get(2).and_then(|n| n.parse().ok()).unwrap_or(20_000);
+        overhead(which, backend, n, &batching).await;
+        return;
+    }
     if args.first().map(String::as_str) == Some("serve") {
         let [_, kind, model, port, ..] = args.as_slice() else {
             fail("serve KIND MODEL PORT [--backend B]");
@@ -689,6 +749,91 @@ async fn main() {
     }
 }
 
+/// Each server's router called in process, one request at a time
+async fn overhead(which: Which, backend: BackendKind, n: usize, batching: &[String]) {
+    use tower::ServiceExt;
+
+    let furnace = Server::new()
+        .model(furnace_model(which, backend))
+        .configure(|config| {
+            for pair in batching.chunks(2) {
+                let value = pair[1].parse().unwrap_or_else(|_| fail("bad number"));
+                match pair[0].as_str() {
+                    "--workers" => config.batching.workers = value,
+                    "--max-batch" => config.batching.max_batch_size = value,
+                    _ => {}
+                }
+            }
+        })
+        .router();
+    let device = backend.device();
+    let hand_written = Router::new()
+        .route("/infer", post(hand_written_infer))
+        .with_state(Arc::new(HandWritten {
+            which,
+            net: Net::new(which, &device),
+            device,
+        }));
+    let device = backend.device();
+    let net = Net::new(which, &device);
+    let start = Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(net.run(which, 1, make_input(which, 1), &device));
+    }
+    println!(
+        "forward only     {:8.1} us",
+        start.elapsed().as_secs_f64() * 1e6 / n as f64
+    );
+    if let Input::Images(values) = make_input(which, 1) {
+        let model = furnace_model(which, backend);
+        let start = Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(model.predict_flat(values.clone(), 1).expect("predict"));
+        }
+        println!(
+            "Model::predict   {:8.1} us",
+            start.elapsed().as_secs_f64() * 1e6 / n as f64
+        );
+    }
+    let mut routers = vec![("furnace", furnace.clone())];
+    if which.image_shape().is_some() {
+        routers.push(("furnace /predict", furnace));
+    }
+    routers.push(("hand-written", hand_written));
+    for (kind, router) in routers {
+        let req = request(kind, which, 0);
+        let path = req.url.trim_start_matches("http://127.0.0.1:0").to_string();
+        let call = || {
+            let mut builder = axum::http::Request::post(&path);
+            for (name, value) in &req.headers {
+                builder = builder.header(*name, value);
+            }
+            let request = builder
+                .body(axum::body::Body::from(req.body.clone()))
+                .expect("request");
+            let router = router.clone();
+            async move {
+                let response = router.oneshot(request).await.expect("infallible");
+                assert!(response.status().is_success(), "{}", response.status());
+                axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("body")
+            }
+        };
+        for _ in 0..WARMUP * 20 {
+            call().await;
+        }
+        let start = Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(call().await);
+        }
+        println!(
+            "{kind:16} {:8.1} us",
+            start.elapsed().as_secs_f64() * 1e6 / n as f64
+        );
+    }
+}
+
 fn print_report(report: &Report) {
     println!(
         "furnace {} on {}{}\n",
@@ -700,7 +845,9 @@ fn print_report(report: &Report) {
             format!(" ({})", report.label)
         }
     );
-    println!("| Model | Direct, batch 1 / 4 | furnace, 1 client | Added by furnace | Ready after start (furnace / hand-written) | Peak private (furnace / hand-written) |");
+    println!(
+        "| Model | Direct, batch 1 / 4 | furnace, 1 client | Added by furnace | Ready after start (furnace / hand-written) | Peak private (furnace / hand-written) |"
+    );
     println!("|---|---|---|---|---|---|");
     for m in &report.models {
         let (f, h) = (&m.servers[0], &m.servers[1]);
@@ -711,7 +858,10 @@ fn print_report(report: &Report) {
             m.direct.batch1_ms,
             m.direct.batch4_ms,
             one.map_or("-".into(), |l| format!("{:.2} ms", l.p50_ms)),
-            one.map_or("-".into(), |l| format!("{:+.2} ms", l.p50_ms - m.direct.batch1_ms)),
+            one.map_or("-".into(), |l| format!(
+                "{:+.2} ms",
+                l.p50_ms - m.direct.batch1_ms
+            )),
             f.ready_ms,
             h.ready_ms,
             f.peak_private_mb,
