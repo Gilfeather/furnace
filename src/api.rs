@@ -2224,7 +2224,8 @@ pub(crate) mod tests {
         assert_eq!(m.total_inferences, 1);
         assert_eq!(m.total_batches, 1);
         assert_eq!(m.average_batch_size, 1.0);
-        assert_eq!(m.max_batch_size, 8);
+        // Batching is off by default
+        assert_eq!(m.max_batch_size, 1);
         assert_eq!(m.in_flight_inferences, 0);
         assert!(m.last_inference_at.is_some());
     }

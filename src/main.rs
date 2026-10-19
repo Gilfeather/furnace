@@ -168,9 +168,10 @@ fn build_cli() -> Command {
                 .value_name("N")
                 .help(
                     "Most items run together when concurrent requests are batched into one \
-                     forward pass (1-1000); 1 turns dynamic batching off",
+                     forward pass (1-1000); the default, 1, leaves batching off. Try 8 for \
+                     convolutional models and on GPUs",
                 )
-                .default_value("8")
+                .default_value("1")
                 .value_parser(clap::value_parser!(usize)),
         )
         .arg(

@@ -71,11 +71,18 @@ impl BatchJob for NamedInput {
     }
 }
 
-/// How requests are grouped into batches
+/// How requests are grouped into batches.
+///
+/// Batching is off by default: every request runs its own forward pass at once, as in a
+/// hand-written server. Whether merging requests pays depends on the model. A convolutional
+/// network on a CPU (or most models on a GPU) runs a batch of 4 in about the time of 2 single
+/// passes, and serves more requests with batching on; a transformer on a CPU takes nearly 4
+/// times as long for 4, and merging only makes requests wait. Turn it on with
+/// `max_batch_size` above 1 for models of the first kind (`benches/burn` measures both).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchConfig {
-    /// Most items in one forward pass; 1 turns batching off. A request with more items
-    /// than this still runs, alone.
+    /// Most items in one forward pass; 1 (the default) turns batching off. A request with
+    /// more items than this still runs, alone.
     pub max_batch_size: usize,
     /// Longest wait for requests still being received, counted from when the first
     /// request of the batch was queued
@@ -88,7 +95,7 @@ pub struct BatchConfig {
 impl Default for BatchConfig {
     fn default() -> Self {
         Self {
-            max_batch_size: 8,
+            max_batch_size: 1,
             batch_timeout: Duration::from_millis(2),
             workers: 4,
         }

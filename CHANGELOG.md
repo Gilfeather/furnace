@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/MODELS.md`: models known to work, and those that don't yet; `ADOPTERS.md`
 - `docs/SERVERLESS.md` and `benches/cold_start.py`: cold start measured (ready in 42 ms, first
   inference in 67 ms) and how to scale to zero on Knative / KServe, Cloud Run and Fly.io
+- `benches/burn`: Burn models served through the library API, measured against calling
+  `forward` directly and against a minimal hand-written axum server
+
+### Changed
+- Dynamic batching is off by default (`--max-batch-size 1`, `BatchConfig::default()`). It
+  pays only for some models: ResNet-18 on a CPU serves 10-20% more requests with it at 16
+  clients, a transformer text encoder about 25% fewer. Pass `--max-batch-size 8` for
+  convolutional models and on GPUs
+- Less work per request: request ID, CORS and security headers in one layer, no access check
+  without API keys or a rate limit, and the per-request log line at `debug` instead of `info`
+  (at the command line's default level it cost about 9 µs per request). `tower-http` is no
+  longer a dependency
 
 ### Fixed
 - The release's Docker image was built without TLS; it now has the same features as the
