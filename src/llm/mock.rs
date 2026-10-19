@@ -76,7 +76,7 @@ pub fn byte_pipeline() -> TextPipeline {
         .expect("the chat template is valid")
 }
 
-/// Counts something alive (requests, sequences); decremented when the guard is dropped
+/// A count shared with the model: what is alive (requests, sequences), or decode calls
 #[derive(Debug, Clone, Default)]
 pub struct Live(Arc<AtomicUsize>);
 
@@ -112,6 +112,7 @@ pub struct MockStepModel {
     prefill_delay: Duration,
     token_delay: Duration,
     live: Live,
+    decodes: Live,
 }
 
 /// A [`MockStepModel`] sequence: how far into the reply it is
@@ -134,6 +135,7 @@ impl MockStepModel {
             prefill_delay: Duration::ZERO,
             token_delay: Duration::ZERO,
             live: Live::default(),
+            decodes: Live::default(),
         }
     }
 
@@ -162,6 +164,12 @@ impl MockStepModel {
     /// The sequences alive, as a handle that outlives moving the model into an engine
     pub fn live(&self) -> Live {
         self.live.clone()
+    }
+
+    /// Decode calls finished so far, as a handle like [`live`](Self::live): steps, counted
+    /// without a clock
+    pub fn decodes(&self) -> Live {
+        self.decodes.clone()
     }
 
     /// Logits that make `token` the clear choice
@@ -200,6 +208,7 @@ impl StepModel for MockStepModel {
     fn decode(&self, sequence: &mut MockSequence, _token: u32) -> Result<Logits, BoxError> {
         std::thread::sleep(self.token_delay);
         sequence.position += 1;
+        self.decodes.0.fetch_add(1, Ordering::AcqRel);
         Ok(self.logits_for(sequence.position))
     }
 }
