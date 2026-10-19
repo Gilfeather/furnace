@@ -40,6 +40,8 @@ use models::{DigitNet, ResNet18, TextEncoder};
 use serde::Serialize;
 
 const DIRECT_RUNS: usize = 50;
+/// Longest any one request may take before the run fails
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const WARMUP: usize = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -483,6 +485,7 @@ async fn load(req: Arc<Request>, clients: usize, per_client: usize) -> Load {
             tokio::spawn(async move {
                 let client = reqwest::Client::builder()
                     .pool_max_idle_per_host(1)
+                    .timeout(REQUEST_TIMEOUT)
                     .build()
                     .expect("client");
                 for _ in 0..WARMUP {
@@ -626,7 +629,11 @@ async fn bench_server(
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("start server");
-    let health = reqwest::Client::new();
+    // A server that accepts connections but never answers must fail the run, not hang it
+    let health = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .expect("client");
     let url = format!("http://127.0.0.1:{port}/healthz");
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     // The process to measure: the Python interpreter reports its own pid, since on Windows a
