@@ -31,7 +31,8 @@ Then send it tensors with any Triton or KServe client, or JSON to `POST /predict
 
 Median latency on a 16-thread laptop CPU (AMD Ryzen 9 7940HS). In process, Furnace takes
 8.0 ms per image against ONNX Runtime's 7.1 ms, and the same 25 ms for four. Details, more
-engines and how to reproduce: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+engines and how to reproduce: [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Starting in 42 ms makes
+scaling to zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
 
 ## Features
 

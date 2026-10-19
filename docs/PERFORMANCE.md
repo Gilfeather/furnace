@@ -67,6 +67,20 @@ writes the raw reports; each engine is also its own binary, e.g. `target/release
 --threads 1`. Please share results from other CPUs in
 [#52](https://github.com/Gilfeather/furnace/issues/52).
 
+## Cold start
+
+From launching the server to its answers, ResNet-18, median of 10 runs:
+
+| | Ready (`/readyz` 200) | First inference answered |
+|---|---|---|
+| Furnace binary | 42 ms | 67 ms |
+| Furnace in Docker | 474 ms | 521 ms |
+| FastAPI + ONNX Runtime | 1,863 ms | |
+
+Docker's own start dominates its row (a container that only prints the version takes 722 ms
+here). `python benches/cold_start.py` reproduces both Furnace rows; [SERVERLESS.md](SERVERLESS.md)
+covers scaling to zero.
+
 ## Where Furnace's speed comes from
 
 Furnace's CPU backend is [burn-flex](https://github.com/tracel-ai/burn) with faster

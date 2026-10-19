@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Releases carry build provenance attestations for every binary and image, SHA-256 checksums
   and an SPDX SBOM; `SECURITY.md` says how to report a vulnerability and verify a download
 - `docs/MODELS.md`: models known to work, and those that don't yet; `ADOPTERS.md`
+- `docs/SERVERLESS.md` and `benches/cold_start.py`: cold start measured (ready in 42 ms, first
+  inference in 67 ms) and how to scale to zero on Knative / KServe, Cloud Run and Fly.io
 
 ### Fixed
 - The release's Docker image was built without TLS; it now has the same features as the
