@@ -351,6 +351,12 @@ another model path for a `--model-path` model; the path is read on the server.
 | 409 | `RELOAD_IN_PROGRESS` | The model is being reloaded already |
 | 422 | `RELOAD_FAILED` | Loading or warming up failed; the previous model is still serving |
 
+## LLMs (OpenAI API)
+
+With the `llm` feature, `POST /v1/chat/completions`, `POST /v1/completions` and
+`GET /v1/models` serve LLMs in the OpenAI format, streaming included, next to the routes above.
+Their requests, streaming format, errors and metrics are in [LLM.md](LLM.md).
+
 ## TLS
 
 Built with `--features tls` (the release binaries and the Docker image are), the server speaks

@@ -102,6 +102,10 @@ zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
   `furnace --model-name foo` (with [burn-onnx](https://github.com/tracel-ai/burn-onnx)).
 - **KServe / Triton Open Inference Protocol** over HTTP and gRPC: Triton and KServe clients work
   unchanged. Tensors are FP32, INT64 or INT32, several in and out, in JSON or binary.
+- **LLMs too** (`--features llm`): the OpenAI chat and completions API with streaming, next
+  to your other models in the same server. GGUF files run on the CPU through candle
+  ([`furnace-candle`](furnace-candle)), and your own Burn LLM plugs in with prefill and
+  decode. See [docs/LLM.md](docs/LLM.md).
 - **Several models per process**, each swappable for new weights without downtime.
 - **Dynamic batching** of concurrent requests, for models where it pays (off by default).
 - **Pure Rust**, CPU or GPU: `--backend cpu|wgpu|metal|cuda`.
