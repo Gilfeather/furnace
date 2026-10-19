@@ -6,6 +6,7 @@
 | `basic_mnist_create` | Creates an MNIST-shaped MLP (784 → 128 → 10) as `examples/basic_mnist/model.{bpk,json}` |
 | `basic_mnist_test` | Calls a running server with MNIST-sized inputs (health, info, single, batch) |
 | `custom_data_test` | Sends synthetic digit-like images and random data to a running MNIST-sized model |
+| `nerve` | The nervous system end to end (`--features nerve,llm`): a habituating receptor, a Burn reflex classifier, a mock LLM brain, webhook / command / journal effectors, with a webhook receiver in the same process. See [docs/NERVE.md](../docs/NERVE.md) |
 
 ## ResNet-18 (built-in)
 

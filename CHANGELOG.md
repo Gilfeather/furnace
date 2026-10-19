@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The nervous system (feature `nerve`): `furnace::nerve`, the layer between sensors, small
+  fast models, an LLM (the brain) and actuators. One `Signal` type (a 64-bit feature, an
+  urgency, an intensity, a lazily shared payload, a trace); neurons with per-neuron
+  mechanisms (threshold, habituation as a bounded table with exponential decay, refractory
+  period); reflex pathways as direct calls on the firing thread and deliberative pathways
+  over a summation worker, selected by the signal's remaining deadline against each
+  pathway's measured p99, then by weight; `prepare()` for signals with time to spare.
+  Receptors (an HTTP route, an in-process channel, a timer, line streams, an upstream SSE
+  feed), effectors with their own retry / circuit-breaker / rate-limit / refractory loops
+  (the HTTP response, webhooks, local processes, file append, an in-process channel, SSE
+  push), brains over any `LlmEngine` or `Model` whose output is commands, `Server::nerve`,
+  `GET /nerve`, and metrics (per neuron fired and quiet by reason, per pathway latency,
+  `brain_fraction`, stimulus-to-action per reflex arc) in JSON and Prometheus. The demo in
+  `examples/nerve`; `benches/nerve` measures it against a hand-written server and FastAPI.
+  See docs/NERVE.md
 - Serve LLMs (feature `llm`): `POST /v1/chat/completions`, `POST /v1/completions` and
   `GET /v1/models` in the OpenAI format, with SSE streaming and usage, OpenAI-shaped errors,
   cancellation when the client disconnects, 503s at the concurrency limit or a full queue, and

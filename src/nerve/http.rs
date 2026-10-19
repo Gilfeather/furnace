@@ -16,6 +16,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 
 use super::fabric::{Fabric, Outcome};
+use super::neuron::Quiet;
 use super::receptor::{HttpMethod, Ingest, Receptor};
 use super::signal::{NeuronId, Reply};
 
@@ -114,22 +115,33 @@ async fn ingest(State(mounted): State<Arc<Mounted>>, headers: HeaderMap, body: B
         }
     };
     let headers = response.headers_mut();
-    if let Ok(value) = HeaderValue::from_str(&describe_outcome(&outcome)) {
-        headers.insert(OUTCOME_HEADER, value);
-    }
-    if let Ok(value) = HeaderValue::from_str(&id.0.to_string()) {
-        headers.insert(SIGNAL_HEADER, value);
-    }
+    headers.insert(OUTCOME_HEADER, describe_outcome(&outcome));
+    headers.insert(SIGNAL_HEADER, HeaderValue::from(id.0));
     response
 }
 
 /// `quiet:habituation`, `queued`, `acted:2`, `done`
-fn describe_outcome(outcome: &Outcome) -> String {
+fn describe_outcome(outcome: &Outcome) -> HeaderValue {
     if outcome.is_quiet() {
-        return match outcome.quiet {
-            Some((_, reason)) => format!("quiet:{}", reason.as_str()),
-            None => "quiet".to_string(),
-        };
+        return HeaderValue::from_static(match outcome.quiet {
+            Some((_, Quiet::Threshold)) => "quiet:threshold",
+            Some((_, Quiet::Habituation)) => "quiet:habituation",
+            Some((_, Quiet::Refractory)) => "quiet:refractory",
+            Some((_, Quiet::NotInterested)) => "quiet:not_interested",
+            None => "quiet",
+        });
+    }
+    match (
+        outcome.queued,
+        outcome.acted,
+        outcome.unrouted,
+        outcome.no_pathway,
+    ) {
+        (0, 0, 0, 0) => return HeaderValue::from_static("done"),
+        (1.., 0, 0, 0) => return HeaderValue::from_static("queued"),
+        (0, 1, 0, 0) => return HeaderValue::from_static("acted:1"),
+        (0, 2, 0, 0) => return HeaderValue::from_static("acted:2"),
+        _ => {}
     }
     let mut parts = Vec::new();
     if outcome.queued > 0 {
@@ -144,10 +156,7 @@ fn describe_outcome(outcome: &Outcome) -> String {
     if outcome.no_pathway > 0 {
         parts.push(format!("no-pathway:{}", outcome.no_pathway));
     }
-    if parts.is_empty() {
-        parts.push("done".to_string());
-    }
-    parts.join(",")
+    HeaderValue::from_str(&parts.join(",")).unwrap_or(HeaderValue::from_static("done"))
 }
 
 /// Subscribe to an SSE effector's commands
