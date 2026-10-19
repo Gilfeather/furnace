@@ -106,6 +106,10 @@ zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
   to your other models in the same server. GGUF files run on the CPU through candle
   ([`furnace-candle`](furnace-candle)), and your own Burn LLM plugs in with prefill and
   decode. See [docs/LLM.md](docs/LLM.md).
+- **A nervous system** (`--features nerve`): receptors, reflex arcs, a brain and effectors,
+  with habituation, thresholds, refractory periods and pathway selection by timing, so that
+  most signals never reach the LLM and the ones that must act do so in microseconds.
+  See [docs/NERVE.md](docs/NERVE.md).
 - **Several models per process**, each swappable for new weights without downtime.
 - **Dynamic batching** of concurrent requests, for models where it pays (off by default).
 - **Pure Rust**, CPU or GPU: `--backend cpu|wgpu|metal|cuda`.
@@ -157,6 +161,40 @@ when its inputs have fixed shapes.
 axum router to mount in your own app ([above](#embed-it-in-your-axum-app)), and
 `Server::configure` reaches every `ServerConfig` setting: batching, limits, gRPC, TLS, API keys
 and the rest of the options below.
+
+## The nervous system
+
+Inference getting faster is worth nothing if the layer that moves signals to and from the
+models is the bottleneck. With `--features nerve`, Furnace is that layer: the nervous system
+between sensors, small fast models, the large slow model (an LLM, the brain) and actuators.
+Receptors extract a small feature from each input and habituate to repeats, so a repeated
+stimulus dies before it reaches anything; reflex pathways are direct calls, microseconds from
+stimulus to effector; a signal's deadline selects its pathway, so the brain only sees what is
+new and not urgent; the brain's output is commands, carried out by effectors (webhooks,
+local commands, files, the response) with their own retry, circuit-breaker and rate-limit
+loops. Measured against a hand-written server doing the same work: 146 ns per hop, 0.8 µs from stimulus to effector call on a reflex arc, a brain fraction of 0.45 on a stream with half repeats, 47 µs added to a webhook; at 16 clients the fabric server serves 11% fewer requests per second than the bare handler (the server layer around it, not the fabric).
+
+```rust
+let mut b = Fabric::builder();
+let events = b.receptor(Http::new("events", "/events").text(),
+    Mechanisms::NONE.threshold(0.6).habituation(Habituation::new(Duration::from_secs(30))));
+let triage = b.neuron(FnNeuron::reflex("triage", |signal, _| {
+    if signal.payload.as_text().is_some_and(|t| t.contains("ALERT")) {
+        Firing::one(signal.command("alarm", json!({})).with_urgency(Urgency::within(Duration::from_millis(2))))
+    } else {
+        Firing::one(signal) // to the brain, by weight
+    }
+}), Mechanisms::NONE);
+let brain = b.neuron(Llm::new("brain", engine), Mechanisms::NONE);
+let alarm = b.neuron(Effector::new(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")), Mechanisms::NONE);
+b.reflex(events, triage, 1.0);
+b.reflex(triage, alarm, 1.0);
+b.deliberative(triage, brain, 2.0, Summation::default());
+Server::new().nerve(b.build()).serve().await?;
+```
+
+[docs/NERVE.md](docs/NERVE.md) has the concepts, the API, the demo
+(`cargo run --release --features nerve,llm --example nerve`) and the measurements.
 
 ## Install
 

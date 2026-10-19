@@ -326,8 +326,7 @@ impl Http {
         self
     }
 
-    /// Carry the body as text (`Payload::Text`) rather than bytes; non-UTF-8 bodies are
-    /// ignored
+    /// Only accept UTF-8 bodies (`Payload::as_text` then always succeeds); others are ignored
     pub fn text(mut self) -> Self {
         self.text = true;
         self
@@ -372,11 +371,11 @@ impl Receptor for Http {
             Some(f) => f(&request),
             None => Feature::sketch(&request.body),
         };
-        let payload = if self.text {
-            Payload::Text(Arc::from(std::str::from_utf8(&request.body).ok()?))
-        } else {
-            Payload::Bytes(request.body)
-        };
+        // Text stays in the request's own buffer: `Payload::as_text` reads bytes as UTF-8
+        if self.text && std::str::from_utf8(&request.body).is_err() {
+            return None;
+        }
+        let payload = Payload::Bytes(request.body);
         let mut signal = self.source.signal(feature, payload);
         if let Some(ms) = request
             .headers

@@ -13,6 +13,8 @@ The same API as an OpenAPI 3 spec: [openapi.json](openapi.json).
 | `GET /models`, `GET /models/{model}`, `POST /models/{model}/predict` | The same, per model, when serving several |
 | `POST /admin/models/{model}/reload` | Reload a model without downtime (with `--admin-token`) |
 | `/v2/...` | Inference over the KServe / Triton Open Inference Protocol, for every model, by named tensors |
+| `/v1/chat/completions`, `/v1/completions`, `/v1/models` | LLMs in the OpenAI format (`--features llm`, [LLM.md](LLM.md)) |
+| `GET /nerve`, `GET /nerve/effectors/{name}/events`, the fabric's own routes | The nervous system (`--features nerve`, [NERVE.md](NERVE.md)): its description with measured latencies, an SSE effector's commands, and each HTTP receptor's route |
 
 ## `GET /healthz` (alias `GET /health`)
 

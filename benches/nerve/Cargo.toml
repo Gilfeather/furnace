@@ -1,0 +1,33 @@
+# The nervous system against a hand-written axum server doing the same work in a handler,
+# and FastAPI where Python can do it (docs/NERVE.md). Its own workspace (own Cargo.lock and
+# target/) so its dependencies never enter furnace's.
+[package]
+name = "furnace-nerve-bench"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+description = "Measure what furnace's nervous system costs per hop, per reflex arc and per request"
+license = "MIT"
+
+[workspace]
+
+[dependencies]
+furnace = { package = "furnace-server", path = "../..", default-features = false, features = ["nerve"] }
+axum = "0.8"
+tokio = { version = "1.53", features = ["full"] }
+reqwest = { version = "0.13", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+# Same settings as furnace's release profile
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false

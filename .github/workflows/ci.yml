@@ -72,17 +72,17 @@ jobs:
       if: matrix.rust == 'stable'
       run: |
         cargo clippy --all-targets -- -D warnings
-        cargo clippy --all-targets --features "image grpc tls llm" -- -D warnings
+        cargo clippy --all-targets --features "image grpc tls llm nerve" -- -D warnings
 
     - name: Type check
       if: matrix.check-only
-      run: cargo check --all-targets --features "image grpc tls llm"
+      run: cargo check --all-targets --features "image grpc tls llm nerve"
 
     # With the optional image input; the default build's only extra test is its 415. Examples and
     # benches are left to clippy above, which type-checks them without an optimized build.
     - name: Run tests
       if: ${{ !matrix.check-only }}
-      run: cargo test --profile ci --lib --bins --tests --features "image grpc tls llm"
+      run: cargo test --profile ci --lib --bins --tests --features "image grpc tls llm nerve"
 
   llm-candle:
     name: furnace-candle (GGUF LLMs through candle)
@@ -130,7 +130,7 @@ jobs:
         # libraries or bindings to them, or GPU kernels compiled by nvcc
         banned='^(cc|cmake|bindgen|pkg-config|ring|aws-lc-rs|aws-lc-sys|openssl|openssl-sys|onig|onig_sys|cudarc|intel-mkl-src|accelerate-src|candle-kernels|candle-flash-attn|candle-metal-kernels|zstd-sys|libz-sys|bzip2-sys|lzma-sys)$'
         failed=0
-        for package in "-p furnace-server --features llm" "-p furnace-server --no-default-features --features llm" "-p furnace-candle"; do
+        for package in "-p furnace-server --features llm,nerve" "-p furnace-server --no-default-features --features llm,nerve" "-p furnace-candle"; do
           crates=$(cargo tree $package -e normal,build "${targets[@]}" --prefix none -f '{p}' | awk '{print $1}' | sort -u)
           found=$(grep -E "$banned" <<<"$crates" || true)
           if [ -n "$found" ]; then
