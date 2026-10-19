@@ -429,9 +429,9 @@ impl ChannelSender {
 
     /// Queue the signal for the receptor's thread; `Err` with the signal if the queue is full
     /// or the receptor is gone
-    pub fn send(&self, signal: Signal) -> Result<(), Signal> {
+    pub fn send(&self, signal: Signal) -> Result<(), Box<Signal>> {
         self.sender.try_send(signal).map_err(|e| match e {
-            mpsc::TrySendError::Full(s) | mpsc::TrySendError::Disconnected(s) => s,
+            mpsc::TrySendError::Full(s) | mpsc::TrySendError::Disconnected(s) => Box::new(s),
         })
     }
 }
