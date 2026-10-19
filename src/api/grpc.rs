@@ -480,7 +480,10 @@ mod tests {
             }),
             ..ServerConfig::default()
         };
-        let state = server_state(vec![super::super::tests::dummy_model().into()], &config);
+        let state = server_state(
+            vec![ServedModel::from(super::super::tests::dummy_model())].into(),
+            &config,
+        );
         let mut client = client_for(state).await;
         let with_key = |mut request: tonic::Request<ModelInferRequest>| {
             request.metadata_mut().insert(
@@ -516,8 +519,11 @@ mod tests {
             "dummy",
             0,
         );
-        let mut client =
-            client_for(server_state(vec![model.into()], &ServerConfig::default())).await;
+        let mut client = client_for(server_state(
+            vec![ServedModel::from(model)].into(),
+            &ServerConfig::default(),
+        ))
+        .await;
         let metadata = client
             .model_metadata(pb::ModelMetadataRequest {
                 name: "tensors".to_string(),

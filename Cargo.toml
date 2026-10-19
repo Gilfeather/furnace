@@ -29,6 +29,8 @@ exclude = [
     "deny.toml",
     "default.nix",
     "flake.nix",
+    # The candle adapter is its own crate (not published yet)
+    "/furnace-candle/",
 ]
 
 # `cargo binstall furnace-server` downloads the release binary instead of compiling
@@ -56,7 +58,12 @@ pkg-url = "{ repo }/releases/download/v{ version }/furnace-windows-x86_64.exe"
 
 [package.metadata.docs.rs]
 # Document the gRPC, TLS and image input APIs too
-features = ["grpc", "tls", "image"]
+features = ["grpc", "tls", "image", "llm"]
+
+[workspace]
+members = [".", "furnace-candle"]
+# Benchmarks with their own workspaces, lockfiles and targets
+exclude = ["benches/burn", "benches/compare"]
 
 [lib]
 name = "furnace"
@@ -83,6 +90,9 @@ grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost", "dep:tonic-prost-build", "d
 # TLS for HTTP and gRPC (`--tls-cert`, `--tls-key`, `--tls-client-ca`): rustls with a pure-Rust
 # crypto provider built on RustCrypto (src/tls/provider.rs)
 tls = ["dep:rustls", "dep:tokio-rustls", "dep:tokio-stream", "dep:aes-gcm", "dep:chacha20poly1305", "dep:p256", "dep:p384", "dep:ed25519-dalek", "dep:x25519-dalek", "dep:sha2", "dep:hmac", "dep:getrandom"]
+# Serve LLMs: OpenAI-compatible chat and completions with streaming, behind the `LlmEngine` and
+# `StepModel` traits (src/llm). Engines come from other crates, such as furnace-candle.
+llm = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:futures-util"]
 wgpu = ["burn/wgpu"]
 metal = ["burn/metal"]
 cuda = ["burn/cuda"]
@@ -144,6 +154,12 @@ x25519-dalek = { version = "3", features = ["static_secrets"], optional = true }
 sha2 = { version = "0.11", optional = true }
 hmac = { version = "0.13", optional = true }
 getrandom = { version = "0.4", optional = true }
+# LLM serving (feature `llm`). tokenizers without its defaults: they build Oniguruma (C) and
+# esaxx (C++); fancy-regex is the pure-Rust regex engine. minijinja without `stacker` (cc).
+tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"], optional = true }
+minijinja = { version = "2.24", default-features = false, features = ["builtins", "json", "serde", "macros", "loop_controls", "multi_template"], optional = true }
+minijinja-contrib = { version = "2.24", default-features = false, features = ["pycompat"], optional = true }
+futures-util = { version = "0.3", default-features = false, optional = true }
 
 [build-dependencies]
 burn-onnx = { version = "0.22", optional = true }
@@ -165,6 +181,12 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 rand = "0.10"
 # Builds ONNX graphs for the build/optimize.rs tests (already a build dependency)
 onnx-ir = "0.22"
+# Reads streamed response bodies in the LLM tests
+futures-util = "0.3"
+
+[[test]]
+name = "llm"
+required-features = ["llm"]
 
 [[bench]]
 name = "inference_benchmark"

@@ -186,6 +186,10 @@ pub struct MetricsResponse {
     pub ready: bool,
     /// The same per model; the fields above are totals over them
     pub models: Vec<ModelMetrics>,
+    /// The LLMs (feature `llm`), with their own counters; absent without any
+    #[cfg(feature = "llm")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub llm: Vec<crate::llm::LlmMetrics>,
     pub timestamp: String,
 }
 
@@ -205,7 +209,7 @@ pub struct ModelMetrics {
 /// `GET /models`
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ModelsResponse {
-    /// The model `/predict` and `/model/info` use
+    /// The model `/predict` and `/model/info` use; empty when the server serves only LLMs
     pub default_model: String,
     pub models: Vec<ModelSummary>,
 }
@@ -379,7 +383,35 @@ impl From<Model> for ServedModel {
 /// application.
 pub struct Server {
     config: ServerConfig,
+    contents: Contents,
+}
+
+/// What a server serves
+#[derive(Default)]
+struct Contents {
     models: Vec<ServedModel>,
+    #[cfg(feature = "llm")]
+    llms: Vec<Arc<dyn crate::llm::LlmEngine>>,
+}
+
+impl Contents {
+    fn is_empty(&self) -> bool {
+        #[cfg(feature = "llm")]
+        if !self.llms.is_empty() {
+            return false;
+        }
+        self.models.is_empty()
+    }
+}
+
+impl From<Vec<ServedModel>> for Contents {
+    fn from(models: Vec<ServedModel>) -> Self {
+        Self {
+            models,
+            #[cfg(feature = "llm")]
+            llms: Vec::new(),
+        }
+    }
 }
 
 impl Default for Server {
@@ -397,7 +429,7 @@ impl Server {
     pub fn with_config(config: ServerConfig) -> Self {
         Self {
             config,
-            models: Vec::new(),
+            contents: Contents::default(),
         }
     }
 
@@ -419,7 +451,17 @@ impl Server {
 
     /// Serve `model`; the first model added is the one `/predict` uses
     pub fn model(mut self, model: Model) -> Self {
-        self.models.push(model.into());
+        self.contents.models.push(model.into());
+        self
+    }
+
+    /// Serve an LLM (feature `llm`) on `POST /v1/chat/completions`, `POST /v1/completions` and
+    /// `GET /v1/models`, next to the other models: a [`Scheduled`](crate::llm::Scheduled) step
+    /// model, or any [`LlmEngine`](crate::llm::LlmEngine). A request without `model` goes to the
+    /// first LLM added.
+    #[cfg(feature = "llm")]
+    pub fn llm(mut self, engine: impl crate::llm::LlmEngine) -> Self {
+        self.contents.llms.push(Arc::new(engine));
         self
     }
 
@@ -430,7 +472,7 @@ impl Server {
         model: Model,
         reload: impl Fn(Option<&std::path::Path>) -> Result<Model> + Send + Sync + 'static,
     ) -> Self {
-        self.models.push(ServedModel {
+        self.contents.models.push(ServedModel {
             model,
             reload: Some(Arc::new(reload)),
         });
@@ -439,18 +481,18 @@ impl Server {
 
     /// The HTTP API as an axum router, to serve or mount yourself. Panics without a model.
     pub fn router(self) -> Router {
-        router_with_models(self.models, &self.config)
+        router_with_state(server_state(self.contents, &self.config), &self.config)
     }
 
     /// Serve until Ctrl-C / SIGTERM
     pub async fn serve(self) -> Result<()> {
-        if self.models.is_empty() {
+        if self.contents.is_empty() {
             return Err(ApiError::ServerStartup(
                 "no model to serve; add one with Server::model".to_string(),
             )
             .into());
         }
-        start_server_with_models(self.config, self.models).await
+        serve(self.config, self.contents).await
     }
 }
 
@@ -552,6 +594,9 @@ struct ServerState {
     request_latency: Histogram,
     /// Successful inferences of every model, from decoded input to output (queueing included)
     inference_latency: Histogram,
+    /// The LLMs, when there are any
+    #[cfg(feature = "llm")]
+    llm: Option<Arc<crate::llm::LlmState>>,
 }
 
 impl ServerState {
@@ -559,8 +604,9 @@ impl ServerState {
         self.start_time.elapsed().unwrap_or_default().as_secs()
     }
 
-    fn default_slot(&self) -> &Arc<ModelSlot> {
-        &self.models[0]
+    /// `None` when the server serves only LLMs
+    fn default_slot(&self) -> Option<&Arc<ModelSlot>> {
+        self.models.first()
     }
 
     fn slot(&self, name: &str) -> Option<&Arc<ModelSlot>> {
@@ -590,14 +636,29 @@ pub fn router(model: Model, config: &ServerConfig) -> Router {
 
 /// [`router`] for several models; the first is the default for `/predict`
 pub fn router_with_models(models: Vec<ServedModel>, config: &ServerConfig) -> Router {
-    router_with_state(server_state(models, config), config)
+    router_with_state(server_state(models.into(), config), config)
 }
 
 /// The shared state of the HTTP and gRPC servers; also starts the models' warm-ups
-fn server_state(models: Vec<ServedModel>, config: &ServerConfig) -> AppState {
-    assert!(!models.is_empty(), "at least one model to serve");
+fn server_state(contents: Contents, config: &ServerConfig) -> AppState {
+    assert!(!contents.is_empty(), "at least one model to serve");
     let batching = config.batching;
-    let models = models
+    let inference_slots = Arc::new(Semaphore::new(config.max_concurrent_requests));
+    #[cfg(feature = "llm")]
+    let llm = (!contents.llms.is_empty()).then(|| {
+        let others = contents
+            .models
+            .iter()
+            .map(|served| served.model.get_info().name.clone())
+            .collect();
+        Arc::new(crate::llm::LlmState::new(
+            contents.llms,
+            others,
+            inference_slots.clone(),
+        ))
+    });
+    let models = contents
+        .models
         .into_iter()
         .map(|served| {
             Arc::new(ModelSlot {
@@ -612,7 +673,7 @@ fn server_state(models: Vec<ServedModel>, config: &ServerConfig) -> AppState {
     Arc::new(ServerState {
         models,
         start_time: SystemTime::now(),
-        inference_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        inference_slots,
         max_concurrent: config.max_concurrent_requests,
         request_timeout: config.request_timeout,
         batching,
@@ -626,6 +687,8 @@ fn server_state(models: Vec<ServedModel>, config: &ServerConfig) -> AppState {
         rejected_rate_limited: AtomicU64::new(0),
         request_latency: Histogram::new(),
         inference_latency: Histogram::new(),
+        #[cfg(feature = "llm")]
+        llm,
     })
 }
 
@@ -654,6 +717,11 @@ fn router_with_state(state: AppState, config: &ServerConfig) -> Router {
         .route("/admin/models/{model}/reload", post(reload_model))
         .route("/metrics", get(metrics))
         .merge(v2::routes(state.clone()));
+    #[cfg(feature = "llm")]
+    let router = match &state.llm {
+        Some(llm) => router.merge(crate::llm::routes(llm.clone())),
+        None => router,
+    };
     // Without API keys or a rate limit every request is admitted: skip the check altogether
     let router = if state.access.is_open() {
         router
@@ -821,8 +889,20 @@ pub async fn start_server_with_models(
     config: ServerConfig,
     models: Vec<ServedModel>,
 ) -> Result<()> {
-    let state = server_state(models, &config);
-    info!("📚 Serving {}", state.model_names().join(", "));
+    serve(config, models.into()).await
+}
+
+async fn serve(config: ServerConfig, contents: Contents) -> Result<()> {
+    let state = server_state(contents, &config);
+    #[cfg(not(feature = "llm"))]
+    let names = state.model_names();
+    #[cfg(feature = "llm")]
+    let names: Vec<&str> = state
+        .model_names()
+        .into_iter()
+        .chain(state.llm.iter().flat_map(|llm| llm.names()))
+        .collect();
+    info!("📚 Serving {}", names.join(", "));
     let app = router_with_state(state.clone(), &config);
     info!(
         "🚦 Concurrency limit set to {} inferences",
@@ -983,7 +1063,10 @@ async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "healthy".to_string(),
         model_loaded: true,
-        backend: state.default_slot().get().model.get_backend_info(),
+        backend: state.default_slot().map_or_else(
+            || "none".to_string(),
+            |slot| slot.get().model.get_backend_info(),
+        ),
         uptime_seconds: state.uptime_seconds(),
         timestamp: Utc::now().to_rfc3339(),
     })
@@ -1009,8 +1092,20 @@ async fn readiness(State(state): State<AppState>) -> Response {
 }
 
 async fn predict(State(state): State<AppState>, request: Request) -> Response {
-    let slot = state.default_slot().clone();
+    let Some(slot) = state.default_slot().cloned() else {
+        return no_tensor_model_response();
+    };
     predict_with(&state, &slot, request).await
+}
+
+/// For `/predict` and `/model/info` on a server that serves only LLMs
+fn no_tensor_model_response() -> Response {
+    create_error_response(
+        StatusCode::NOT_FOUND,
+        "MODEL_NOT_FOUND",
+        "This server serves no tensor model, only LLMs on /v1/chat/completions",
+        None,
+    )
 }
 
 /// `POST /models/{model}/predict`: `/predict` for any served model
@@ -1761,6 +1856,10 @@ fn prometheus_metrics(state: &ServerState) -> String {
         "furnace_request_duration_seconds",
         "Inference request latency from arrival to response",
     );
+    #[cfg(feature = "llm")]
+    if let Some(llm) = &state.llm {
+        llm.render_prometheus(&mut out);
+    }
 
     // Per model, labelled `model`
     let models: Vec<_> = state
@@ -1921,6 +2020,12 @@ fn json_metrics(state: &ServerState) -> MetricsResponse {
         inference_latency_ms: state.inference_latency.percentiles_ms(),
         ready: state.ready(),
         models,
+        #[cfg(feature = "llm")]
+        llm: state
+            .llm
+            .as_ref()
+            .map(|llm| llm.json_metrics())
+            .unwrap_or_default(),
         timestamp: Utc::now().to_rfc3339(),
     }
 }
@@ -1943,8 +2048,11 @@ fn model_info_response(slot: &ModelSlot) -> ModelInfoResponse {
 }
 
 /// `GET /model/info`: the default model
-async fn model_info(State(state): State<AppState>) -> Json<ModelInfoResponse> {
-    Json(model_info_response(state.default_slot()))
+async fn model_info(State(state): State<AppState>) -> Response {
+    match state.default_slot() {
+        Some(slot) => Json(model_info_response(slot)).into_response(),
+        None => no_tensor_model_response(),
+    }
 }
 
 /// `GET /models/{model}`
@@ -1974,7 +2082,10 @@ async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse> {
         })
         .collect();
     Json(ModelsResponse {
-        default_model: state.default_slot().name.clone(),
+        default_model: state
+            .default_slot()
+            .map(|slot| slot.name.clone())
+            .unwrap_or_default(),
         models,
     })
 }
@@ -2168,7 +2279,10 @@ pub(crate) mod tests {
 
     #[cfg(feature = "grpc")]
     pub(super) fn test_app_state() -> AppState {
-        server_state(vec![dummy_model().into()], &ServerConfig::default())
+        server_state(
+            vec![ServedModel::from(dummy_model())].into(),
+            &ServerConfig::default(),
+        )
     }
 
     pub(super) async fn send(

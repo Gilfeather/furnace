@@ -164,6 +164,8 @@
 //! - `grpc`: the Open Inference Protocol over gRPC as well.
 //! - `tls`: HTTPS and mutual TLS, with a pure-Rust crypto provider.
 //! - `image`: JPEG / PNG input on `/predict`, with ImageNet preprocessing.
+//! - `llm`: serve LLMs with the OpenAI chat and completions API, streaming included, next to
+//!   the other models; see the `llm` module.
 //! - `wgpu`, `metal`, `cuda`: Burn's GPU backends, chosen with [`BackendKind`].
 //! - `embed-weights`: compile built-in models' weights into the binary.
 
@@ -176,6 +178,8 @@ pub mod burn_model;
 pub mod config;
 pub mod error;
 mod json_fast;
+#[cfg(feature = "llm")]
+pub mod llm;
 pub mod model;
 pub mod models;
 #[cfg(feature = "image")]
