@@ -11,9 +11,11 @@
 //!   inline on the arc; as a brain, on a deliberative pathway, it batches the signals of a
 //!   window into one forward pass.
 //!
-//! A brain's `stimulate` returns [`Firing::Compute`]: the blocking work runs where the
-//! pathway says, on the summation worker of a deliberative pathway. Put brains behind
-//! deliberative pathways; the fabric runs a reflex pathway's `Compute` inline.
+//! A brain's work is blocking and runs where it is stimulated: on the summation worker of a
+//! deliberative pathway, which is where brains belong. The signals of one summation window
+//! are generated at once (an engine with a scheduler runs them as one batch) or run as one
+//! forward pass. A brain on a reflex pathway would block the firing thread for the whole
+//! generation.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -261,42 +263,105 @@ mod llm {
         }
     }
 
-    /// Run `generate` to the end on `runtime`, from any thread
-    fn generate(
+    /// Collect one generation's events
+    async fn collect(
+        mut events: tokio::sync::mpsc::Receiver<Event>,
+    ) -> Result<(String, usize), String> {
+        let mut text = String::new();
+        let mut tokens = 0;
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::Started { .. } => {}
+                Event::Text(piece) => text.push_str(&piece),
+                Event::Finished {
+                    completion_tokens, ..
+                } => tokens = completion_tokens,
+                Event::Error(e) => return Err(e.to_string()),
+            }
+        }
+        Ok((text, tokens))
+    }
+
+    /// Run every request's generation at once on `runtime` (an engine with a scheduler
+    /// batches them) and wait for them all, from any thread
+    fn generate_all(
         engine: &dyn LlmEngine,
         runtime: &tokio::runtime::Handle,
-        request: GenerateRequest,
-    ) -> Result<(String, usize), String> {
+        requests: Vec<GenerateRequest>,
+    ) -> Vec<Result<(String, usize), String>> {
         let run = || {
             let _guard = runtime.enter();
-            let mut events = engine.generate(request).map_err(|e| e.to_string())?;
+            let started: Vec<Result<tokio::sync::mpsc::Receiver<Event>, String>> = requests
+                .into_iter()
+                .map(|request| engine.generate(request).map_err(|e| e.to_string()))
+                .collect();
             runtime.block_on(async move {
-                let mut text = String::new();
-                let mut tokens = 0;
-                while let Some(event) = events.recv().await {
-                    match event {
-                        Event::Started { .. } => {}
-                        Event::Text(piece) => text.push_str(&piece),
-                        Event::Finished {
-                            completion_tokens, ..
-                        } => tokens = completion_tokens,
-                        Event::Error(e) => return Err(e.to_string()),
+                let mut results = Vec::with_capacity(started.len());
+                let mut tasks = Vec::new();
+                for (i, events) in started.into_iter().enumerate() {
+                    match events {
+                        Ok(events) => tasks.push((i, tokio::spawn(collect(events)))),
+                        Err(e) => results.push((i, Err(e))),
                     }
                 }
-                Ok((text, tokens))
+                for (i, task) in tasks {
+                    results.push((
+                        i,
+                        task.await
+                            .unwrap_or_else(|_| Err("generation panicked".to_string())),
+                    ));
+                }
+                results.sort_by_key(|(i, _)| *i);
+                results.into_iter().map(|(_, r)| r).collect()
             })
         };
         // Blocking on a runtime's own worker thread is not allowed (a brain on a reflex
         // pathway stimulated from a request handler): do it on a thread of our own
         if tokio::runtime::Handle::try_current().is_ok() {
-            std::thread::scope(|scope| {
-                scope
-                    .spawn(run)
-                    .join()
-                    .unwrap_or_else(|_| Err("generation panicked".to_string()))
-            })
+            std::thread::scope(|scope| scope.spawn(run).join().unwrap_or_else(|_| Vec::new()))
         } else {
             run()
+        }
+    }
+
+    impl Llm {
+        /// Turn one generation's result into the signals to fire
+        fn fired(
+            &self,
+            signal: &Signal,
+            result: Result<(String, usize), String>,
+            started: std::time::Instant,
+        ) -> Vec<Signal> {
+            let counters = &self.shared.counters;
+            match result {
+                Ok((text, tokens)) => {
+                    counters.generations.fetch_add(1, Ordering::Relaxed);
+                    counters
+                        .completion_tokens
+                        .fetch_add(tokens as u64, Ordering::Relaxed);
+                    self.shared.latency.observe(started.elapsed());
+                    let commands = parse_commands(&text);
+                    if commands.is_empty() {
+                        counters.without_commands.fetch_add(1, Ordering::Relaxed);
+                        debug!(
+                            "nerve: brain '{}' answered without a command: {text:?}",
+                            self.name
+                        );
+                    }
+                    counters
+                        .commands
+                        .fetch_add(commands.len() as u64, Ordering::Relaxed);
+                    commands
+                        .into_iter()
+                        .map(|c| signal.derive(Payload::command(c)))
+                        .collect()
+                }
+                Err(e) => {
+                    counters.failures.fetch_add(1, Ordering::Relaxed);
+                    debug!("nerve: brain '{}' failed: {e}", self.name);
+                    Vec::new()
+                }
+            }
         }
     }
 
@@ -309,43 +374,32 @@ mod llm {
             NeuronKind::Brain
         }
 
+        /// One signal: the generation runs here, on the pathway's worker (or inline on a
+        /// reflex pathway)
         fn stimulate(&self, signal: Signal, cx: &Cx<'_>) -> Firing {
+            let started = std::time::Instant::now();
             let request = self.request(&signal, &cx.effectors());
-            let engine = self.engine.clone();
-            let runtime = cx.efferent().clone();
-            // The closure outlives this call: it reports through the shared counters
-            let shared = self.shared.clone();
-            let name = self.name.clone();
-            Firing::compute(move || {
-                let started = std::time::Instant::now();
-                let counters = &shared.counters;
-                match generate(&*engine, &runtime, request) {
-                    Ok((text, tokens)) => {
-                        counters.generations.fetch_add(1, Ordering::Relaxed);
-                        counters
-                            .completion_tokens
-                            .fetch_add(tokens as u64, Ordering::Relaxed);
-                        shared.latency.observe(started.elapsed());
-                        let commands = parse_commands(&text);
-                        if commands.is_empty() {
-                            counters.without_commands.fetch_add(1, Ordering::Relaxed);
-                            debug!("nerve: brain '{name}' answered without a command: {text:?}");
-                        }
-                        counters
-                            .commands
-                            .fetch_add(commands.len() as u64, Ordering::Relaxed);
-                        commands
-                            .into_iter()
-                            .map(|c| signal.derive(Payload::command(c)))
-                            .collect()
-                    }
-                    Err(e) => {
-                        counters.failures.fetch_add(1, Ordering::Relaxed);
-                        debug!("nerve: brain '{name}' failed: {e}");
-                        Vec::new()
-                    }
-                }
-            })
+            let result = generate_all(&*self.engine, cx.efferent(), vec![request])
+                .pop()
+                .unwrap_or_else(|| Err("no result".to_string()));
+            Firing::Fire(self.fired(&signal, result, started))
+        }
+
+        /// The signals of a summation window: all their generations at once. An engine with
+        /// a scheduler runs them as one batch; the window's signals wait for the slowest.
+        fn stimulate_many(&self, signals: Vec<Signal>, cx: &Cx<'_>) -> Vec<Firing> {
+            let started = std::time::Instant::now();
+            let effectors = cx.effectors();
+            let requests = signals
+                .iter()
+                .map(|s| self.request(s, &effectors))
+                .collect();
+            let results = generate_all(&*self.engine, cx.efferent(), requests);
+            signals
+                .iter()
+                .zip(results)
+                .map(|(signal, result)| Firing::Fire(self.fired(signal, result, started)))
+                .collect()
         }
 
         fn describe(&self) -> serde_json::Value {

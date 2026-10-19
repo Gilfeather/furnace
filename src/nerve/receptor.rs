@@ -414,8 +414,15 @@ impl Channel {
     /// A channel receptor and its sender; `capacity` bounds what waits for the sampling
     /// thread, and `send` fails beyond it rather than blocking
     pub fn new(name: &str, capacity: usize) -> (Self, ChannelSender) {
+        Self::with_urgency(name, capacity, UrgencyRule::NONE)
+    }
+
+    /// [`Channel::new`] with the rule its signals are stamped by
+    pub fn with_urgency(name: &str, capacity: usize, rule: UrgencyRule) -> (Self, ChannelSender) {
         let (sender, receiver) = mpsc::sync_channel(capacity.max(1));
-        let source = Arc::new(Source::new(name));
+        let mut source = Source::new(name);
+        source.rule = rule;
+        let source = Arc::new(source);
         (
             Self {
                 source: source.clone(),
@@ -423,15 +430,6 @@ impl Channel {
             },
             ChannelSender { source, sender },
         )
-    }
-
-    pub fn urgency(self, rule: UrgencyRule) -> Self {
-        let mut source = Arc::into_inner(self.source).expect("not started yet");
-        source.rule = rule;
-        Self {
-            source: Arc::new(source),
-            ..self
-        }
     }
 }
 
