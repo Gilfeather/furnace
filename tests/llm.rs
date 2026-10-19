@@ -548,6 +548,7 @@ async fn dropping_the_stream_frees_the_sequence_within_one_step() {
     let step = Duration::from_millis(100);
     let model = MockStepModel::new("mock", &"x".repeat(100)).token_delay(step);
     let live = model.live();
+    let decodes = model.decodes();
     let engine = scheduled(model);
     let mut events = engine
         .generate(
@@ -560,14 +561,12 @@ async fn dropping_the_stream_frees_the_sequence_within_one_step() {
         assert!(matches!(events.recv().await, Some(Event::Text(_))));
     }
     assert_eq!(live.get(), 1);
-    let dropped = Instant::now();
+    let before = decodes.get();
     drop(events);
     wait_for(|| live.get() == 0).await;
-    let freed = dropped.elapsed();
-    assert!(
-        freed <= step + step / 2,
-        "freed after {freed:?}, one step is {step:?}"
-    );
+    // Counted in steps, not time: at most the step under way when the stream went
+    let steps = decodes.get() - before;
+    assert!(steps <= 1, "freed after {steps} more steps");
 }
 
 #[tokio::test]
@@ -575,6 +574,7 @@ async fn a_client_disconnect_frees_the_sequence() {
     let step = Duration::from_millis(50);
     let model = MockStepModel::new("mock", &"x".repeat(1000)).token_delay(step);
     let live = model.live();
+    let decodes = model.decodes();
     let app = app_with(model);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -596,17 +596,14 @@ async fn a_client_disconnect_frees_the_sequence() {
         ));
     }
     assert_eq!(live.get(), 1);
-    let dropped = Instant::now();
+    let before = decodes.get();
     drop(response);
     drop(client);
     wait_for(|| live.get() == 0).await;
-    // The server learns of the disconnect when it writes the next token, and the worker drops
-    // the sequence at its next step
-    let freed = dropped.elapsed();
-    assert!(
-        freed <= step * 4,
-        "freed after {freed:?}, one step is {step:?}"
-    );
+    // The server learns of the disconnect when it writes the next token (a write to a closed
+    // socket may still succeed once), and the worker drops the sequence at its next step
+    let steps = decodes.get() - before;
+    assert!(steps <= 3, "freed after {steps} more steps");
 }
 
 #[tokio::test]
