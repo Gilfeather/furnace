@@ -72,7 +72,10 @@ Server::new().llm(Scheduled::new(MyLlm::load()?, pipeline)).serve().await?;
 everything else: the chat template, tokenization, sampling (temperature, top-p, top-k, seed,
 presence and frequency penalties) on the host logits, incremental detokenization, stop strings,
 `max_tokens` and EOS. Concurrent requests are interleaved token by token, so a long answer
-never holds the model for the others, and at most one prefill runs between two decode steps.
+never holds the model for the others. Between two decode steps it prefills waiting prompts up
+to `SchedulerConfig::max_prefill_tokens` (512 by default; a longer prompt starts alone), so a
+burst of arrivals starts together while the running streams wait for a bounded amount of
+prefill.
 A model whose forward pass can take several sequences of different lengths overrides
 `decode_batch`, and that alone gives continuous batching.
 
@@ -156,6 +159,70 @@ mean the same for every engine.
 | `furnace_llm_prefill_seconds`, `furnace_llm_decode_step_seconds` | Model time per step (`Scheduled` only) |
 
 With `Scheduled`, the end-to-end time minus the model's step times is furnace's own overhead.
+
+## Server overhead, measured
+
+[`benches/llm`](../benches/llm) streams the same mock answer from every server, so they differ
+only in the server layer: 64 tokens of `"x"` per stream, one every 20 ms, as OpenAI chat chunks
+over SSE. N clients send streaming requests back to back on keep-alive connections, and for
+each token the client records its lateness against the schedule. The time to first token
+(TTFT) is the first token's lateness, since the engine sends it at once.
+
+- **furnace**: `Server::llm` with an engine that paces its own tokens (as an engine with its
+  own scheduler does). This is furnace's HTTP layer, SSE, metrics and admission.
+- **scheduled**: furnace's scheduler over a `StepModel` whose decode step takes 20 ms for every
+  running sequence at once (a batched forward pass), through the text pipeline: sampling over
+  257 tokens, detokenization and stop strings.
+- **hand-written**: axum with `Sse` and the same paced engine behind a channel. One route,
+  about as little as a server can do.
+- **FastAPI**: FastAPI and uvicorn (one worker), with a `StreamingResponse` paced with
+  `asyncio.sleep`, built like vLLM's API server.
+
+AMD Ryzen 9 7940HS (16 threads), Windows 11, furnace 0.9.0 plus the LLM layer, Python 3.14,
+FastAPI 0.143, uvicorn 0.54. Every server process asks for 1 ms timers (`timeBeginPeriod`),
+otherwise Windows would round every interval to 15.6 ms.
+
+| Clients | | furnace | scheduled | hand-written | FastAPI |
+|---|---|---|---|---|---|
+| 1 | TTFT p50 / p99 | 0.20 / 0.22 ms | 0.34 / 0.35 ms | 0.21 / 0.25 ms | 0.90 / 1.46 ms |
+| 16 | TTFT p50 / p99 | 0.23 / 0.44 ms | 20.5 / 21.2 ms | 0.30 / 0.55 ms | 3.49 / 4.30 ms |
+| 64 | TTFT p50 / p99 | 0.35 / 1.02 ms | 20.6 / 82.1 ms | 0.48 / 0.80 ms | 8.90 / 15.3 ms |
+| 256 | TTFT p50 / p99 | 0.68 / 3.96 ms | 22.1 / 288 ms | 0.76 / 2.72 ms | 63.1 / 74.1 ms |
+| 256 | ITL p50 / p99 | 20.02 / 21.83 ms | 20.65 / 22.45 ms | 20.00 / 22.20 ms | 19.99 / 37.16 ms |
+| 256 | Tokens/s | 12,965 | 11,783 | 12,968 | 12,280 |
+| 256 | Server CPU per 1,000 tokens | 40 ms | 45 ms | 36 ms | 71 ms |
+| | Peak memory (private) | 20.1 MB | 23.0 MB | 14.8 MB | 77.6 MB |
+
+In this process, with no interval and no network (`furnace-llm-bench overhead`), a streamed
+token costs 1.13 µs in furnace and 0.83 µs in the hand-written server, from the slope between
+16- and 1,024-token streams. Furnace adds 0.3 µs per token, then, and nothing measurable per
+request (about 5 µs, against the hand-written server's 10). The scheduler path costs 1.16 µs
+per token and about 30 µs per request, chat template and tokenization included.
+
+What the numbers say:
+
+- **Furnace's HTTP layer matches the hand-written server** at every load, within the timers'
+  millisecond. FastAPI's time to first token grows with the load, to 63 ms at 256 streams,
+  and its inter-token p99 doubles there.
+- **The scheduler costs one decode step of TTFT**, because a request waits for the step under
+  way before its prefill (20 ms here, the mock's step). Under a burst it also waits for the
+  prefill budget: at 256 streams, its p99 is about 15 steps of 17 prompts each. Its tokens
+  arrive later and later, since each step starts when the previous one ends and the mock's
+  sleep overshoots a little each time (about 0.3 ms per step), but ITL stays at the step time.
+- The CPU times come from the process counters, in 15.6 ms quanta, so only the 256-client row
+  is shown.
+
+Reproduce:
+
+```bash
+cd benches/llm
+cargo build --release
+FURNACE_BENCH_PYTHON=/path/to/venv/python target/release/furnace-llm-bench
+target/release/furnace-llm-bench overhead --tokens 1024 --streams 1000
+```
+
+The engine behind each server is a mock, so this measures the server layer only. Model speed
+is the engine's: llama.cpp and mistral.rs comparisons on a real GGUF file are the next step.
 
 ## Not yet
 
