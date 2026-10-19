@@ -59,8 +59,9 @@ scaling to zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
   Windows come with `resnet18.bpk` on the [releases page](https://github.com/Gilfeather/furnace/releases).
   Put both in one directory and run `./furnace --model-name resnet18`. With
   [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), `cargo binstall furnace-server`
-  fetches the binary for your platform. Each release carries checksums, an SBOM and build
-  provenance you can verify ([SECURITY.md](SECURITY.md)).
+  fetches the binary for your platform, and on macOS or Linux
+  `brew install gilfeather/tap/furnace` installs it with the ResNet-18 weights. Each release
+  carries checksums, an SBOM and build provenance you can verify ([SECURITY.md](SECURITY.md)).
 - **Docker**: `ghcr.io/gilfeather/furnace`, for x86_64 and ARM64 ([below](#docker)).
 - **Kubernetes**: a Helm chart and a KServe serving runtime in [`deploy/`](deploy/README.md).
 - **As a library**, to serve your own Burn models: see [below](#your-own-burn-models).
