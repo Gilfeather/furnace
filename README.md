@@ -5,14 +5,64 @@
 [![Burn](https://img.shields.io/badge/burn-0.22-orange)](https://github.com/tracel-ai/burn)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-A small, fast inference server for [Burn](https://github.com/tracel-ai/burn) models, written
-entirely in Rust.
+Furnace serves [Burn](https://github.com/tracel-ai/burn) models over HTTP and gRPC, as an axum
+router you mount in your own Rust service or as a standalone server.
 
-Serve the Burn model you wrote with a few lines of Rust, or drop an ONNX file in `models/` and
-Furnace compiles it to Burn at build time (with [burn-onnx](https://github.com/tracel-ai/burn-onnx)).
-Either way you get the KServe / Triton protocol over HTTP and gRPC, dynamic batching, metrics,
-TLS and more, from a single small binary. No Python, no C++ runtime: the server starts in
-milliseconds and uses a fraction of the memory of a Python stack.
+## Embed it in your Axum app
+
+Your app keeps its own routes for pre- and post-processing, the database and the rest of your
+API. Furnace adds the inference endpoints, with dynamic batching, backpressure, metrics and the
+KServe / Triton protocol:
+
+```rust
+use axum::{Json, Router, routing::get};
+use burn::tensor::Tensor;
+use furnace::{BackendKind, Model, Server};
+
+// One of your own routes: the class names for the 10 logits /predict returns
+async fn labels() -> Json<Vec<String>> {
+    Json((0..10).map(|digit| digit.to_string()).collect())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let device = BackendKind::Cpu.device();
+    let mut net = Net::new(&device); // your Burn Module
+    furnace::weights::load_burnpack(&mut net, "net.bpk".as_ref())?;
+    let model = Model::from_fn("digits", BackendKind::Cpu, &[784], &[10],
+        move |images: Tensor<2>| net.forward(images))?;
+
+    let app = Router::new()
+        .route("/labels", get(labels))
+        .merge(Server::new().model(model).router());
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+```
+
+```toml
+[dependencies]
+furnace-server = { version = "0.9", default-features = false }
+burn = "0.22"
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+```
+
+The app now answers `GET /labels` itself and, through Furnace, `POST /predict`,
+`POST /v2/models/digits/infer`, `GET /healthz`, `GET /readyz` and `GET /metrics`, batching
+concurrent requests together. Furnace's API keys and rate limits guard only its own routes (for
+per-IP rate limits, serve `app.into_make_service_with_connect_info::<furnace::api::ClientAddr>()`).
+Models with several or integer inputs, and every setting, are covered
+[below](#your-own-burn-models).
+
+## Or run it standalone
+
+The `furnace` command serves the same API on its own, from a release binary,
+`brew install gilfeather/tap/furnace`, `cargo binstall furnace-server` or Docker
+([Install](#install)). No Python, no C++ runtime: it starts in milliseconds and uses a fraction
+of the memory of a Python stack.
 
 **Try it in 30 seconds** (ResNet-18 built in):
 
@@ -36,9 +86,12 @@ scaling to zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
 
 ## Features
 
-- **Serve your own Burn model** from Rust: `Server::new().model(Model::from_fn(...)).serve()`.
-- **Or bring an ONNX model**: put `foo.onnx` in `models/`, rebuild, run
-  `furnace --model-name foo`. No hand-written Rust.
+- **Mount it in your own axum app** with `Server::router()`, or serve on its own with
+  `Server::new().model(Model::from_fn(...)).serve()`.
+- **Serve the Burn model you wrote**: one float tensor in and out through its `forward`, or
+  named FP32 / INT64 / INT32 tensors through the `BurnModel` trait.
+- **Also: compile an ONNX file in at build time**: put `foo.onnx` in `models/`, rebuild, run
+  `furnace --model-name foo` (with [burn-onnx](https://github.com/tracel-ai/burn-onnx)).
 - **KServe / Triton Open Inference Protocol** over HTTP and gRPC: Triton and KServe clients work
   unchanged. Tensors are FP32, INT64 or INT32, several in and out, in JSON or binary.
 - **Several models per process**, each swappable for new weights without downtime.
@@ -53,60 +106,9 @@ scaling to zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
 - **Security**: HTTPS and mutual TLS with certificate reload, in pure Rust (`--features tls`);
   API keys; per-client rate limits.
 
-## Install
-
-- **Release binaries** for Linux (x86_64, musl, aarch64), macOS (Intel, Apple Silicon) and
-  Windows come with `resnet18.bpk` on the [releases page](https://github.com/Gilfeather/furnace/releases).
-  Put both in one directory and run `./furnace --model-name resnet18`. With
-  [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), `cargo binstall furnace-server`
-  fetches the binary for your platform, and on macOS or Linux
-  `brew install gilfeather/tap/furnace` installs it with the ResNet-18 weights. Each release
-  carries checksums, an SBOM and build provenance you can verify ([SECURITY.md](SECURITY.md)).
-- **Docker**: `ghcr.io/gilfeather/furnace`, for x86_64 and ARM64 ([below](#docker)).
-- **Kubernetes**: a Helm chart and a KServe serving runtime in [`deploy/`](deploy/README.md).
-- **As a library**, to serve your own Burn models: see [below](#your-own-burn-models).
-- **crates.io** (package `furnace-server`, command `furnace`). ONNX models are compiled in, so
-  point the build at your `.onnx` files:
-
-  ```bash
-  FURNACE_MODELS_DIR=/path/to/models cargo install furnace-server
-  ```
-
-  Builds from crates.io use Burn's stock CPU backend, which is several times slower than the
-  release binaries until Furnace's CPU kernels ship in a Burn release.
-- **From source**: below.
-
-## Quick start
-
-Requires Rust 1.95 or later (on Windows, the Visual Studio C++ build tools).
-
-```bash
-git clone https://github.com/Gilfeather/furnace.git
-cd furnace
-mkdir -p models
-curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
-cargo build --release
-./target/release/furnace --model-name resnet18
-```
-
-Send it an image (with a server built using `--features image`), or raw floats:
-
-```bash
-curl -O https://github.com/pytorch/hub/raw/master/images/dog.jpg
-curl -X POST http://localhost:3000/predict -H "Content-Type: image/jpeg" --data-binary @dog.jpg
-# "output" holds 1000 logits; the largest is class 258 (Samoyed)
-
-cargo run --example resnet18_sample_data      # writes resnet18_single_sample.json
-curl -X POST http://localhost:3000/predict -H "Content-Type: application/json" \
-  --data-binary @resnet18_single_sample.json
-```
-
-Or serve two models written in Burn, with no ONNX file at all:
-`cargo run --release --example serve_burn_model` (see [below](#your-own-burn-models)).
-
 ## Your own Burn models
 
-Furnace is also a library (from version 0.9). Add it next to Burn; the ONNX import is not needed
+Furnace is a library (from version 0.9). Add it next to Burn; the ONNX import is not needed
 for this:
 
 ```toml
@@ -139,13 +141,69 @@ together. A model with several inputs or outputs, or integer ones (token ids, ma
 `furnace::BurnModel` to name its tensors and is served on `/v2/models/{name}/infer`, batched too
 when its inputs have fixed shapes.
 [`examples/serve_burn_model`](examples/serve_burn_model/main.rs) runs both kinds:
-`cargo run --release --example serve_burn_model`. `Server::router()` gives an axum router to
-mount in your own app, and `Server::configure` reaches every `ServerConfig` setting: batching,
-limits, gRPC, TLS, API keys and the rest of the options below.
+`cargo run --release --example serve_burn_model`. `Server::router()` gives the same API as an
+axum router to mount in your own app ([above](#embed-it-in-your-axum-app)), and
+`Server::configure` reaches every `ServerConfig` setting: batching, limits, gRPC, TLS, API keys
+and the rest of the options below.
+
+## Install
+
+- **As a library**, to serve your own Burn models: see [above](#embed-it-in-your-axum-app) and
+  [below](#your-own-burn-models).
+- **Release binaries** for Linux (x86_64, musl, aarch64), macOS (Intel, Apple Silicon) and
+  Windows come with `resnet18.bpk` on the [releases page](https://github.com/Gilfeather/furnace/releases).
+  Put both in one directory and run `./furnace --model-name resnet18`. With
+  [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), `cargo binstall furnace-server`
+  fetches the binary for your platform, and on macOS or Linux
+  `brew install gilfeather/tap/furnace` installs it with the ResNet-18 weights. Each release
+  carries checksums, an SBOM and build provenance you can verify ([SECURITY.md](SECURITY.md)).
+- **Docker**: `ghcr.io/gilfeather/furnace`, for x86_64 and ARM64 ([below](#docker)).
+- **Kubernetes**: a Helm chart and a KServe serving runtime in [`deploy/`](deploy/README.md).
+- **crates.io** (package `furnace-server`, command `furnace`). ONNX models are compiled in, so
+  point the build at your `.onnx` files:
+
+  ```bash
+  FURNACE_MODELS_DIR=/path/to/models cargo install furnace-server
+  ```
+
+  Builds from crates.io use Burn's stock CPU backend, which is several times slower than the
+  release binaries until Furnace's CPU kernels ship in a Burn release.
+- **From source**: below.
+
+## Quick start
+
+The standalone `furnace` command, built from source with an ONNX model compiled in:
+
+Requires Rust 1.95 or later (on Windows, the Visual Studio C++ build tools).
+
+```bash
+git clone https://github.com/Gilfeather/furnace.git
+cd furnace
+mkdir -p models
+curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
+cargo build --release
+./target/release/furnace --model-name resnet18
+```
+
+Send it an image (with a server built using `--features image`), or raw floats:
+
+```bash
+curl -O https://github.com/pytorch/hub/raw/master/images/dog.jpg
+curl -X POST http://localhost:3000/predict -H "Content-Type: image/jpeg" --data-binary @dog.jpg
+# "output" holds 1000 logits; the largest is class 258 (Samoyed)
+
+cargo run --example resnet18_sample_data      # writes resnet18_single_sample.json
+curl -X POST http://localhost:3000/predict -H "Content-Type: application/json" \
+  --data-binary @resnet18_single_sample.json
+```
+
+Or serve two models written in Burn, with no ONNX file at all:
+`cargo run --release --example serve_burn_model` (see [below](#your-own-burn-models)).
 
 ## ONNX models
 
-Every `models/<name>.onnx` becomes a built-in model at build time:
+The `furnace` command can also serve ONNX files without any Rust: every `models/<name>.onnx`
+becomes a built-in model at build time:
 
 ```bash
 curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx" -o models/mnist.onnx

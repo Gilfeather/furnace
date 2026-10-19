@@ -48,6 +48,49 @@
 //! }
 //! ```
 //!
+//! # Mounting it in your own axum app
+//!
+//! [`Server::router`] returns the inference API as an axum `Router`. Merge it with your own
+//! routes and serve the result as usual: furnace answers `/predict`, `/v2/...`, `/healthz`,
+//! `/readyz` and `/metrics`, with batching and backpressure, and your routes do the rest.
+//!
+//! ```no_run
+//! use axum::{Json, Router, routing::get};
+//! use burn::tensor::Tensor;
+//! use furnace::{BackendKind, Model, Server};
+//!
+//! # use burn::module::Module;
+//! # use burn::nn::{Linear, LinearConfig};
+//! # use burn::tensor::Device;
+//! # #[derive(Module, Debug)]
+//! # struct Net { linear: Linear }
+//! # impl Net {
+//! #     fn new(device: &Device) -> Self { Self { linear: LinearConfig::new(784, 10).init(device) } }
+//! #     fn forward(&self, images: Tensor<2>) -> Tensor<2> { self.linear.forward(images) }
+//! # }
+//! // One of your own routes: the class names for the 10 logits /predict returns
+//! async fn labels() -> Json<Vec<String>> {
+//!     Json((0..10).map(|digit| digit.to_string()).collect())
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let device = BackendKind::Cpu.device();
+//!     let mut net = Net::new(&device);
+//!     furnace::weights::load_burnpack(&mut net, "net.bpk".as_ref())?;
+//!     let model = Model::from_fn("digits", BackendKind::Cpu, &[784], &[10],
+//!         move |images: Tensor<2>| net.forward(images))?;
+//!
+//!     let app = Router::new()
+//!         .route("/labels", get(labels))
+//!         .merge(Server::new().model(model).router());
+//!
+//!     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+//!     axum::serve(listener, app).await?;
+//!     Ok(())
+//! }
+//! ```
+//!
 //! # Several inputs or outputs, integer tensors
 //!
 //! Implement [`BurnModel`] to name a model's tensors: a text classifier taking token ids and a
