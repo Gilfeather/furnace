@@ -94,8 +94,9 @@ tls = ["dep:rustls", "dep:tokio-rustls", "dep:tokio-stream", "dep:aes-gcm", "dep
 # `StepModel` traits (src/llm). Engines come from other crates, such as furnace-candle.
 llm = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:futures-util"]
 # The nervous system (src/nerve): receptors, reflex and deliberative pathways, effectors and
-# brains, with habituation, thresholds and refractory periods. No dependencies of its own.
-nerve = []
+# brains, with habituation, thresholds and refractory periods. futures-util (already an `llm`
+# dependency) for the SSE effector's event stream; nothing else.
+nerve = ["dep:futures-util"]
 wgpu = ["burn/wgpu"]
 metal = ["burn/metal"]
 cuda = ["burn/cuda"]
@@ -190,6 +191,10 @@ futures-util = "0.3"
 [[test]]
 name = "llm"
 required-features = ["llm"]
+
+[[test]]
+name = "nerve"
+required-features = ["nerve"]
 
 [[bench]]
 name = "inference_benchmark"

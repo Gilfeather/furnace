@@ -541,6 +541,10 @@ impl Neuron for Effector {
         serde_json::to_value(Effector::metrics(self)).unwrap_or_default()
     }
 
+    fn events(&self) -> Option<tokio::sync::broadcast::Receiver<Bytes>> {
+        self.inner.act.events()
+    }
+
     fn render_prometheus(&self, out: &mut String, labels: &str) {
         use std::fmt::Write as _;
         let m = Effector::metrics(self);

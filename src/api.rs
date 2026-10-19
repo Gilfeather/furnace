@@ -190,6 +190,10 @@ pub struct MetricsResponse {
     #[cfg(feature = "llm")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub llm: Vec<crate::llm::LlmMetrics>,
+    /// The nervous system (feature `nerve`); absent without one
+    #[cfg(feature = "nerve")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nerve: Option<crate::nerve::NerveMetrics>,
     pub timestamp: String,
 }
 
@@ -392,12 +396,18 @@ struct Contents {
     models: Vec<ServedModel>,
     #[cfg(feature = "llm")]
     llms: Vec<Arc<dyn crate::llm::LlmEngine>>,
+    #[cfg(feature = "nerve")]
+    nerve: Option<crate::nerve::Fabric>,
 }
 
 impl Contents {
     fn is_empty(&self) -> bool {
         #[cfg(feature = "llm")]
         if !self.llms.is_empty() {
+            return false;
+        }
+        #[cfg(feature = "nerve")]
+        if self.nerve.is_some() {
             return false;
         }
         self.models.is_empty()
@@ -410,6 +420,8 @@ impl From<Vec<ServedModel>> for Contents {
             models,
             #[cfg(feature = "llm")]
             llms: Vec::new(),
+            #[cfg(feature = "nerve")]
+            nerve: None,
         }
     }
 }
@@ -462,6 +474,16 @@ impl Server {
     #[cfg(feature = "llm")]
     pub fn llm(mut self, engine: impl crate::llm::LlmEngine) -> Self {
         self.contents.llms.push(Arc::new(engine));
+        self
+    }
+
+    /// Serve a nervous system (feature `nerve`): its HTTP receptors become routes, its
+    /// receptors start with the server, `GET /nerve` describes its neurons, pathways and
+    /// measured latencies, `GET /nerve/effectors/{name}/events` streams an SSE effector's
+    /// commands, and `/metrics` carries its metrics. A server may serve a fabric alone.
+    #[cfg(feature = "nerve")]
+    pub fn nerve(mut self, fabric: crate::nerve::Fabric) -> Self {
+        self.contents.nerve = Some(fabric);
         self
     }
 
@@ -597,6 +619,9 @@ struct ServerState {
     /// The LLMs, when there are any
     #[cfg(feature = "llm")]
     llm: Option<Arc<crate::llm::LlmState>>,
+    /// The nervous system, when there is one
+    #[cfg(feature = "nerve")]
+    nerve: Option<crate::nerve::Fabric>,
 }
 
 impl ServerState {
@@ -689,6 +714,8 @@ fn server_state(contents: Contents, config: &ServerConfig) -> AppState {
         inference_latency: Histogram::new(),
         #[cfg(feature = "llm")]
         llm,
+        #[cfg(feature = "nerve")]
+        nerve: contents.nerve,
     })
 }
 
@@ -720,6 +747,11 @@ fn router_with_state(state: AppState, config: &ServerConfig) -> Router {
     #[cfg(feature = "llm")]
     let router = match &state.llm {
         Some(llm) => router.merge(crate::llm::routes(llm.clone())),
+        None => router,
+    };
+    #[cfg(feature = "nerve")]
+    let router = match &state.nerve {
+        Some(fabric) => router.merge(crate::nerve::http::routes(fabric.clone())),
         None => router,
     };
     // Without API keys or a rate limit every request is admitted: skip the check altogether
@@ -902,6 +934,12 @@ async fn serve(config: ServerConfig, contents: Contents) -> Result<()> {
         .into_iter()
         .chain(state.llm.iter().flat_map(|llm| llm.names()))
         .collect();
+    #[cfg(feature = "nerve")]
+    let names: Vec<&str> = if state.nerve.is_some() {
+        names.into_iter().chain(["a nervous system"]).collect()
+    } else {
+        names
+    };
     info!("📚 Serving {}", names.join(", "));
     let app = router_with_state(state.clone(), &config);
     info!(
@@ -1860,6 +1898,10 @@ fn prometheus_metrics(state: &ServerState) -> String {
     if let Some(llm) = &state.llm {
         llm.render_prometheus(&mut out);
     }
+    #[cfg(feature = "nerve")]
+    if let Some(fabric) = &state.nerve {
+        fabric.render_prometheus(&mut out);
+    }
 
     // Per model, labelled `model`
     let models: Vec<_> = state
@@ -2026,6 +2068,8 @@ fn json_metrics(state: &ServerState) -> MetricsResponse {
             .as_ref()
             .map(|llm| llm.json_metrics())
             .unwrap_or_default(),
+        #[cfg(feature = "nerve")]
+        nerve: state.nerve.as_ref().map(crate::nerve::Fabric::metrics),
         timestamp: Utc::now().to_rfc3339(),
     }
 }

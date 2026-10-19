@@ -493,6 +493,11 @@ impl Fabric {
             .collect()
     }
 
+    /// Subscribe to a neuron that publishes events (an SSE effector)
+    pub fn events(&self, id: NeuronId) -> Option<tokio::sync::broadcast::Receiver<bytes::Bytes>> {
+        self.0.cells.get(id.index())?.neuron.events()
+    }
+
     /// The motor side's runtime
     pub fn efferent(&self) -> &tokio::runtime::Handle {
         &self.0.efferent_handle

@@ -86,6 +86,12 @@ pub trait Receptor: Neuron {
     fn ingest(&self, _request: Ingest<'_>) -> Option<Signal> {
         None
     }
+
+    /// How long a request whose signal was queued to a deliberative pathway waits for a
+    /// response from that side; zero (the default) answers `202 Accepted` at once
+    fn respond_within(&self) -> Duration {
+        Duration::ZERO
+    }
 }
 
 /// Where a receptor is mounted
@@ -277,6 +283,7 @@ pub struct Http {
     mount: HttpMount,
     feature: Option<Arc<FeatureFn>>,
     text: bool,
+    respond_within: Duration,
 }
 
 impl Http {
@@ -290,7 +297,16 @@ impl Http {
             },
             feature: None,
             text: false,
+            respond_within: Duration::ZERO,
         }
+    }
+
+    /// Wait up to this long for a response when the signal went to a deliberative pathway
+    /// (the brain answering through a `Respond` effector); by default such requests get
+    /// `202 Accepted` at once
+    pub fn respond_within(mut self, wait: Duration) -> Self {
+        self.respond_within = wait;
+        self
     }
 
     pub fn get(mut self) -> Self {
@@ -345,6 +361,10 @@ impl Receptor for Http {
 
     fn mount(&self) -> Option<HttpMount> {
         Some(self.mount.clone())
+    }
+
+    fn respond_within(&self) -> Duration {
+        self.respond_within
     }
 
     fn ingest(&self, request: Ingest<'_>) -> Option<Signal> {

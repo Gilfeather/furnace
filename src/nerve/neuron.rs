@@ -134,6 +134,11 @@ pub trait Neuron: Send + Sync + 'static {
 
     /// The same in the Prometheus text format; `labels` names this neuron
     fn render_prometheus(&self, _out: &mut String, _labels: &str) {}
+
+    /// For neurons that publish a stream of events (the SSE effector): subscribe to it
+    fn events(&self) -> Option<tokio::sync::broadcast::Receiver<bytes::Bytes>> {
+        None
+    }
 }
 
 /// Habituation: a repeated feature attenuates before it propagates, and the attenuation
