@@ -1,5 +1,23 @@
 # Performance
 
+## Measured on GitHub's runners
+
+The numbers below come from one laptop. The same comparisons also run on GitHub's own hosted
+runners, x86_64 (`ubuntu-latest`) and Arm (`ubuntu-24.04-arm`), every week, on every release
+and on demand: the [Benchmarks workflow](https://github.com/Gilfeather/furnace/actions/workflows/bench.yml).
+Open its latest run: the *Ratios, all runners* job summary has, for each runner:
+
+- requests/s of Furnace over a hand-written axum server for every Burn model below, and over
+  FastAPI (1 and 4 uvicorn workers) for the echo model;
+- FastAPI's time to first token over Furnace's, streaming LLM tokens ([`benches/llm`](../benches/llm));
+- start-up (ready after start, and the release binary's cold start with ResNet-18) and memory.
+
+Each runner's own job summary has the CPU model and core count (`lscpu`) and the full tables;
+the JSON reports are the run's artifacts. Every figure is the median of three runs. Shared
+runners are noisy and their CPUs vary from run to run, so read the ratios between servers
+measured on the same runner, not the absolute numbers. To run it on a fork:
+`gh workflow run bench.yml`.
+
 ## Serving a Burn model
 
 Furnace is a server, so the question is what it adds around a model, and how it compares with

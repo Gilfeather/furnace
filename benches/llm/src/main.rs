@@ -4,8 +4,11 @@
 //! ```bash
 //! cargo build --release
 //! target/release/furnace-llm-bench [--clients 1,16,64,256] [--tokens 64] [--token-ms 20]
-//!     [--requests 4] [--servers furnace,scheduled,hand-written,fastapi] [--json PATH]
+//!     [--requests 4] [--servers furnace,scheduled,hand-written,fastapi] [--runs N] [--json PATH]
 //! ```
+//!
+//! `--runs N` starts every server N times, the servers taking turns, and reports the median of
+//! each figure.
 //!
 //! Every server streams the same mock answer to `POST /v1/chat/completions`: `--tokens`
 //! OpenAI chat chunks of one token each (`"x"`), one every `--token-ms`, after a role chunk,
@@ -561,7 +564,38 @@ struct Report {
     furnace: &'static str,
     pace: Pace,
     requests_per_client: usize,
+    /// Each server's figures are the medians of this many runs
+    runs: usize,
     servers: Vec<ServerResult>,
+}
+
+fn median(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let n = values.len();
+    (values[(n - 1) / 2] + values[n / 2]) / 2.0
+}
+
+/// One server's runs as one result: the median of each figure on its own
+fn median_server(runs: Vec<ServerResult>) -> ServerResult {
+    let of = |f: &dyn Fn(&ServerResult) -> f64| median(runs.iter().map(f).collect());
+    ServerResult {
+        server: runs[0].server.clone(),
+        peak_private_mb: of(&|s| s.peak_private_mb),
+        load: (0..runs[0].load.len())
+            .map(|i| Load {
+                clients: runs[0].load[i].clients,
+                streams: runs[0].load[i].streams,
+                tokens_per_second: of(&|s| s.load[i].tokens_per_second),
+                ttft_p50_ms: of(&|s| s.load[i].ttft_p50_ms),
+                ttft_p99_ms: of(&|s| s.load[i].ttft_p99_ms),
+                lateness_p50_ms: of(&|s| s.load[i].lateness_p50_ms),
+                lateness_p99_ms: of(&|s| s.load[i].lateness_p99_ms),
+                itl_p50_ms: of(&|s| s.load[i].itl_p50_ms),
+                itl_p99_ms: of(&|s| s.load[i].itl_p99_ms),
+                cpu_ms_per_1k_tokens: of(&|s| s.load[i].cpu_ms_per_1k_tokens),
+            })
+            .collect(),
+    }
 }
 
 fn free_port() -> u16 {
@@ -693,8 +727,16 @@ fn furnace_version() -> &'static str {
 
 fn print_report(report: &Report) {
     println!(
-        "\n{} tokens per stream, one every {} ms; {} streams per client (furnace {})\n",
-        report.pace.tokens, report.pace.token_ms, report.requests_per_client, report.furnace
+        "\n{} tokens per stream, one every {} ms; {} streams per client (furnace {}){}\n",
+        report.pace.tokens,
+        report.pace.token_ms,
+        report.requests_per_client,
+        report.furnace,
+        if report.runs > 1 {
+            format!("; medians of {} runs", report.runs)
+        } else {
+            String::new()
+        }
     );
     println!(
         "| Server | Clients | Tokens/s | TTFT p50 / p99 | Lateness p50 / p99 | ITL p50 / p99 | CPU per 1k tokens |"
@@ -803,16 +845,26 @@ async fn main() {
         flag("--servers").unwrap_or_else(|| "furnace,scheduled,hand-written,fastapi".to_string());
     let per_client = number("--requests", 4) as usize;
 
-    let mut results = Vec::new();
-    for kind in servers.split(',') {
-        eprintln!("{kind}");
-        results.push(bench_server(kind, pace, &clients, per_client).await);
+    let runs = number("--runs", 1) as usize;
+    if runs == 0 {
+        fail("--runs takes a positive number");
+    }
+
+    // The servers take turns, so a slow stretch of the machine hits each of them alike
+    let kinds: Vec<&str> = servers.split(',').collect();
+    let mut samples: Vec<Vec<ServerResult>> = kinds.iter().map(|_| Vec::new()).collect();
+    for run in 1..=runs {
+        for (kind, samples) in kinds.iter().zip(&mut samples) {
+            eprintln!("{kind} (run {run} of {runs})");
+            samples.push(bench_server(kind, pace, &clients, per_client).await);
+        }
     }
     let report = Report {
         furnace: furnace_version(),
         pace,
         requests_per_client: per_client,
-        servers: results,
+        runs,
+        servers: samples.into_iter().map(median_server).collect(),
     };
     print_report(&report);
     if let Some(path) = flag("--json") {

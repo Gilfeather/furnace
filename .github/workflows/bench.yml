@@ -1,0 +1,172 @@
+name: Benchmarks
+
+# Furnace against a hand-written axum server and FastAPI, on GitHub's own runners, so anyone can
+# see the hardware and rerun the comparison. Shared runners are noisy: the ratios between servers
+# measured on the same runner matter, not the absolute numbers. Too slow for every pull request.
+on:
+  workflow_dispatch:
+  schedule:
+    # Mondays, 04:23 UTC
+    - cron: '23 4 * * 1'
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Each figure is the median of this many runs
+  RUNS: 3
+  RESNET18_URL: https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx
+
+jobs:
+  bench:
+    name: Benchmarks (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: bench
+        workspaces: |
+          . -> target
+          benches/burn -> target
+          benches/llm -> target
+
+    # Python only for the FastAPI servers compared against, at the versions the published numbers
+    # were measured with
+    - name: Install Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.14'
+
+    - name: Install FastAPI
+      shell: bash
+      run: |
+        python -m pip install --disable-pip-version-check -r benches/compare/fastapi-ort/requirements.txt
+        echo "FURNACE_BENCH_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
+
+    - name: Describe the runner
+      shell: bash
+      run: |
+        mkdir -p results
+        lscpu | tee results/lscpu.txt
+        model=$(lscpu | sed -n 's/^Model name: *//p' | head -1)
+        cores=$(nproc)
+        jq -n --arg model "$model" --argjson cores "$cores" --arg arch "${{ matrix.arch }}" \
+          '{model: $model, cores: $cores, arch: $arch}' > results/cpu.json
+        # The clients share the runner with the server: on fewer than 4 cores, 16 clients would
+        # measure the clients
+        if [ "$cores" -ge 4 ]; then clients=1,4,16; else clients=1,2,4; fi
+        echo "BURN_CLIENTS=$clients" >> "$GITHUB_ENV"
+
+    - name: Cache ONNX models
+      uses: actions/cache@v5
+      with:
+        path: models
+        key: onnx-models-resnet18-v1-7
+
+    - name: Download ResNet-18 ONNX model
+      shell: bash
+      run: |
+        mkdir -p models
+        [ -f models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o models/resnet18.onnx
+
+    # The furnace binary as released, with its ResNet-18 weights next to it
+    - name: Build furnace
+      shell: bash
+      run: |
+        cargo build --release --locked --bin furnace --features "grpc tls"
+        mkdir -p dist
+        cp target/release/furnace dist/
+        cp "$(ls -t target/release/build/furnace-server-*/out/models/resnet18.bpk | head -1)" dist/
+
+    - name: Build the harnesses
+      shell: bash
+      run: |
+        cargo build --release --locked --manifest-path benches/burn/Cargo.toml
+        cargo build --release --locked --manifest-path benches/llm/Cargo.toml
+
+    - name: Burn models (benches/burn)
+      shell: bash
+      run: |
+        benches/burn/target/release/furnace-burn-bench --models echo,digits,resnet18,encoder \
+          --clients "$BURN_CLIENTS" --runs "$RUNS" --label "${{ matrix.runner }}" \
+          --json results/burn.json | tee results/burn.md
+        benches/burn/target/release/furnace-burn-bench overhead echo | tee results/overhead.txt
+
+    - name: LLM server layer (benches/llm)
+      shell: bash
+      run: |
+        benches/llm/target/release/furnace-llm-bench --runs "$RUNS" --json results/llm.json \
+          | tee results/llm.md
+        benches/llm/target/release/furnace-llm-bench overhead | tee results/llm-overhead.txt
+
+    - name: Cold start (furnace binary, ResNet-18)
+      shell: bash
+      run: |
+        benches/burn/target/release/furnace-burn-bench cold-start binary dist/furnace \
+          --model-name resnet18 | tee results/cold-start.txt
+
+    - name: Summary
+      shell: bash
+      run: bash benches/ci-summary.sh runner results >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload results
+      if: always()
+      uses: actions/upload-artifact@v5
+      with:
+        name: bench-${{ matrix.arch }}
+        path: results
+        if-no-files-found: ignore
+
+  ratios:
+    name: Ratios, all runners
+    needs: bench
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Download results
+      uses: actions/download-artifact@v5
+      with:
+        pattern: bench-*
+
+    - name: Summary
+      shell: bash
+      run: |
+        {
+          echo "## Ratios on GitHub's runners"
+          echo
+          echo "Medians of $RUNS runs, furnace ${{ github.sha }}. Shared runners are noisy: the ratios matter, not the absolute numbers. Each runner's job summary has the full tables."
+          echo
+          bash benches/ci-summary.sh combine bench-x86_64 bench-arm64
+        } | tee ratios.md >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload ratios
+      uses: actions/upload-artifact@v5
+      with:
+        name: ratios
+        path: ratios.md
