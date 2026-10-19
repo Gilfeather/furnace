@@ -11,20 +11,24 @@ ResNet-18, from launching the server to its answers, median of 10 runs on the la
 
 | | Accepting requests | Ready (`/readyz` 200, after the warm-up inference) | First inference answered |
 |---|---|---|---|
-| Furnace binary (`--features "grpc tls"`) | 31 ms | 42 ms | 67 ms |
-| Furnace in Docker (`ghcr.io/gilfeather/furnace:0.9.0`) | 422 ms | 474 ms | 521 ms |
+| Furnace binary (`--features "grpc tls"`) | 23 ms | 29 ms | 40 ms |
+| Furnace in Docker (`ghcr.io/gilfeather/furnace:0.9.0`) | 404 ms | 427 ms | 458 ms |
 | FastAPI + ONNX Runtime ([PERFORMANCE.md](PERFORMANCE.md)) | | 1,761 ms | |
 
 In Docker almost all the time is Docker's own: a container that only prints `furnace --version`
 takes 722 ms to create, run and remove on the same machine. What a platform adds depends on the
-platform; what Furnace adds is the ~40 ms of the first row. The "first inference" column includes
-one ResNet-18 forward pass (about 25 ms here).
+platform; what Furnace adds is the ~30-40 ms of the first row. The "first inference" column
+includes one ResNet-18 forward pass and sending its 0.6 MB input (about 11 ms here).
+
+An earlier Python version of this measurement reported 42 and 67 ms for the binary: its 1 ms
+polling sleep sleeps about 15 ms on Windows, and its HTTP client added time of its own.
 
 Reproduce:
 
 ```bash
-python benches/cold_start.py binary ./target/release/furnace --model-name resnet18
-python benches/cold_start.py docker ghcr.io/gilfeather/furnace:0.9.0
+cargo build --release --manifest-path benches/burn/Cargo.toml
+benches/burn/target/release/furnace-burn-bench cold-start binary ./target/release/furnace --model-name resnet18
+benches/burn/target/release/furnace-burn-bench cold-start docker ghcr.io/gilfeather/furnace:0.9.0
 ```
 
 The image is 139 MB with ResNet-18's 46 MB of weights; a smaller image pulls faster when a

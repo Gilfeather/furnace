@@ -155,13 +155,13 @@ From launching the server to its answers, ResNet-18, median of 10 runs:
 
 | | Ready (`/readyz` 200) | First inference answered |
 |---|---|---|
-| Furnace binary | 42 ms | 67 ms |
-| Furnace in Docker | 474 ms | 521 ms |
+| Furnace binary | 29 ms | 40 ms |
+| Furnace in Docker | 427 ms | 458 ms |
 | FastAPI + ONNX Runtime | 1,761 ms | |
 
 Docker's own start dominates its row (a container that only prints the version takes 722 ms
-here). `python benches/cold_start.py` reproduces both Furnace rows; [SERVERLESS.md](SERVERLESS.md)
-covers scaling to zero.
+here). `furnace-burn-bench cold-start` reproduces both Furnace rows (see
+[SERVERLESS.md](SERVERLESS.md), which covers scaling to zero).
 
 ## Where Furnace's speed comes from
 

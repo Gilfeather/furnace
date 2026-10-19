@@ -21,10 +21,14 @@
 //! Each server is loaded by N clients, each on its own keep-alive connection, sending batch-1
 //! requests back to back. `serve KIND MODEL PORT [--backend B]` runs one server on its own.
 //!
+//! `cold-start binary|docker PATH-OR-IMAGE [ARGS]` times a server from launch to its first
+//! answers (see `cold_start.rs`).
+//!
 //! `overhead MODEL [N]` calls each server's router in this process, without a network, one
 //! request at a time, and prints the time per request: the server's own CPU cost around
 //! `forward`.
 
+mod cold_start;
 mod models;
 
 use std::sync::Arc;
@@ -760,6 +764,10 @@ async fn main() {
             .with_timer(tracing_subscriber::fmt::time::ChronoLocal::rfc_3339())
             .with_writer(std::io::stderr)
             .init();
+    }
+    if args.first().map(String::as_str) == Some("cold-start") {
+        cold_start::main(&args[1..]);
+        return;
     }
     if args.first().map(String::as_str) == Some("overhead") {
         let which = Which::parse(args.get(1).map_or("digits", String::as_str));
