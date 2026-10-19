@@ -1,0 +1,1224 @@
+//! The fabric: neurons, the pathways between them, and how a signal moves.
+//!
+//! A reflex pathway is a direct call: the next neuron's `stimulate` runs on the thread that
+//! fired, with no channel in between. A deliberative pathway is a queue to a worker thread
+//! that sums the signals of a short window into one firing of its neuron (temporal
+//! summation). Which pathway a signal takes is decided by timing: a pathway whose measured
+//! p99 does not fit in the signal's remaining deadline is not eligible; among the eligible,
+//! the heaviest weight wins.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc};
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+use tracing::{debug, warn};
+
+use super::latency::LatencyEstimate;
+use super::neuron::{Cx, Firing, Gate, Mechanisms, Neuron, NeuronKind, Quiet};
+use super::receptor::{Afferent, Receptor};
+use super::signal::{NeuronId, PathwayId, Payload, Signal};
+
+/// Hops a signal may take before the fabric assumes a loop and drops it
+pub const MAX_HOPS: usize = 32;
+
+/// How signals move between two neurons
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PathwayKind {
+    /// A direct call on the firing thread: no queue, no scheduler
+    Reflex,
+    /// A queue to a worker that sums a window of signals into one firing
+    Deliberative,
+}
+
+/// Temporal summation on a deliberative pathway
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Summation {
+    /// Most signals summed into one firing
+    pub max_batch: usize,
+    /// How long after the first signal the worker waits for more; `None` learns it from the
+    /// pathway's latency (an eighth of the p50, within the bounds below)
+    pub window: Option<Duration>,
+    pub min_window: Duration,
+    pub max_window: Duration,
+    /// Signals waiting at once; beyond it, new ones are dropped (and counted) rather than
+    /// queued without bound
+    pub capacity: usize,
+}
+
+impl Default for Summation {
+    fn default() -> Self {
+        Self {
+            max_batch: 8,
+            window: None,
+            min_window: Duration::from_micros(200),
+            max_window: Duration::from_millis(20),
+            capacity: 1024,
+        }
+    }
+}
+
+impl Summation {
+    /// No summation: every signal fires the neuron on its own, as soon as the worker is free
+    pub fn none() -> Self {
+        Self {
+            max_batch: 1,
+            window: Some(Duration::ZERO),
+            ..Self::default()
+        }
+    }
+
+    pub fn max_batch(mut self, n: usize) -> Self {
+        self.max_batch = n.max(1);
+        self
+    }
+
+    pub fn window(mut self, window: Duration) -> Self {
+        self.window = Some(window);
+        self
+    }
+
+    pub fn capacity(mut self, n: usize) -> Self {
+        self.capacity = n.max(1);
+        self
+    }
+}
+
+/// A directed connection from one neuron to the next, with a measured latency
+pub struct Pathway {
+    pub from: NeuronId,
+    pub to: NeuronId,
+    pub kind: PathwayKind,
+    /// Priority among eligible pathways from the same neuron
+    pub weight: f32,
+    /// Signal-in to signal-out on this hop: for a reflex pathway the next neuron's whole
+    /// synchronous chain, for a deliberative one the wait in the queue plus the firing
+    pub(crate) latency: LatencyEstimate,
+    pub(crate) signals: AtomicU64,
+    /// Signals that could not take this pathway: too slow for their deadline
+    pub(crate) ineligible: AtomicU64,
+    /// Dropped because the queue was full
+    pub(crate) overflow: AtomicU64,
+    pub(crate) summation: Option<Summation>,
+    queue: Option<Queue>,
+}
+
+impl Pathway {
+    pub fn latency(&self) -> &LatencyEstimate {
+        &self.latency
+    }
+
+    /// The window the worker currently waits for more signals
+    pub fn window(&self) -> Option<Duration> {
+        self.summation.map(|s| {
+            s.window.unwrap_or_else(|| {
+                self.latency.p50().map_or(s.min_window, |p50| {
+                    (p50 / 8).clamp(s.min_window, s.max_window)
+                })
+            })
+        })
+    }
+
+    fn fits(&self, remaining: Option<Duration>) -> bool {
+        match (remaining, self.latency.p99()) {
+            (None, _) | (_, None) => true,
+            (Some(remaining), Some(p99)) => p99 <= remaining,
+        }
+    }
+}
+
+struct Queue {
+    sender: mpsc::SyncSender<Queued>,
+    waiting: Arc<AtomicU64>,
+}
+
+struct Queued {
+    signal: Signal,
+    queued_at: Instant,
+}
+
+/// Per-neuron counters
+#[derive(Default)]
+pub(crate) struct Counters {
+    pub received: AtomicU64,
+    pub fired: AtomicU64,
+    pub computed: AtomicU64,
+    pub quiet_threshold: AtomicU64,
+    pub quiet_habituation: AtomicU64,
+    pub quiet_refractory: AtomicU64,
+    pub quiet_not_interested: AtomicU64,
+}
+
+impl Counters {
+    fn quiet(&self, reason: Quiet) {
+        let cell = match reason {
+            Quiet::Threshold => &self.quiet_threshold,
+            Quiet::Habituation => &self.quiet_habituation,
+            Quiet::Refractory => &self.quiet_refractory,
+            Quiet::NotInterested => &self.quiet_not_interested,
+        };
+        cell.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(crate) struct Cell {
+    pub neuron: Arc<dyn Neuron>,
+    pub kind: NeuronKind,
+    pub gate: Gate,
+    pub counters: Counters,
+    /// Pathways leaving this neuron
+    pub out: Vec<PathwayId>,
+    /// Nanoseconds since the epoch of the last `prepare`
+    last_prepared: AtomicU64,
+    /// For effectors: stimulus-to-action latency per origin (reflex arcs only), by the
+    /// origin's index
+    pub arcs: Vec<OnceLock<LatencyEstimate>>,
+}
+
+pub(crate) struct Inner {
+    pub epoch: Instant,
+    pub cells: Vec<Cell>,
+    pub pathways: Vec<Pathway>,
+    pub by_name: HashMap<String, NeuronId>,
+    receptors: Vec<(NeuronId, Arc<dyn Receptor>)>,
+    started: AtomicBool,
+    /// Signals that entered through a receptor
+    pub received: AtomicU64,
+    /// Signals a brain neuron saw
+    pub reached_brain: AtomicU64,
+    /// Commands addressed to a name no effector has
+    pub unrouted: AtomicU64,
+    /// Signals with no eligible pathway (all too slow for the deadline)
+    pub no_eligible: AtomicU64,
+    /// Chains cut at [`MAX_HOPS`]
+    pub loops: AtomicU64,
+    /// Commands delivered to their effector without a declared pathway
+    pub commands_direct: AtomicU64,
+    efferent: Mutex<Option<tokio::runtime::Runtime>>,
+    efferent_handle: tokio::runtime::Handle,
+    afferent: Mutex<Option<tokio::runtime::Runtime>>,
+    afferent_handle: tokio::runtime::Handle,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        let take = |runtime: &mut Mutex<Option<tokio::runtime::Runtime>>| {
+            runtime.get_mut().ok().and_then(Option::take)
+        };
+        let runtimes = (take(&mut self.efferent), take(&mut self.afferent));
+        // A runtime cannot be dropped from inside another runtime's thread
+        if tokio::runtime::Handle::try_current().is_ok() {
+            std::thread::spawn(move || drop(runtimes));
+        } else {
+            drop(runtimes);
+        }
+    }
+}
+
+/// What happened to a signal handed to the fabric: how far it got synchronously, and what
+/// is still pending on deliberative pathways
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Outcome {
+    /// The first neuron that was quiet, and why
+    pub quiet: Option<(NeuronId, Quiet)>,
+    /// The longest synchronous chain, in neurons stimulated
+    pub hops: usize,
+    /// Signals now waiting on a deliberative pathway
+    pub queued: usize,
+    /// Effectors stimulated synchronously
+    pub acted: usize,
+    /// Commands with no effector of that name
+    pub unrouted: usize,
+    /// Signals with no pathway fast enough for their deadline
+    pub no_pathway: usize,
+}
+
+impl Outcome {
+    /// Whether the receptor's own gate dropped the signal
+    pub fn is_quiet(&self) -> bool {
+        self.hops == 0
+    }
+
+    fn merge(&mut self, other: Outcome) {
+        if self.quiet.is_none() {
+            self.quiet = other.quiet;
+        }
+        self.hops = self.hops.max(other.hops);
+        self.queued += other.queued;
+        self.acted += other.acted;
+        self.unrouted += other.unrouted;
+        self.no_pathway += other.no_pathway;
+    }
+}
+
+/// Neurons and pathways, built once and then shared; [`Fabric::stimulate`] moves a signal
+/// through them. Cloning shares the same fabric.
+#[derive(Clone)]
+pub struct Fabric(pub(crate) Arc<Inner>);
+
+/// Builds a [`Fabric`]: add neurons, connect them, build
+pub struct FabricBuilder {
+    neurons: Vec<(Arc<dyn Neuron>, Mechanisms)>,
+    receptors: Vec<(NeuronId, Arc<dyn Receptor>)>,
+    pathways: Vec<(NeuronId, NeuronId, PathwayKind, f32, Option<Summation>)>,
+    efferent_threads: usize,
+}
+
+impl Default for FabricBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FabricBuilder {
+    pub fn new() -> Self {
+        Self {
+            neurons: Vec::new(),
+            receptors: Vec::new(),
+            pathways: Vec::new(),
+            efferent_threads: 2,
+        }
+    }
+
+    /// Threads of the motor side's runtime (2 by default)
+    pub fn efferent_threads(mut self, threads: usize) -> Self {
+        self.efferent_threads = threads.max(1);
+        self
+    }
+
+    /// Add a neuron with its mechanisms. Names must be unique: effectors are addressed by
+    /// name in commands.
+    pub fn neuron(&mut self, neuron: impl Neuron, mechanisms: Mechanisms) -> NeuronId {
+        self.add(Arc::new(neuron), mechanisms)
+    }
+
+    /// [`FabricBuilder::neuron`] for a neuron already shared
+    pub fn add(&mut self, neuron: Arc<dyn Neuron>, mechanisms: Mechanisms) -> NeuronId {
+        let id = NeuronId(u32::try_from(self.neurons.len()).expect("fewer than 4G neurons"));
+        assert!(
+            !self.neurons.iter().any(|(n, _)| n.name() == neuron.name()),
+            "two neurons are named '{}'",
+            neuron.name()
+        );
+        self.neurons.push((neuron, mechanisms));
+        id
+    }
+
+    /// Add a receptor: a neuron that is also started with the fabric and may be mounted as a
+    /// route. Habituation belongs here.
+    pub fn receptor<R: Receptor>(&mut self, receptor: R, mechanisms: Mechanisms) -> NeuronId {
+        let receptor: Arc<R> = Arc::new(receptor);
+        let neuron: Arc<dyn Neuron> = receptor.clone();
+        let id = self.add(neuron, mechanisms);
+        self.receptors.push((id, receptor));
+        id
+    }
+
+    /// A reflex pathway: `to` is called directly when `from` fires
+    pub fn reflex(&mut self, from: NeuronId, to: NeuronId, weight: f32) -> &mut Self {
+        self.pathways
+            .push((from, to, PathwayKind::Reflex, weight, None));
+        self
+    }
+
+    /// A deliberative pathway: signals from `from` queue to a worker that fires `to`
+    pub fn deliberative(
+        &mut self,
+        from: NeuronId,
+        to: NeuronId,
+        weight: f32,
+        summation: Summation,
+    ) -> &mut Self {
+        self.pathways
+            .push((from, to, PathwayKind::Deliberative, weight, Some(summation)));
+        self
+    }
+
+    pub fn build(self) -> Fabric {
+        let count = self.neurons.len();
+        for &(from, to, ..) in &self.pathways {
+            assert!(
+                from.index() < count && to.index() < count,
+                "pathway {from} -> {to} names a neuron that was not added"
+            );
+        }
+        let efferent = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(self.efferent_threads)
+            .thread_name("furnace-efferent")
+            .enable_all()
+            .build()
+            .expect("the efferent runtime");
+        let afferent = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("furnace-afferent")
+            .enable_all()
+            .build()
+            .expect("the afferent runtime");
+        let mut by_name = HashMap::new();
+        let mut cells: Vec<Cell> = self
+            .neurons
+            .into_iter()
+            .enumerate()
+            .map(|(i, (neuron, mechanisms))| {
+                by_name.insert(neuron.name().to_string(), NeuronId(i as u32));
+                let kind = neuron.kind();
+                Cell {
+                    arcs: if kind == NeuronKind::Effector {
+                        (0..count).map(|_| OnceLock::new()).collect()
+                    } else {
+                        Vec::new()
+                    },
+                    neuron,
+                    kind,
+                    gate: Gate::new(mechanisms),
+                    counters: Counters::default(),
+                    out: Vec::new(),
+                    last_prepared: AtomicU64::new(0),
+                }
+            })
+            .collect();
+        let mut workers = Vec::new();
+        let pathways: Vec<Pathway> = self
+            .pathways
+            .into_iter()
+            .enumerate()
+            .map(|(i, (from, to, kind, weight, summation))| {
+                cells[from.index()].out.push(PathwayId(i as u32));
+                let queue = summation.map(|s| {
+                    let (sender, receiver) = mpsc::sync_channel(s.capacity);
+                    let waiting = Arc::new(AtomicU64::new(0));
+                    workers.push((PathwayId(i as u32), receiver, waiting.clone()));
+                    Queue { sender, waiting }
+                });
+                Pathway {
+                    from,
+                    to,
+                    kind,
+                    weight,
+                    latency: LatencyEstimate::new(),
+                    signals: AtomicU64::new(0),
+                    ineligible: AtomicU64::new(0),
+                    overflow: AtomicU64::new(0),
+                    summation,
+                    queue,
+                }
+            })
+            .collect();
+        let inner = Arc::new_cyclic(|weak: &Weak<Inner>| {
+            for (pathway, receiver, waiting) in workers {
+                let weak = weak.clone();
+                std::thread::Builder::new()
+                    .name(format!("furnace-nerve-{}", pathway.index()))
+                    .spawn(move || summation_worker(weak, pathway, receiver, waiting))
+                    .expect("failed to spawn a summation worker");
+            }
+            Inner {
+                epoch: Instant::now(),
+                cells,
+                pathways,
+                by_name,
+                receptors: self.receptors,
+                started: AtomicBool::new(false),
+                received: AtomicU64::new(0),
+                reached_brain: AtomicU64::new(0),
+                unrouted: AtomicU64::new(0),
+                no_eligible: AtomicU64::new(0),
+                loops: AtomicU64::new(0),
+                commands_direct: AtomicU64::new(0),
+                efferent_handle: efferent.handle().clone(),
+                efferent: Mutex::new(Some(efferent)),
+                afferent_handle: afferent.handle().clone(),
+                afferent: Mutex::new(Some(afferent)),
+            }
+        });
+        Fabric(inner)
+    }
+}
+
+impl Fabric {
+    pub fn builder() -> FabricBuilder {
+        FabricBuilder::new()
+    }
+
+    /// Start every receptor's sampling (idempotent). [`Server::nerve`](crate::Server::nerve)
+    /// does this when the router is built.
+    pub fn start(&self) {
+        if self.0.started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        for (id, receptor) in &self.0.receptors {
+            receptor.start(Afferent::new(Arc::downgrade(&self.0), *id));
+        }
+    }
+
+    /// The receptors, for mounting their routes
+    pub fn receptors(&self) -> &[(NeuronId, Arc<dyn Receptor>)] {
+        &self.0.receptors
+    }
+
+    /// A neuron by name
+    pub fn neuron(&self, name: &str) -> Option<NeuronId> {
+        self.0.by_name.get(name).copied()
+    }
+
+    pub fn name(&self, id: NeuronId) -> &str {
+        self.0.cells[id.index()].neuron.name()
+    }
+
+    pub fn kind(&self, id: NeuronId) -> NeuronKind {
+        self.0.cells[id.index()].kind
+    }
+
+    pub fn neurons(&self) -> impl Iterator<Item = (NeuronId, &dyn Neuron)> {
+        self.0
+            .cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (NeuronId(i as u32), &*c.neuron))
+    }
+
+    pub fn pathways(&self) -> &[Pathway] {
+        &self.0.pathways
+    }
+
+    /// The names effectors were registered under
+    pub fn effector_names(&self) -> Vec<String> {
+        self.0
+            .cells
+            .iter()
+            .filter(|c| c.kind == NeuronKind::Effector)
+            .map(|c| c.neuron.name().to_string())
+            .collect()
+    }
+
+    /// The motor side's runtime
+    pub fn efferent(&self) -> &tokio::runtime::Handle {
+        &self.0.efferent_handle
+    }
+
+    /// The receptive side's runtime
+    pub fn afferent(&self) -> &tokio::runtime::Handle {
+        &self.0.afferent_handle
+    }
+
+    /// Nanoseconds since the fabric was built
+    pub(crate) fn nanos(&self, now: Instant) -> u64 {
+        u64::try_from(now.saturating_duration_since(self.0.epoch).as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    /// Signals that entered through receptors, and those that reached a brain
+    pub fn brain_fraction(&self) -> f64 {
+        let received = self.0.received.load(Ordering::Relaxed);
+        if received == 0 {
+            0.0
+        } else {
+            self.0.reached_brain.load(Ordering::Relaxed) as f64 / received as f64
+        }
+    }
+
+    /// Hand a signal to a receptor: the whole synchronous chain runs before this returns.
+    /// Receptors call this through their [`Afferent`] handle; tests and in-process sources
+    /// call it directly.
+    pub fn stimulate(&self, receptor: NeuronId, mut signal: Signal) -> Outcome {
+        signal.origin = receptor;
+        self.0.received.fetch_add(1, Ordering::Relaxed);
+        self.drive(receptor, signal, 0)
+    }
+
+    /// [`Fabric::stimulate`] by the receptor's name
+    pub fn stimulate_named(&self, receptor: &str, signal: Signal) -> Option<Outcome> {
+        Some(self.stimulate(self.neuron(receptor)?, signal))
+    }
+
+    /// Run `id`'s gate and `stimulate`, then propagate what it fires
+    fn drive(&self, id: NeuronId, mut signal: Signal, depth: usize) -> Outcome {
+        let cell = &self.0.cells[id.index()];
+        let now = Instant::now();
+        let nanos = self.nanos(now);
+        cell.counters.received.fetch_add(1, Ordering::Relaxed);
+        if let Err(reason) = cell.gate.admit(&mut signal, nanos) {
+            cell.counters.quiet(reason);
+            return Outcome {
+                quiet: Some((id, reason)),
+                hops: depth,
+                ..Outcome::default()
+            };
+        }
+        signal.trace.push(id);
+        let mut acted = 0;
+        match cell.kind {
+            NeuronKind::Brain => {
+                signal.trace.mark_brain();
+                self.0.reached_brain.fetch_add(1, Ordering::Relaxed);
+            }
+            NeuronKind::Effector => {
+                acted = 1;
+                if !signal.trace.was_queued()
+                    && let Some(arc) = cell.arcs.get(signal.origin.index())
+                {
+                    arc.get_or_init(LatencyEstimate::new)
+                        .observe(now.saturating_duration_since(signal.at));
+                }
+            }
+            NeuronKind::Receptor | NeuronKind::Reflex => {}
+        }
+        let cx = Cx {
+            now,
+            id,
+            fabric: self,
+        };
+        let firing = cell.neuron.stimulate(signal, &cx);
+        let mut outcome = self.after_firing(id, firing, nanos, depth);
+        outcome.acted += acted;
+        outcome
+    }
+
+    /// Propagate what `id` fired
+    fn after_firing(&self, id: NeuronId, firing: Firing, nanos: u64, depth: usize) -> Outcome {
+        let cell = &self.0.cells[id.index()];
+        let emitted = match firing {
+            Firing::Quiet => {
+                cell.counters.quiet(Quiet::NotInterested);
+                return Outcome {
+                    quiet: Some((id, Quiet::NotInterested)),
+                    hops: depth + 1,
+                    ..Outcome::default()
+                };
+            }
+            Firing::Fire(signals) => signals,
+            Firing::Compute(work) => {
+                cell.counters.computed.fetch_add(1, Ordering::Relaxed);
+                work()
+            }
+        };
+        cell.gate.fired(nanos);
+        cell.counters.fired.fetch_add(1, Ordering::Relaxed);
+        let mut outcome = Outcome {
+            hops: depth + 1,
+            ..Outcome::default()
+        };
+        for signal in emitted {
+            outcome.merge(self.route(id, signal, depth + 1));
+        }
+        outcome
+    }
+
+    /// Send a signal `from` fired along the pathway its timing selects
+    fn route(&self, from: NeuronId, mut signal: Signal, depth: usize) -> Outcome {
+        if depth >= MAX_HOPS {
+            self.0.loops.fetch_add(1, Ordering::Relaxed);
+            warn!(
+                "nerve: signal {} dropped after {MAX_HOPS} hops (a loop?)",
+                signal.id.0
+            );
+            return Outcome::default();
+        }
+        let now = Instant::now();
+        let cell = &self.0.cells[from.index()];
+        let selected = match signal.payload.as_command() {
+            // A command names its effector; the pathway to it is the one (declared or not)
+            Some(command) => match self.0.by_name.get(&command.effector) {
+                Some(&target) if self.0.cells[target.index()].kind == NeuronKind::Effector => {
+                    match cell
+                        .out
+                        .iter()
+                        .map(|&p| &self.0.pathways[p.index()])
+                        .find(|p| p.to == target)
+                    {
+                        Some(pathway) => Some(pathway),
+                        None => {
+                            self.0.commands_direct.fetch_add(1, Ordering::Relaxed);
+                            return self.drive(target, signal, depth);
+                        }
+                    }
+                }
+                _ => {
+                    self.0.unrouted.fetch_add(1, Ordering::Relaxed);
+                    debug!(
+                        "nerve: no effector named '{}' for a command from {}",
+                        command.effector,
+                        cell.neuron.name()
+                    );
+                    return Outcome {
+                        unrouted: 1,
+                        ..Outcome::default()
+                    };
+                }
+            },
+            None => self.select(cell, &signal, now),
+        };
+        let Some(pathway) = selected else {
+            if cell.out.is_empty() {
+                // A terminal neuron: nothing to do with what it fired
+                return Outcome::default();
+            }
+            self.0.no_eligible.fetch_add(1, Ordering::Relaxed);
+            return Outcome {
+                no_pathway: 1,
+                ..Outcome::default()
+            };
+        };
+        pathway.signals.fetch_add(1, Ordering::Relaxed);
+        match &pathway.queue {
+            None => {
+                let outcome = self.drive(pathway.to, signal, depth);
+                pathway.latency.observe(now.elapsed());
+                outcome
+            }
+            Some(queue) => {
+                self.prepare_for(pathway, &signal, now);
+                signal.trace.mark_queued();
+                match queue.sender.try_send(Queued {
+                    signal,
+                    queued_at: now,
+                }) {
+                    Ok(()) => {
+                        queue.waiting.fetch_add(1, Ordering::Relaxed);
+                        Outcome {
+                            queued: 1,
+                            ..Outcome::default()
+                        }
+                    }
+                    Err(_) => {
+                        pathway.overflow.fetch_add(1, Ordering::Relaxed);
+                        Outcome::default()
+                    }
+                }
+            }
+        }
+    }
+
+    /// The short-mode / long-mode rule: among the pathways leaving `cell` whose p99 fits in
+    /// the signal's remaining deadline, the heaviest weight
+    fn select(&self, cell: &Cell, signal: &Signal, now: Instant) -> Option<&Pathway> {
+        let remaining = signal.urgency.remaining(now);
+        let mut best: Option<&Pathway> = None;
+        for &id in &cell.out {
+            let pathway = &self.0.pathways[id.index()];
+            if !pathway.fits(remaining) {
+                pathway.ineligible.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            if best.is_none_or(|b| pathway.weight > b.weight) {
+                best = Some(pathway);
+            }
+        }
+        best
+    }
+
+    /// Motor preparation: a signal with time to spare that takes a deliberative pathway
+    /// warms the neurons it will probably reach, at most once a second each
+    fn prepare_for(&self, pathway: &Pathway, signal: &Signal, now: Instant) {
+        let far = match (signal.urgency.remaining(now), pathway.latency.p99()) {
+            (None, _) | (_, None) => true,
+            (Some(remaining), Some(p99)) => remaining > 2 * p99,
+        };
+        if !far {
+            return;
+        }
+        let nanos = self.nanos(now);
+        let to = &self.0.cells[pathway.to.index()];
+        let downstream = to
+            .out
+            .iter()
+            .map(|&p| self.0.pathways[p.index()].to)
+            .chain(std::iter::once(pathway.to));
+        for id in downstream {
+            let cell = &self.0.cells[id.index()];
+            let last = cell.last_prepared.load(Ordering::Relaxed);
+            if nanos.saturating_sub(last) < 1_000_000_000 && last != 0 {
+                continue;
+            }
+            cell.last_prepared.store(nanos.max(1), Ordering::Relaxed);
+            let cx = Cx {
+                now,
+                id,
+                fabric: self,
+            };
+            cell.neuron.prepare(&cx);
+        }
+    }
+
+    /// Fire `to` with a batch a worker summed, and propagate the results
+    fn fire_summed(&self, pathway: PathwayId, batch: Vec<Queued>) {
+        let pathway = &self.0.pathways[pathway.index()];
+        let cell = &self.0.cells[pathway.to.index()];
+        let now = Instant::now();
+        let nanos = self.nanos(now);
+        let mut admitted = Vec::with_capacity(batch.len());
+        let mut queued_at = Vec::with_capacity(batch.len());
+        for Queued {
+            mut signal,
+            queued_at: at,
+        } in batch
+        {
+            cell.counters.received.fetch_add(1, Ordering::Relaxed);
+            match cell.gate.admit(&mut signal, nanos) {
+                Ok(()) => {
+                    signal.trace.push(pathway.to);
+                    if cell.kind == NeuronKind::Brain {
+                        signal.trace.mark_brain();
+                        self.0.reached_brain.fetch_add(1, Ordering::Relaxed);
+                    }
+                    admitted.push(signal);
+                    queued_at.push(at);
+                }
+                Err(reason) => {
+                    cell.counters.quiet(reason);
+                    pathway.latency.observe(now.saturating_duration_since(at));
+                }
+            }
+        }
+        if admitted.is_empty() {
+            return;
+        }
+        let cx = Cx {
+            now,
+            id: pathway.to,
+            fabric: self,
+        };
+        let firings = cell.neuron.stimulate_many(admitted, &cx);
+        for (firing, at) in firings.into_iter().zip(queued_at) {
+            self.after_firing(pathway.to, firing, nanos, 1);
+            pathway.latency.observe(at.elapsed());
+        }
+    }
+
+    /// Signals waiting in deliberative queues
+    pub fn waiting(&self) -> u64 {
+        self.0
+            .pathways
+            .iter()
+            .filter_map(|p| p.queue.as_ref())
+            .map(|q| q.waiting.load(Ordering::Relaxed))
+            .sum()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_latency(&self, pathway: usize, latency: Duration) {
+        for _ in 0..4 {
+            self.0.pathways[pathway].latency.observe(latency);
+        }
+    }
+}
+
+/// A deliberative pathway's worker: temporal summation of the signals of a window into one
+/// firing of the pathway's neuron
+fn summation_worker(
+    weak: Weak<Inner>,
+    pathway: PathwayId,
+    receiver: mpsc::Receiver<Queued>,
+    waiting: Arc<AtomicU64>,
+) {
+    while let Ok(first) = receiver.recv() {
+        let Some(inner) = weak.upgrade() else {
+            return;
+        };
+        let fabric = Fabric(inner);
+        let config = fabric.0.pathways[pathway.index()]
+            .summation
+            .unwrap_or_default();
+        let window = fabric.0.pathways[pathway.index()]
+            .window()
+            .unwrap_or(Duration::ZERO);
+        let deadline = first.queued_at + window;
+        let mut batch = vec![first];
+        while batch.len() < config.max_batch {
+            let now = Instant::now();
+            if now >= deadline {
+                match receiver.try_recv() {
+                    Ok(queued) => batch.push(queued),
+                    Err(_) => break,
+                }
+                continue;
+            }
+            match receiver.recv_timeout(deadline - now) {
+                Ok(queued) => batch.push(queued),
+                Err(_) => break,
+            }
+        }
+        waiting.fetch_sub(batch.len() as u64, Ordering::Relaxed);
+        fabric.fire_summed(pathway, batch);
+    }
+}
+
+/// A neuron made from a closure: `Fn(Signal, &Cx) -> Firing`
+pub struct FnNeuron<F> {
+    name: String,
+    kind: NeuronKind,
+    f: F,
+}
+
+impl<F> FnNeuron<F>
+where
+    F: Fn(Signal, &Cx<'_>) -> Firing + Send + Sync + 'static,
+{
+    /// A reflex: feature in, signals (or commands) out, in process
+    pub fn reflex(name: &str, f: F) -> Self {
+        Self {
+            name: name.to_string(),
+            kind: NeuronKind::Reflex,
+            f,
+        }
+    }
+
+    pub fn with_kind(mut self, kind: NeuronKind) -> Self {
+        self.kind = kind;
+        self
+    }
+}
+
+impl<F> Neuron for FnNeuron<F>
+where
+    F: Fn(Signal, &Cx<'_>) -> Firing + Send + Sync + 'static,
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> NeuronKind {
+        self.kind
+    }
+
+    fn stimulate(&self, signal: Signal, cx: &Cx<'_>) -> Firing {
+        (self.f)(signal, cx)
+    }
+}
+
+impl Payload {
+    /// Whether this payload is a command for `effector`
+    pub fn commands(&self, effector: &str) -> bool {
+        self.as_command().is_some_and(|c| c.effector == effector)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nerve::neuron::Habituation;
+    use crate::nerve::signal::{Feature, Payload};
+    use std::sync::atomic::AtomicUsize;
+    use std::thread::ThreadId;
+
+    /// Counts what reaches it and remembers the thread it ran on
+    struct Sink {
+        name: &'static str,
+        kind: NeuronKind,
+        hits: AtomicUsize,
+        thread: Mutex<Option<ThreadId>>,
+        queued: AtomicUsize,
+        seen: Mutex<Vec<Signal>>,
+    }
+
+    impl Sink {
+        fn new(name: &'static str, kind: NeuronKind) -> Arc<Self> {
+            Arc::new(Self {
+                name,
+                kind,
+                hits: AtomicUsize::new(0),
+                thread: Mutex::new(None),
+                queued: AtomicUsize::new(0),
+                seen: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn hits(&self) -> usize {
+            self.hits.load(Ordering::SeqCst)
+        }
+
+        fn wait_for(&self, hits: usize) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while self.hits() < hits {
+                assert!(
+                    Instant::now() < deadline,
+                    "{}: {} hits",
+                    self.name,
+                    self.hits()
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
+    impl Neuron for Sink {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn kind(&self) -> NeuronKind {
+            self.kind
+        }
+        fn stimulate(&self, signal: Signal, _cx: &Cx<'_>) -> Firing {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            *self.thread.lock().unwrap() = Some(std::thread::current().id());
+            if signal.trace.was_queued() {
+                self.queued.fetch_add(1, Ordering::SeqCst);
+            }
+            self.seen.lock().unwrap().push(signal);
+            Firing::Quiet
+        }
+    }
+
+    fn receptor(name: &'static str) -> Arc<Sink> {
+        Sink::new(name, NeuronKind::Receptor)
+    }
+
+    /// A receptor that passes everything on
+    fn pass(name: &str) -> impl Neuron {
+        FnNeuron::reflex(name, |s, _| Firing::one(s)).with_kind(NeuronKind::Receptor)
+    }
+
+    fn signal(bytes: &[u8]) -> Signal {
+        Signal::new(Feature::sketch(bytes), Payload::bytes(bytes.to_vec()))
+    }
+
+    #[test]
+    fn a_reflex_arc_is_a_direct_call_on_the_callers_thread() {
+        let mut b = Fabric::builder();
+        let r = b.neuron(pass("in"), Mechanisms::NONE);
+        let reflex = b.neuron(
+            FnNeuron::reflex("classify", |s, _| Firing::one(s.command("act", 1.into()))),
+            Mechanisms::NONE,
+        );
+        let effector = Sink::new("act", NeuronKind::Effector);
+        let e = b.add(effector.clone(), Mechanisms::NONE);
+        b.reflex(r, reflex, 1.0).reflex(reflex, e, 1.0);
+        let fabric = b.build();
+
+        let outcome = fabric.stimulate(r, signal(b"stimulus"));
+        // The effector ran before stimulate returned, on this thread, never queued
+        assert_eq!(effector.hits(), 1);
+        assert_eq!(
+            *effector.thread.lock().unwrap(),
+            Some(std::thread::current().id())
+        );
+        assert_eq!(effector.queued.load(Ordering::SeqCst), 0);
+        assert_eq!(outcome.hops, 3);
+        assert_eq!(outcome.acted, 1);
+        assert_eq!(outcome.queued, 0);
+        let seen = effector.seen.lock().unwrap();
+        assert_eq!(seen[0].trace.hops(), &[r, reflex, e]);
+        assert!(!seen[0].trace.reached_brain());
+        // The arc's stimulus-to-action latency was measured
+        let arc = fabric.0.cells[e.index()].arcs[r.index()].get().unwrap();
+        assert_eq!(arc.count(), 1);
+        assert_eq!(fabric.pathways()[1].latency().count(), 1);
+        assert_eq!(fabric.brain_fraction(), 0.0);
+    }
+
+    #[test]
+    fn habituation_at_the_receptor_keeps_repeats_from_the_brain() {
+        let mut b = Fabric::builder();
+        let r = b.neuron(
+            pass("in"),
+            Mechanisms::NONE
+                .threshold(0.6)
+                .habituation(Habituation::new(Duration::from_secs(60))),
+        );
+        let brain = Sink::new("brain", NeuronKind::Brain);
+        let bid = b.add(brain.clone(), Mechanisms::NONE);
+        b.deliberative(r, bid, 1.0, Summation::default().window(Duration::ZERO));
+        let fabric = b.build();
+
+        for _ in 0..10 {
+            fabric.stimulate(r, signal(b"same"));
+        }
+        fabric.stimulate(r, signal(b"new"));
+        brain.wait_for(2);
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(brain.hits(), 2);
+        assert_eq!(brain.queued.load(Ordering::SeqCst), 2);
+        let c = &fabric.0.cells[r.index()].counters;
+        assert_eq!(c.quiet_habituation.load(Ordering::SeqCst), 9);
+        assert_eq!(c.fired.load(Ordering::SeqCst), 2);
+        assert!((fabric.brain_fraction() - 2.0 / 11.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn selection_picks_the_heaviest_pathway_that_fits_the_deadline() {
+        let mut b = Fabric::builder();
+        let r = b.neuron(pass("in"), Mechanisms::NONE);
+        let fast = Sink::new("fast", NeuronKind::Effector);
+        let slow = Sink::new("slow", NeuronKind::Effector);
+        let f = b.add(fast.clone(), Mechanisms::NONE);
+        let s = b.add(slow.clone(), Mechanisms::NONE);
+        // The slow path is preferred (heavier) when there is time
+        b.reflex(r, f, 0.5).reflex(r, s, 1.0);
+        let fabric = b.build();
+        fabric.seed_latency(0, Duration::from_micros(10));
+        fabric.seed_latency(1, Duration::from_millis(50));
+
+        fabric.stimulate(r, signal(b"a"));
+        assert_eq!((fast.hits(), slow.hits()), (0, 1));
+        // A deadline the slow path cannot meet selects the fast one
+        fabric.stimulate(
+            r,
+            signal(b"b").with_urgency(super::super::signal::Urgency::within(
+                Duration::from_millis(5),
+            )),
+        );
+        assert_eq!((fast.hits(), slow.hits()), (1, 1));
+        assert_eq!(fabric.pathways()[1].ineligible.load(Ordering::SeqCst), 1);
+        // A deadline nothing can meet goes nowhere
+        let outcome = fabric.stimulate(
+            r,
+            signal(b"c").with_urgency(super::super::signal::Urgency::within(
+                Duration::from_micros(1),
+            )),
+        );
+        std::thread::sleep(Duration::from_micros(5));
+        assert_eq!(outcome.no_pathway + usize::from(fast.hits() == 2), 1);
+    }
+
+    #[test]
+    fn commands_reach_the_named_effector() {
+        let mut b = Fabric::builder();
+        let r = b.neuron(pass("in"), Mechanisms::NONE);
+        let reflex = b.neuron(
+            FnNeuron::reflex("decide", |s, _| {
+                Firing::Fire(vec![
+                    s.command("webhook", serde_json::json!({"n": 1})),
+                    s.command("journal", serde_json::json!({"n": 2})),
+                    s.command("nobody", serde_json::Value::Null),
+                ])
+            }),
+            Mechanisms::NONE,
+        );
+        let webhook = Sink::new("webhook", NeuronKind::Effector);
+        let journal = Sink::new("journal", NeuronKind::Effector);
+        let w = b.add(webhook.clone(), Mechanisms::NONE);
+        b.add(journal.clone(), Mechanisms::NONE);
+        b.reflex(r, reflex, 1.0).reflex(reflex, w, 1.0);
+        let fabric = b.build();
+
+        let outcome = fabric.stimulate(r, signal(b"x"));
+        assert_eq!((webhook.hits(), journal.hits()), (1, 1));
+        assert_eq!(outcome.unrouted, 1);
+        assert_eq!(outcome.acted, 2);
+        // The journal had no declared pathway: delivered directly
+        assert_eq!(fabric.0.commands_direct.load(Ordering::SeqCst), 1);
+        assert_eq!(fabric.pathways()[1].signals.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn refractory_period_drops_a_burst_after_the_first() {
+        let mut b = Fabric::builder();
+        let r = b.neuron(
+            pass("in"),
+            Mechanisms::NONE.refractory(Duration::from_secs(5)),
+        );
+        let e = Sink::new("act", NeuronKind::Effector);
+        let eid = b.add(e.clone(), Mechanisms::NONE);
+        b.reflex(r, eid, 1.0);
+        let fabric = b.build();
+        for i in 0..5u8 {
+            fabric.stimulate(r, signal(&[i]));
+        }
+        assert_eq!(e.hits(), 1);
+        let c = &fabric.0.cells[r.index()].counters;
+        assert_eq!(c.quiet_refractory.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn deliberative_pathway_sums_a_window_into_one_firing() {
+        struct Batchy {
+            sizes: Mutex<Vec<usize>>,
+        }
+        impl Neuron for Batchy {
+            fn name(&self) -> &str {
+                "brain"
+            }
+            fn kind(&self) -> NeuronKind {
+                NeuronKind::Brain
+            }
+            fn stimulate(&self, _: Signal, _: &Cx<'_>) -> Firing {
+                unreachable!("stimulate_many is used")
+            }
+            fn stimulate_many(&self, signals: Vec<Signal>, _: &Cx<'_>) -> Vec<Firing> {
+                self.sizes.lock().unwrap().push(signals.len());
+                signals
+                    .into_iter()
+                    .map(|_| Firing::Fire(Vec::new()))
+                    .collect()
+            }
+        }
+        let batchy = Arc::new(Batchy {
+            sizes: Mutex::new(Vec::new()),
+        });
+        let mut b = Fabric::builder();
+        let r = b.neuron(pass("in"), Mechanisms::NONE);
+        let brain = b.add(batchy.clone(), Mechanisms::NONE);
+        b.deliberative(
+            r,
+            brain,
+            1.0,
+            Summation::default()
+                .max_batch(4)
+                .window(Duration::from_millis(50)),
+        );
+        let fabric = b.build();
+        for i in 0..6u8 {
+            assert_eq!(fabric.stimulate(r, signal(&[i])).queued, 1);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let sizes = batchy.sizes.lock().unwrap().clone();
+            if sizes.iter().sum::<usize>() == 6 {
+                assert_eq!(sizes, vec![4, 2]);
+                break;
+            }
+            assert!(Instant::now() < deadline, "{sizes:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(fabric.waiting(), 0);
+        let latency = fabric.pathways()[0].latency();
+        assert_eq!(latency.count(), 6);
+    }
+
+    #[test]
+    fn a_loop_is_cut() {
+        let mut b = Fabric::builder();
+        let a = b.neuron(pass("a"), Mechanisms::NONE);
+        let c = b.neuron(
+            FnNeuron::reflex("b", |s, _| Firing::one(s)),
+            Mechanisms::NONE,
+        );
+        b.reflex(a, c, 1.0).reflex(c, a, 1.0);
+        let fabric = b.build();
+        let outcome = fabric.stimulate(a, signal(b"round"));
+        assert_eq!(outcome.hops, MAX_HOPS);
+        assert_eq!(fabric.0.loops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn prepare_runs_once_for_far_signals_on_deliberative_pathways() {
+        struct Prep(AtomicUsize);
+        impl Neuron for Prep {
+            fn name(&self) -> &str {
+                "brain"
+            }
+            fn kind(&self) -> NeuronKind {
+                NeuronKind::Brain
+            }
+            fn stimulate(&self, _: Signal, _: &Cx<'_>) -> Firing {
+                Firing::Quiet
+            }
+            fn prepare(&self, _: &Cx<'_>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let prep = Arc::new(Prep(AtomicUsize::new(0)));
+        let mut b = Fabric::builder();
+        let r = b.neuron(pass("in"), Mechanisms::NONE);
+        let brain = b.add(prep.clone(), Mechanisms::NONE);
+        b.deliberative(r, brain, 1.0, Summation::none());
+        let fabric = b.build();
+        for i in 0..3u8 {
+            fabric.stimulate(r, signal(&[i]));
+        }
+        // Prepared before the first signal was queued; the next two were within the second
+        assert_eq!(prep.0.load(Ordering::SeqCst), 1);
+        let _ = receptor("unused");
+    }
+}
