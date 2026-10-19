@@ -199,7 +199,7 @@ jobs:
         VERSION: ${{ needs.create-release.outputs.version }}
       run: |
         mkdir -p tap/Formula
-        python3 packaging/homebrew/render.py "$VERSION" > tap/Formula/furnace.rb
+        bash packaging/homebrew/render.sh "$VERSION" > tap/Formula/furnace.rb
         cd tap
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
