@@ -49,6 +49,11 @@ impl Access {
         !self.api_keys.is_empty()
     }
 
+    /// Whether every request is admitted: no API keys and no rate limit
+    pub fn is_open(&self) -> bool {
+        self.api_keys.is_empty() && self.limiter.is_none()
+    }
+
     /// Admit a request presenting `key` (from `Authorization: Bearer` or `X-API-Key`) from
     /// `ip`, or say why not. `check_key` is false for routes with their own authentication.
     pub fn admit(
