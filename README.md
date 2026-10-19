@@ -74,15 +74,23 @@ curl -s localhost:3000/v2/models/resnet18     # inputs, outputs, shapes
 Then send it tensors with any Triton or KServe client, or JSON to `POST /predict`
 ([Quick start](#quick-start) below).
 
-| ResNet-18 over HTTP, CPU | Batch 1 | Batch 4 | Ready after | Memory (peak private) | Ships as |
-|---|---|---|---|---|---|
-| **Furnace** | 9.8 ms | 31.9 ms | **29 ms** | **79 MB** | **8.7 MB binary** + weights |
-| FastAPI + ONNX Runtime | **8.6 ms** | **28.8 ms** | 1,761 ms | 693 MB | Python + 102 MB of packages + model |
+Measured as a server, with 16 concurrent clients on a 16-thread laptop CPU (AMD Ryzen 9 7940HS):
 
-Median latency on a 16-thread laptop CPU (AMD Ryzen 9 7940HS). In process, Furnace takes
-8.6 ms per image against ONNX Runtime's 7.4 ms, and 26.3 ms for four against 25.6 ms. Details, more
-engines and how to reproduce: [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Starting in 42 ms makes
-scaling to zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
+| | **Furnace** | Hand-written axum | FastAPI (uvicorn, 4 workers) |
+|---|---|---|---|
+| Model that returns its input: requests/s, median latency | **85,700, 0.17 ms** | 88,200, 0.17 ms | 24,900, 0.55 ms |
+| Transformer text classifier in Burn: requests/s, p95 | **418, 46 ms** | 412, 48 ms | |
+| ResNet-18 in Burn: requests/s, p95 | **61, 366 ms** | 61, 366 ms | |
+| Ready after start | **30 ms** | 32 ms | 3.1 s (1.6 s with 1 worker) |
+| Memory (peak private), returning its input | **6 MB** | 6 MB | 565 MB with 1 worker |
+
+The hand-written server is the minimum a Burn user would write: one axum route calling `forward`
+on a blocking thread. Furnace keeps up with it while adding request IDs, metrics, input checks,
+backpressure and the Triton protocol, about 7 µs per request. For ONNX models, compiled to Burn,
+ONNX Runtime's kernels are faster: ResNet-18 takes 9.8 ms per image over HTTP with Furnace and
+8.6 ms with FastAPI + ONNX Runtime, which needs 1.8 s to start and 693 MB. Details and how to
+reproduce: [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Starting in milliseconds makes scaling to
+zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
 
 ## Features
 
@@ -258,7 +266,7 @@ server's log lines for that request. Full reference, including errors:
 | `--max-concurrent-requests <N>` | `100` | Beyond this, requests get `503` |
 | `--max-body-mb <MB>` | `100` | Request size limit |
 | `--request-timeout-ms <MS>` | none | Beyond this, requests get `504` |
-| `--batch-workers <N>` | `4` | Forward passes running at once; beyond this, concurrent requests are batched ([details](docs/API.md#dynamic-batching)) |
+| `--batch-workers <N>` | `4` | With batching on: forward passes running at once; beyond this, concurrent requests are batched ([details](docs/API.md#dynamic-batching)) |
 | `--max-batch-size <N>` | `1` | Most items per batched pass; the default leaves batching off. Try `8` for convolutional models and on GPUs |
 | `--batch-timeout-us <US>` | `2000` | Longest a batch waits for requests still arriving; a lone request never waits |
 | `--threads <N>` | one per physical core | Inference threads (also `RAYON_NUM_THREADS`) |
