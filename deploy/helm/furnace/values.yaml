@@ -1,0 +1,81 @@
+# Furnace Helm chart. Every option maps to a `furnace` command-line option; see the README.
+
+image:
+  repository: ghcr.io/gilfeather/furnace
+  # Defaults to the chart's appVersion
+  tag: ""
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# Models to serve, compiled into the image (the published image has resnet18 and mnist).
+# The first is the one POST /predict uses.
+models:
+  - resnet18
+
+# Options added to the command line as they are, e.g. ["--max-batch-size", "16"]
+extraArgs: []
+
+grpc:
+  enabled: true
+  port: 8001
+
+http:
+  port: 3000
+
+# Inference threads; by default one per physical core of the node (or of `resources.limits.cpu`
+# when it is set, via RAYON_NUM_THREADS below)
+threads: null
+
+# Require API keys (`Authorization: Bearer <key>` or `X-API-Key`) on every route but the health
+# probes. The keys are read from this Secret's key, comma-separated, via FURNACE_API_KEYS.
+apiKeys:
+  existingSecret: ""
+  secretKey: api-keys
+
+# Per-client rate limit; 0 turns it off
+rateLimit:
+  perSecond: 0
+  burst: 0
+
+# Enables POST /admin/models/{model}/reload, with the token from this Secret's key
+adminToken:
+  existingSecret: ""
+  secretKey: admin-token
+
+# HTTPS and gRPC over TLS from a kubernetes.io/tls Secret (e.g. made by cert-manager; ECDSA or
+# Ed25519 keys). Renewed certificates are picked up without a restart.
+tls:
+  existingSecret: ""
+  # Mutual TLS: CA certificates (PEM) in this Secret's key; clients need a certificate from them
+  clientCaSecret: ""
+  clientCaKey: ca.crt
+
+service:
+  type: ClusterIP
+  annotations: {}
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+# Prometheus Operator ServiceMonitor for GET /metrics
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

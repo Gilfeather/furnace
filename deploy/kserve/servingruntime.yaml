@@ -1,0 +1,60 @@
+# Furnace as a KServe serving runtime, speaking the Open Inference Protocol (v2) over HTTP and
+# gRPC.
+#
+# Furnace compiles model architectures into its image (here ResNet-18 and MNIST; build your own
+# image from the Dockerfile for others), and KServe supplies the weights: the InferenceService's
+# storageUri is a Burnpack file (`<model>.bpk`) that the storage initializer puts in
+# /mnt/models. The InferenceService's name picks the built-in model. See inferenceservice.yaml.
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: furnace
+spec:
+  annotations:
+    prometheus.kserve.io/port: "8080"
+    prometheus.kserve.io/path: /metrics
+  supportedModelFormats:
+    - name: furnace
+      version: "1"
+      autoSelect: true
+  protocolVersions:
+    - v2
+    - grpc-v2
+  containers:
+    - name: kserve-container
+      image: ghcr.io/gilfeather/furnace:0.9.0
+      command: ["/app/furnace"]
+      args:
+        - --host
+        - "0.0.0.0"
+        - --port
+        - "8080"
+        - --grpc-port
+        - "8081"
+        - --model-name
+        - "{{.Name}}"
+        - --weights
+        - "/mnt/models/{{.Name}}.bpk"
+      env:
+        - name: FURNACE_ENV
+          value: production
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      readinessProbe:
+        httpGet:
+          path: /v2/health/ready
+          port: 8080
+        periodSeconds: 2
+      resources:
+        requests:
+          cpu: "1"
+          memory: 256Mi
+        limits:
+          memory: 512Mi
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
