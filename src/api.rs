@@ -1,6 +1,10 @@
 use axum::http::{
-    HeaderMap, HeaderName, HeaderValue,
-    header::{ACCEPT, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS},
+    HeaderMap, HeaderName, HeaderValue, Method,
+    header::{
+        ACCEPT, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+        ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_REQUEST_METHOD,
+        CONTENT_TYPE, ORIGIN, VARY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
+    },
 };
 use axum::{
     Router,
@@ -21,9 +25,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::signal;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio::task::JoinHandle;
-use tower_http::cors::{Any, CorsLayer};
-use tower_http::set_header::SetResponseHeaderLayer;
-use tracing::{Instrument, error, info, info_span, warn};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 
 #[cfg(feature = "grpc")]
 pub mod grpc;
@@ -628,18 +630,7 @@ fn server_state(models: Vec<ServedModel>, config: &ServerConfig) -> AppState {
 }
 
 fn router_with_state(state: AppState, config: &ServerConfig) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any)
-        .expose_headers([
-            BATCH_SIZE_HEADER,
-            OUTPUT_SHAPE_HEADER,
-            INFERENCE_TIME_HEADER,
-            REQUEST_ID_HEADER,
-        ]);
-
-    Router::new()
+    let router = Router::new()
         .route("/healthz", get(health_check))
         .route("/health", get(health_check))
         .route("/readyz", get(readiness))
@@ -662,19 +653,16 @@ fn router_with_state(state: AppState, config: &ServerConfig) -> Router {
         .route("/models/{model}", get(model_info_named))
         .route("/admin/models/{model}/reload", post(reload_model))
         .route("/metrics", get(metrics))
-        .merge(v2::routes(state.clone()))
-        .layer(middleware::from_fn_with_state(state.clone(), guard))
+        .merge(v2::routes(state.clone()));
+    // Without API keys or a rate limit every request is admitted: skip the check altogether
+    let router = if state.access.is_open() {
+        router
+    } else {
+        router.layer(middleware::from_fn_with_state(state.clone(), guard))
+    };
+    router
         .layer(DefaultBodyLimit::max(config.max_body_bytes))
-        .layer(SetResponseHeaderLayer::overriding(
-            X_CONTENT_TYPE_OPTIONS,
-            HeaderValue::from_static("nosniff"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            X_FRAME_OPTIONS,
-            HeaderValue::from_static("DENY"),
-        ))
-        .layer(cors)
-        .layer(middleware::from_fn(request_id))
+        .layer(middleware::from_fn(edge))
         .with_state(state)
 }
 
@@ -747,27 +735,72 @@ fn rejection_response(state: &ServerState, rejection: &Rejection) -> Response {
     }
 }
 
-/// Run the request inside a `request` span carrying its ID (the client's `X-Request-Id` when it
-/// is a reasonable token, else a new UUID), and echo the ID in the response.
-async fn request_id(request: Request, next: Next) -> Response {
+/// Response headers exposed to browser scripts (CORS)
+const EXPOSED_HEADERS: &str = "x-batch-size, x-output-shape, x-inference-time-ms, x-request-id";
+
+/// What every request goes through, in one layer: an ID (the client's `X-Request-Id` when it is
+/// a reasonable token, else a new UUID) and a `request` span carrying it, CORS open to any
+/// origin, and security headers. The ID is echoed in the response.
+async fn edge(request: Request, next: Next) -> Response {
     let id = request
         .headers()
         .get(&REQUEST_ID_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .filter(|id| !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_graphic()))
-        .map(str::to_owned)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let span = info_span!(
-        "request",
-        id = %id,
-        method = %request.method(),
-        path = %request.uri().path()
+        .filter(|id| {
+            let id = id.as_bytes();
+            !id.is_empty() && id.len() <= 128 && id.iter().all(u8::is_ascii_graphic)
+        })
+        .cloned()
+        .unwrap_or_else(new_request_id);
+    let preflight = request.method() == Method::OPTIONS
+        && request.headers().contains_key(ORIGIN)
+        && request
+            .headers()
+            .contains_key(ACCESS_CONTROL_REQUEST_METHOD);
+    let mut response = if preflight {
+        let mut response = StatusCode::OK.into_response();
+        let headers = response.headers_mut();
+        let any = HeaderValue::from_static("*");
+        headers.insert(ACCESS_CONTROL_ALLOW_METHODS, any.clone());
+        headers.insert(ACCESS_CONTROL_ALLOW_HEADERS, any);
+        headers.insert(
+            VARY,
+            HeaderValue::from_static(
+                "origin, access-control-request-method, access-control-request-headers",
+            ),
+        );
+        response
+    } else {
+        let span = info_span!(
+            "request",
+            id = id.to_str().unwrap_or_default(),
+            method = %request.method(),
+            path = %request.uri().path()
+        );
+        next.run(request).instrument(span).await
+    };
+    let headers = response.headers_mut();
+    headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    headers.insert(
+        ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static(EXPOSED_HEADERS),
     );
-    let mut response = next.run(request).instrument(span).await;
-    if let Ok(value) = HeaderValue::from_str(&id) {
-        response.headers_mut().insert(REQUEST_ID_HEADER, value);
-    }
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(REQUEST_ID_HEADER, id);
     response
+}
+
+/// A new request ID in UUID v4 format: a random per-process value plus a counter, so IDs are
+/// unique without asking the OS for randomness on every request
+fn new_request_id() -> HeaderValue {
+    static SEED: std::sync::LazyLock<u128> =
+        std::sync::LazyLock::new(|| uuid::Uuid::new_v4().as_u128());
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let bits = *SEED ^ u128::from(NEXT.fetch_add(1, Ordering::Relaxed));
+    let id = uuid::Builder::from_random_bytes(bits.to_be_bytes()).into_uuid();
+    let mut buffer = uuid::Uuid::encode_buffer();
+    HeaderValue::from_str(id.hyphenated().encode_lower(&mut buffer))
+        .expect("a UUID is a valid header value")
 }
 
 pub async fn start_server(host: &str, port: u16, model: Model) -> Result<()> {
@@ -1100,7 +1133,8 @@ async fn predict_with(state: &AppState, slot: &ModelSlot, request: Request) -> R
             let elapsed = start_time.elapsed();
             state.observe_inference(slot, elapsed);
             let inference_time_ms = elapsed.as_secs_f64() * 1000.0;
-            info!(
+            // Per request, so debug: at info it would cost more than the server's own work
+            debug!(
                 "Prediction completed in {:.2}ms, batch size: {}",
                 inference_time_ms, batch_size
             );
@@ -2298,6 +2332,46 @@ pub(crate) mod tests {
         assert_eq!(response.headers()[X_FRAME_OPTIONS], "DENY");
     }
 
+    #[tokio::test]
+    async fn test_cors_open_to_any_origin() {
+        // A browser's preflight is answered without reaching the routes
+        let preflight = Request::builder()
+            .uri("/predict")
+            .method("OPTIONS")
+            .header(ORIGIN, "https://example.com")
+            .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .header("access-control-request-headers", "content-type")
+            .body(Body::empty())
+            .unwrap();
+        let response = test_app().oneshot(preflight).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = response.headers();
+        assert_eq!(headers[ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        assert_eq!(headers[ACCESS_CONTROL_ALLOW_METHODS], "*");
+        assert_eq!(headers[ACCESS_CONTROL_ALLOW_HEADERS], "*");
+        assert!(headers.contains_key(REQUEST_ID_HEADER));
+
+        // Responses let scripts read furnace's own headers
+        let request = Request::builder()
+            .uri("/healthz")
+            .header(ORIGIN, "https://example.com")
+            .body(Body::empty())
+            .unwrap();
+        let response = test_app().oneshot(request).await.unwrap();
+        assert_eq!(response.headers()[ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        let exposed = response.headers()[ACCESS_CONTROL_EXPOSE_HEADERS]
+            .to_str()
+            .unwrap();
+        for name in [
+            BATCH_SIZE_HEADER,
+            OUTPUT_SHAPE_HEADER,
+            INFERENCE_TIME_HEADER,
+            REQUEST_ID_HEADER,
+        ] {
+            assert!(exposed.contains(name.as_str()), "{exposed}");
+        }
+    }
+
     /// Every field of `value` is in the `name` schema of docs/openapi.json, and every field the
     /// schema requires is in `value`
     fn assert_matches_schema(spec: &serde_json::Value, name: &str, value: &serde_json::Value) {
@@ -2902,8 +2976,13 @@ pub(crate) mod tests {
         for request in [plain, with_id(&"x".repeat(129)), with_id("a b")] {
             let response = test_app().oneshot(request).await.unwrap();
             let id = response.headers()[REQUEST_ID_HEADER].to_str().unwrap();
-            assert!(uuid::Uuid::parse_str(id).is_ok(), "{id}");
+            let uuid = uuid::Uuid::parse_str(id).unwrap_or_else(|_| panic!("{id}"));
+            assert_eq!(uuid.get_version(), Some(uuid::Version::Random), "{id}");
         }
+
+        // Generated IDs do not repeat
+        let ids: std::collections::HashSet<_> = (0..1000).map(|_| new_request_id()).collect();
+        assert_eq!(ids.len(), 1000);
 
         // Errors carry it too
         let request = Request::builder()
