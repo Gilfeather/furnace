@@ -95,7 +95,7 @@ scaling to zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
 - **KServe / Triton Open Inference Protocol** over HTTP and gRPC: Triton and KServe clients work
   unchanged. Tensors are FP32, INT64 or INT32, several in and out, in JSON or binary.
 - **Several models per process**, each swappable for new weights without downtime.
-- **Dynamic batching** of concurrent requests.
+- **Dynamic batching** of concurrent requests, for models where it pays (off by default).
 - **Pure Rust**, CPU or GPU: `--backend cpu|wgpu|metal|cuda`.
 - **Weights stay outside the binary** in a memory-mapped `.bpk` file (or embed them with
   `--features embed-weights`).
@@ -259,7 +259,7 @@ server's log lines for that request. Full reference, including errors:
 | `--max-body-mb <MB>` | `100` | Request size limit |
 | `--request-timeout-ms <MS>` | none | Beyond this, requests get `504` |
 | `--batch-workers <N>` | `4` | Forward passes running at once; beyond this, concurrent requests are batched ([details](docs/API.md#dynamic-batching)) |
-| `--max-batch-size <N>` | `8` | Most items per batched pass; `1` turns batching off |
+| `--max-batch-size <N>` | `1` | Most items per batched pass; the default leaves batching off. Try `8` for convolutional models and on GPUs |
 | `--batch-timeout-us <US>` | `2000` | Longest a batch waits for requests still arriving; a lone request never waits |
 | `--threads <N>` | one per physical core | Inference threads (also `RAYON_NUM_THREADS`) |
 | `--grpc-port <PORT>` | none | Also serve the KServe / Triton protocol over gRPC (builds with `--features grpc`; release binaries and the Docker image have it) |

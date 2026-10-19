@@ -184,15 +184,23 @@ about +0.4 MB to the release binary (5.5 MB to 5.9 MB on Windows x86-64).
 
 ## Dynamic batching
 
-Concurrent `/predict` requests are merged into shared forward passes once the server is
-saturated. Results are the same as unbatched, and each response still carries only its own
-outputs, in order.
+With `--max-batch-size` above 1, concurrent `/predict` requests are merged into shared
+forward passes once the server is saturated. Results are the same as unbatched, and each
+response still carries only its own outputs, in order.
+
+Batching is **off by default** (`--max-batch-size 1`), because whether it pays depends on the
+model. A convolutional network on a CPU runs a batch of 4 in about the time of 2 single passes,
+so batching serves more requests under load (ResNet-18: about 10-20% more at 16 clients, with
+shorter tail latency). A transformer on a CPU takes nearly 4 times as long for 4, so merging
+only makes requests wait (a 4-layer text encoder: about 25% fewer requests and twice the p95).
+Turn it on, e.g. `--max-batch-size 8`, for models of the first kind and on GPUs;
+`benches/burn` measures a model both ways.
 
 Up to `--batch-workers` forward passes (default 4) run at the same time. While a worker is
 free, each request gets a pass of its own, started at once: on a CPU, two small passes side
 by side use the cores better than one pass over both. Once every worker is busy, requests
 queue, and the next worker to finish takes everything queued, up to `--max-batch-size`
-items (default 8), as one batch. If it finds a single request queued while another is still
+items, as one batch. If it finds a single request queued while another is still
 being received or decoded, it waits for that one, at most `--batch-timeout-us` (default
 2000 µs) after the first was queued. A lone request never waits. A request with several
 items counts as that many; one larger than the maximum runs alone.
@@ -203,9 +211,9 @@ Queued requests hold one of the `--max-concurrent-requests` slots, and `--reques
 covers queueing and inference; a request that times out while queued is dropped from its
 batch.
 
-`--max-batch-size 1` turns batching off: every request then runs its own pass on a blocking
-thread, and up to `--max-concurrent-requests` of them run side by side, competing for the
-cores, so under heavy load some requests take far longer than others. See
+With batching off, every request runs its own pass on a blocking thread, and up to
+`--max-concurrent-requests` of them run side by side, competing for the cores, as in a
+hand-written server: under heavy load some requests take far longer than others. See
 [`PERFORMANCE.md`](PERFORMANCE.md#concurrent-load) for measurements.
 
 ## Open Inference Protocol (KServe / Triton v2)
