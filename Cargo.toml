@@ -58,7 +58,7 @@ pkg-url = "{ repo }/releases/download/v{ version }/furnace-windows-x86_64.exe"
 
 [package.metadata.docs.rs]
 # Document the gRPC, TLS and image input APIs too
-features = ["grpc", "tls", "image", "llm"]
+features = ["grpc", "tls", "image", "llm", "nerve"]
 
 [workspace]
 members = [".", "furnace-candle"]
@@ -93,6 +93,9 @@ tls = ["dep:rustls", "dep:tokio-rustls", "dep:tokio-stream", "dep:aes-gcm", "dep
 # Serve LLMs: OpenAI-compatible chat and completions with streaming, behind the `LlmEngine` and
 # `StepModel` traits (src/llm). Engines come from other crates, such as furnace-candle.
 llm = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:futures-util"]
+# The nervous system (src/nerve): receptors, reflex and deliberative pathways, effectors and
+# brains, with habituation, thresholds and refractory periods. No dependencies of its own.
+nerve = []
 wgpu = ["burn/wgpu"]
 metal = ["burn/metal"]
 cuda = ["burn/cuda"]

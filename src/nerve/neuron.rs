@@ -1,0 +1,501 @@
+//! Neurons: anything that takes a signal and may fire, and the three small state machines
+//! every neuron owns (threshold, habituation, refractory period).
+
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+
+use super::fabric::Fabric;
+use super::signal::{Feature, NeuronId, Signal};
+
+/// What kind of neuron, for metrics (`brain_fraction`, reflex arcs) and for `GET /nerve`
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NeuronKind {
+    /// World → signal
+    Receptor,
+    /// Feature → command, in process, bounded in microseconds to low milliseconds
+    Reflex,
+    /// The large slow model: its output is commands
+    Brain,
+    /// Command → world
+    Effector,
+}
+
+impl NeuronKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Receptor => "receptor",
+            Self::Reflex => "reflex",
+            Self::Brain => "brain",
+            Self::Effector => "effector",
+        }
+    }
+}
+
+/// What a neuron does with a signal
+pub enum Firing {
+    /// Not interested (the fabric's gate already handled threshold, habituation and refractory)
+    Quiet,
+    /// Emitted signals, each propagated along the neuron's pathways
+    Fire(Vec<Signal>),
+    /// Blocking work (a model's forward, a generation): the fabric runs it where the pathway
+    /// says (inline on a reflex arc, on the worker of a deliberative pathway) and propagates
+    /// the result
+    Compute(Box<dyn FnOnce() -> Vec<Signal> + Send>),
+}
+
+impl Firing {
+    /// Fire one signal
+    pub fn one(signal: Signal) -> Self {
+        Self::Fire(vec![signal])
+    }
+
+    pub fn compute(work: impl FnOnce() -> Vec<Signal> + Send + 'static) -> Self {
+        Self::Compute(Box::new(work))
+    }
+
+    pub fn is_quiet(&self) -> bool {
+        matches!(self, Self::Quiet)
+    }
+}
+
+impl std::fmt::Debug for Firing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Quiet => f.write_str("Quiet"),
+            Self::Fire(signals) => f.debug_tuple("Fire").field(&signals.len()).finish(),
+            Self::Compute(_) => f.write_str("Compute"),
+        }
+    }
+}
+
+/// What a neuron sees of the fabric while it is stimulated
+pub struct Cx<'a> {
+    /// The fabric's clock reading when the signal reached this neuron
+    pub now: Instant,
+    /// This neuron
+    pub id: NeuronId,
+    pub(crate) fabric: &'a Fabric,
+}
+
+impl Cx<'_> {
+    /// The fabric this neuron is part of
+    pub fn fabric(&self) -> &Fabric {
+        self.fabric
+    }
+
+    /// The motor side's runtime: where effectors run their I/O and brains their engines
+    pub fn efferent(&self) -> &tokio::runtime::Handle {
+        self.fabric.efferent()
+    }
+
+    /// The names effectors are registered under, for a brain's prompt
+    pub fn effectors(&self) -> Vec<String> {
+        self.fabric.effector_names()
+    }
+}
+
+/// Anything that takes a signal and may fire. Must be cheap on the no-fire path: the gate
+/// (threshold, habituation, refractory) runs before `stimulate`, so a neuron only sees the
+/// signals that got through.
+pub trait Neuron: Send + Sync + 'static {
+    fn name(&self) -> &str;
+
+    fn kind(&self) -> NeuronKind {
+        NeuronKind::Reflex
+    }
+
+    /// Decide and act
+    fn stimulate(&self, signal: Signal, cx: &Cx<'_>) -> Firing;
+
+    /// Several signals that a deliberative pathway summed into one firing. The default
+    /// stimulates them one by one; a model that batches overrides it.
+    fn stimulate_many(&self, signals: Vec<Signal>, cx: &Cx<'_>) -> Vec<Firing> {
+        signals.into_iter().map(|s| self.stimulate(s, cx)).collect()
+    }
+
+    /// Warm up for a signal that is probably coming: open the connection, touch the
+    /// weights. Called on the thread that selected the pathway, so it must not block; start
+    /// the work on [`Cx::efferent`] if it takes time.
+    fn prepare(&self, _cx: &Cx<'_>) {}
+
+    /// Anything else `GET /nerve` should show about this neuron
+    fn describe(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    /// Counters of the neuron's own (an effector's local loop), for `GET /metrics`
+    fn metrics(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    /// The same in the Prometheus text format; `labels` names this neuron
+    fn render_prometheus(&self, _out: &mut String, _labels: &str) {}
+}
+
+/// Habituation: a repeated feature attenuates before it propagates, and the attenuation
+/// decays with time
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Habituation {
+    /// Recovery time constant: an entry's attenuation decays as `exp(-dt / tau)`
+    pub tau: Duration,
+    /// How much of the remaining way to full attenuation one repeat covers (0..1). With 0.5,
+    /// the second occurrence of a feature arrives at half intensity, the third at a quarter.
+    pub gain: f32,
+    /// Features remembered at once; the least recently seen in a feature's set is replaced
+    pub capacity: usize,
+}
+
+impl Default for Habituation {
+    fn default() -> Self {
+        Self {
+            tau: Duration::from_secs(30),
+            gain: 0.5,
+            capacity: 1024,
+        }
+    }
+}
+
+impl Habituation {
+    pub fn new(tau: Duration) -> Self {
+        Self {
+            tau,
+            ..Self::default()
+        }
+    }
+
+    pub fn gain(mut self, gain: f32) -> Self {
+        self.gain = gain.clamp(0.0, 1.0);
+        self
+    }
+
+    pub fn capacity(mut self, capacity: usize) -> Self {
+        self.capacity = capacity.max(WAYS);
+        self
+    }
+}
+
+/// The three mechanisms a neuron can have, each optional and each a few words of state
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mechanisms {
+    /// Fires only if `intensity >= threshold`; 0 lets everything through
+    pub threshold: f32,
+    pub habituation: Option<Habituation>,
+    /// After firing, ignore signals for this long
+    pub refractory: Option<Duration>,
+}
+
+impl Default for Mechanisms {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
+impl Mechanisms {
+    /// Everything passes: a plain neuron
+    pub const NONE: Self = Self {
+        threshold: 0.0,
+        habituation: None,
+        refractory: None,
+    };
+
+    pub fn threshold(mut self, threshold: f32) -> Self {
+        self.threshold = threshold;
+        self
+    }
+
+    pub fn habituation(mut self, habituation: Habituation) -> Self {
+        self.habituation = Some(habituation);
+        self
+    }
+
+    pub fn refractory(mut self, period: Duration) -> Self {
+        self.refractory = Some(period);
+        self
+    }
+}
+
+/// Why a signal died at a neuron's gate
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Quiet {
+    /// Intensity below the threshold as it arrived
+    Threshold,
+    /// Attenuated below the threshold by habituation
+    Habituation,
+    /// The neuron fired too recently
+    Refractory,
+    /// The neuron looked and was not interested
+    NotInterested,
+}
+
+impl Quiet {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Threshold => "threshold",
+            Self::Habituation => "habituation",
+            Self::Refractory => "refractory",
+            Self::NotInterested => "not_interested",
+        }
+    }
+}
+
+/// Entries per set of the habituation table: a feature is remembered in one of these slots
+const WAYS: usize = 4;
+
+#[derive(Clone, Copy)]
+struct Slot {
+    feature: Feature,
+    /// Attenuation 0..1 as of `seen`
+    attenuation: f32,
+    /// Nanoseconds since the fabric's epoch; `u64::MAX` marks an empty slot
+    seen: u64,
+}
+
+const EMPTY: Slot = Slot {
+    feature: Feature::NONE,
+    attenuation: 0.0,
+    seen: u64::MAX,
+};
+
+/// A bounded, set-associative table of attenuations keyed by feature
+struct Table {
+    slots: Vec<Slot>,
+    sets: usize,
+    tau_nanos: f32,
+    gain: f32,
+}
+
+impl Table {
+    fn new(config: Habituation) -> Self {
+        let sets = config.capacity.div_ceil(WAYS).max(1);
+        Self {
+            slots: vec![EMPTY; sets * WAYS],
+            sets,
+            tau_nanos: config.tau.as_nanos().max(1) as f32,
+            gain: config.gain,
+        }
+    }
+
+    /// The attenuation to apply to a signal with `feature` seen `now`, 0..1, and remember
+    /// the repeat
+    fn attenuation(&mut self, feature: Feature, now: u64) -> f32 {
+        let set = (feature.sketch ^ (u64::from(feature.kind) << 56)) as usize % self.sets;
+        let slots = &mut self.slots[set * WAYS..(set + 1) * WAYS];
+        let mut victim = 0;
+        let mut victim_key = u64::MAX;
+        for (i, slot) in slots.iter_mut().enumerate() {
+            if slot.seen != u64::MAX && slot.feature == feature {
+                let dt = now.saturating_sub(slot.seen) as f32;
+                let decayed = slot.attenuation * (-dt / self.tau_nanos).exp();
+                slot.attenuation = decayed + (1.0 - decayed) * self.gain;
+                slot.seen = now;
+                return decayed;
+            }
+            // An empty slot first, else the least recently seen
+            let key = if slot.seen == u64::MAX {
+                0
+            } else {
+                slot.seen.saturating_add(1)
+            };
+            if key < victim_key {
+                victim = i;
+                victim_key = key;
+            }
+        }
+        slots[victim] = Slot {
+            feature,
+            attenuation: self.gain,
+            seen: now,
+        };
+        0.0
+    }
+}
+
+/// The per-neuron state of [`Mechanisms`]: what the fabric runs before `stimulate`
+pub(crate) struct Gate {
+    threshold: f32,
+    table: Option<Mutex<Table>>,
+    refractory_nanos: u64,
+    /// Nanoseconds since the epoch of the last firing; 0 before any
+    last_fired: AtomicU64,
+}
+
+impl Gate {
+    pub(crate) fn new(mechanisms: Mechanisms) -> Self {
+        Self {
+            threshold: mechanisms.threshold,
+            table: mechanisms.habituation.map(|h| Mutex::new(Table::new(h))),
+            refractory_nanos: mechanisms
+                .refractory
+                .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)),
+            last_fired: AtomicU64::new(0),
+        }
+    }
+
+    /// Attenuate `signal`, and say why it dies here if it does. `now` is nanoseconds since
+    /// the fabric's epoch.
+    pub(crate) fn admit(&self, signal: &mut Signal, now: u64) -> Result<(), Quiet> {
+        if signal.intensity < self.threshold {
+            return Err(Quiet::Threshold);
+        }
+        if let Some(table) = &self.table
+            && !signal.feature.is_none()
+        {
+            let attenuation = table
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .attenuation(signal.feature, now);
+            if attenuation > 0.0 {
+                signal.intensity *= 1.0 - attenuation;
+                if signal.intensity < self.threshold || signal.intensity <= 0.0 {
+                    return Err(Quiet::Habituation);
+                }
+            }
+        }
+        if self.refractory_nanos > 0 {
+            let last = self.last_fired.load(Ordering::Relaxed);
+            if last != 0 && now.saturating_sub(last) < self.refractory_nanos {
+                return Err(Quiet::Refractory);
+            }
+        }
+        Ok(())
+    }
+
+    /// The neuron fired `now`
+    pub(crate) fn fired(&self, now: u64) {
+        if self.refractory_nanos > 0 {
+            self.last_fired.store(now.max(1), Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn describe(&self) -> serde_json::Value {
+        serde_json::json!({
+            "threshold": self.threshold,
+            "habituation": self.table.as_ref().map(|t| {
+                let t = t.lock().unwrap_or_else(|e| e.into_inner());
+                serde_json::json!({
+                    "capacity": t.slots.len(),
+                    "tau_ms": t.tau_nanos / 1e6,
+                    "gain": t.gain,
+                    "remembered": t.slots.iter().filter(|s| s.seen != u64::MAX).count(),
+                })
+            }),
+            "refractory_ms": (self.refractory_nanos > 0).then(|| self.refractory_nanos as f64 / 1e6),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nerve::signal::Payload;
+
+    const SECOND: u64 = 1_000_000_000;
+
+    fn signal(bytes: &[u8]) -> Signal {
+        Signal::new(Feature::sketch(bytes), Payload::None)
+    }
+
+    #[test]
+    fn habituation_attenuates_repeats_and_recovers_with_time() {
+        let gate = Gate::new(
+            Mechanisms::NONE
+                .threshold(0.3)
+                .habituation(Habituation::new(Duration::from_secs(10)).gain(0.5)),
+        );
+        let mut first = signal(b"same");
+        assert_eq!(gate.admit(&mut first, SECOND), Ok(()));
+        assert_eq!(first.intensity, 1.0);
+        // The second occurrence, right away, arrives at half intensity
+        let mut second = signal(b"same");
+        assert_eq!(gate.admit(&mut second, SECOND + 1), Ok(()));
+        assert!(
+            (second.intensity - 0.5).abs() < 1e-3,
+            "{}",
+            second.intensity
+        );
+        // The third at a quarter: below the threshold, it dies of habituation
+        let mut third = signal(b"same");
+        assert_eq!(gate.admit(&mut third, SECOND + 2), Err(Quiet::Habituation));
+        // A different feature is untouched
+        let mut other = signal(b"other");
+        assert_eq!(gate.admit(&mut other, SECOND + 3), Ok(()));
+        assert_eq!(other.intensity, 1.0);
+        // After several time constants the attenuation has decayed away
+        let mut later = signal(b"same");
+        assert_eq!(gate.admit(&mut later, SECOND + 60 * SECOND), Ok(()));
+        assert!(later.intensity > 0.99, "{}", later.intensity);
+    }
+
+    #[test]
+    fn habituation_table_is_bounded() {
+        let gate = Gate::new(
+            Mechanisms::NONE
+                .threshold(0.6)
+                .habituation(Habituation::new(Duration::from_secs(10)).capacity(8)),
+        );
+        // Far more distinct features than the table holds
+        for i in 0..10_000u32 {
+            let mut s = signal(&i.to_le_bytes());
+            let _ = gate.admit(&mut s, SECOND + u64::from(i));
+        }
+        let described = gate.describe();
+        assert_eq!(described["habituation"]["capacity"], 8);
+        assert_eq!(described["habituation"]["remembered"], 8);
+        // A feature seen just now is still remembered; an evicted one is forgotten
+        let mut recent = signal(&9_999u32.to_le_bytes());
+        assert_eq!(gate.admit(&mut recent, 2 * SECOND), Err(Quiet::Habituation));
+    }
+
+    #[test]
+    fn signals_without_a_feature_never_habituate() {
+        let gate = Gate::new(
+            Mechanisms::NONE
+                .threshold(0.5)
+                .habituation(Habituation::default()),
+        );
+        for i in 0..5 {
+            let mut s = Signal::new(Feature::NONE, Payload::None);
+            assert_eq!(gate.admit(&mut s, SECOND + i), Ok(()));
+            assert_eq!(s.intensity, 1.0);
+        }
+    }
+
+    #[test]
+    fn threshold_drops_weak_signals() {
+        let gate = Gate::new(Mechanisms::NONE.threshold(0.5));
+        let mut weak = signal(b"a").with_intensity(0.4);
+        assert_eq!(gate.admit(&mut weak, SECOND), Err(Quiet::Threshold));
+        let mut strong = signal(b"a").with_intensity(0.5);
+        assert_eq!(gate.admit(&mut strong, SECOND), Ok(()));
+    }
+
+    #[test]
+    fn refractory_period_ignores_signals_after_a_firing() {
+        let gate = Gate::new(Mechanisms::NONE.refractory(Duration::from_millis(10)));
+        let mut s = signal(b"a");
+        assert_eq!(gate.admit(&mut s, SECOND), Ok(()));
+        gate.fired(SECOND);
+        let mut during = signal(b"b");
+        assert_eq!(
+            gate.admit(&mut during, SECOND + 5_000_000),
+            Err(Quiet::Refractory)
+        );
+        let mut after = signal(b"c");
+        assert_eq!(gate.admit(&mut after, SECOND + 10_000_000), Ok(()));
+    }
+
+    #[test]
+    fn no_mechanisms_means_no_cost_and_no_quiet() {
+        let gate = Gate::new(Mechanisms::NONE);
+        for _ in 0..3 {
+            let mut s = signal(b"same").with_intensity(0.0);
+            assert_eq!(gate.admit(&mut s, SECOND), Ok(()));
+            gate.fired(SECOND);
+        }
+    }
+}
