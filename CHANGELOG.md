@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `benches/llm`: furnace's LLM server layer against a hand-written axum server and FastAPI,
   streaming the same paced mock tokens; furnace adds 0.3 µs per streamed token over the
   hand-written server, and matches its time to first token up to 256 streams (docs/LLM.md)
+- `furnace-llm-bench real`: one GGUF file served by furnace + candle, llama.cpp and mistral.rs
+  under the same streaming requests. On Qwen2.5-0.5B-Instruct Q4_K_M, furnace + candle runs at
+  candle's own speed and matches mistral.rs on one stream; llama.cpp is 4.5 times faster per
+  token; mistral.rs 0.9.5 fails most concurrent streams on the CPU (docs/LLM.md)
 - `SchedulerConfig::max_prefill_tokens` (512): the scheduler prefills waiting prompts up to this
   many tokens between two decode steps, instead of one prompt per step, and new sequences join
   the decode step right after their prefill. With a batched step model at 256 streams, tokens/s

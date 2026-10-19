@@ -1,5 +1,6 @@
 # The LLM server layer alone: furnace's OpenAI routes and SSE streaming against a hand-written
-# axum server and FastAPI, all streaming the same paced mock tokens. Its own workspace (own
+# axum server and FastAPI, all streaming the same paced mock tokens; and one GGUF file served by
+# furnace + candle, llama.cpp and mistral.rs (`real`). Its own workspace (own
 # Cargo.lock and target/) so its dependencies never enter furnace's.
 [package]
 name = "furnace-llm-bench"
@@ -14,6 +15,8 @@ license = "MIT"
 
 [dependencies]
 furnace = { package = "furnace-server", path = "../..", default-features = false, features = ["llm"] }
+# The `real` comparison: GGUF files through candle
+furnace-candle = { path = "../../furnace-candle" }
 axum = "0.8"
 tokio = { version = "1.53", features = ["full"] }
 reqwest = { version = "0.13", default-features = false }

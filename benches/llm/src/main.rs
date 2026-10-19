@@ -32,9 +32,14 @@
 //!
 //! `serve KIND PORT --tokens N --token-ms MS` runs one server on its own.
 //!
+//! `real --gguf PATH [--llama-server PATH] [--mistralrs PATH]` serves one GGUF file with
+//! furnace + candle, llama.cpp and mistral.rs, and compares them on real tokens (see `real.rs`).
+//!
 //! `overhead [--tokens N] [--streams N]` calls each Rust server's router in this process, with
 //! no interval and no network, one stream at a time, and prints the time per token: the server
 //! layer's own CPU cost, which the paced runs above cannot resolve below the timers' millisecond.
+
+mod real;
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -736,6 +741,44 @@ async fn main() {
         tokens: number("--tokens", 64) as usize,
         token_ms: number("--token-ms", 20),
     };
+    if args.first().map(String::as_str) == Some("serve-gguf") {
+        let (Some(path), Some(port), Some(sequences)) = (
+            args.get(1),
+            args.get(2).and_then(|p| p.parse().ok()),
+            args.get(3).and_then(|s| s.parse().ok()),
+        ) else {
+            fail("usage: serve-gguf PATH PORT SEQUENCES");
+        };
+        real::serve_gguf(path.as_ref(), port, sequences).await;
+        return;
+    }
+    if args.first().map(String::as_str) == Some("real") {
+        let gguf = flag("--gguf").unwrap_or_else(|| fail("real needs --gguf PATH"));
+        let clients = flag("--clients")
+            .unwrap_or_else(|| "1,8,32".to_string())
+            .split(',')
+            .map(|c| {
+                c.parse()
+                    .unwrap_or_else(|_| fail("--clients takes numbers"))
+            })
+            .collect();
+        real::run(real::Options {
+            gguf: gguf.into(),
+            llama_server: flag("--llama-server").map(Into::into),
+            mistralrs: flag("--mistralrs").map(Into::into),
+            clients,
+            max_tokens: number("--max-tokens", 128) as usize,
+            per_client: number("--requests", 1) as usize,
+            json: flag("--json"),
+            servers: flag("--servers")
+                .unwrap_or_else(|| "furnace,llama.cpp,mistral.rs".to_string())
+                .split(',')
+                .map(str::to_string)
+                .collect(),
+        })
+        .await;
+        return;
+    }
     if args.first().map(String::as_str) == Some("overhead") {
         overhead(pace.tokens, number("--streams", 500) as usize).await;
         return;

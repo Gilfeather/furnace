@@ -221,8 +221,60 @@ FURNACE_BENCH_PYTHON=/path/to/venv/python target/release/furnace-llm-bench
 target/release/furnace-llm-bench overhead --tokens 1024 --streams 1000
 ```
 
-The engine behind each server is a mock, so this measures the server layer only. Model speed
-is the engine's: llama.cpp and mistral.rs comparisons on a real GGUF file are the next step.
+The engine behind each server is a mock, so this measures the server layer only.
+
+## On a real model: furnace + candle, llama.cpp, mistral.rs
+
+`furnace-llm-bench real` serves one GGUF file with each server in turn and sends them the same
+streaming chat requests: a story, greedy, 128 tokens. Prompt caches are off and every prompt
+starts with its own number, so each request pays its prefill. Each server runs with its own
+defaults for threads, and with as many sequences as clients.
+
+- **furnace + candle**: furnace-candle 0.1, candle main (`70f72e9`).
+- **llama.cpp**: `llama-server` b11732 (C++, the reference).
+- **mistral.rs**: `mistralrs serve` 0.9.5, which also runs on candle.
+
+Qwen2.5-0.5B-Instruct Q4_K_M, same machine as above:
+
+| Server | Clients | Failed | TTFT p50 / p99 | ITL p50 / p99 | Tokens/s per stream | Tokens/s total |
+|---|---|---|---|---|---|---|
+| furnace + candle | 1 | 0 of 1 | 1.1 / 1.1 s | 39.5 / 50.3 ms | 25.1 | 20.8 |
+| furnace + candle | 8 | 0 of 8 | 6.9 / 10.9 s | 335 / 490 ms | 2.7 | 18.9 |
+| furnace + candle | 32 | 0 of 32 | 20.4 / 40.0 s | 1.3 / 8.7 s | 0.7 | 19.3 |
+| llama.cpp | 1 | 0 of 1 | 0.08 / 0.08 s | 8.8 / 10.1 ms | 112.6 | 105.9 |
+| llama.cpp | 8 | 0 of 8 | 0.61 / 0.61 s | 29.6 / 51.9 ms | 32.5 | 226.4 |
+| llama.cpp | 32 | 0 of 32 | 2.5 / 2.5 s | 94.9 / 102 ms | 10.5 | 281.8 |
+| mistral.rs | 1 | 0 of 1 | 1.1 / 1.1 s | 36.5 / 40.6 ms | 27.4 | 22.3 |
+| mistral.rs | 8 | **6 of 8** | 11.2 s | 72.9 / 86.7 ms | 8.9 | 12.5 |
+| mistral.rs | 32 | **30 of 32** | 38.4 s | 67.0 / 76.4 ms | 4.7 | 5.5 |
+
+The same model in process with furnace-candle alone, with no HTTP and no scheduler: 44 prompt
+tokens prefilled in 1.1 s, then 23.9 tokens/s.
+
+What the numbers say:
+
+- **On one stream, furnace + candle runs at the engine's speed**: 25.1 tokens/s through the
+  server against 23.9 in process, and the same as mistral.rs (27.4), the other server built on
+  candle. The server layer costs nothing visible next to a 40 ms token.
+- **llama.cpp is 4.5 times faster per token and 14 times faster on the prompt.** Its CPU
+  kernels are that much faster than candle's, and on many streams it also batches them in one
+  forward pass (282 tokens/s at 32 streams). candle's quantized models decode one sequence at a
+  time, so furnace's scheduler interleaves them and the total stays at the single-stream speed.
+  That is engine work: a `StepModel` with a batched `decode_batch` gets continuous batching from
+  furnace unchanged.
+- **mistral.rs 0.9.5 fails under concurrency on the CPU.** When it batches several prompts in
+  one step, the model fails with `input tensor is not contiguous`, and the streams end with a
+  `model_error` payload: 6 of 8 and 30 of 32 failed. Furnace answered every request.
+- **Furnace's prefill budget suits fast prefills, not this one.** With candle taking about a
+  second per prompt, prefilling up to 512 tokens between two decode steps keeps the running
+  streams waiting for several seconds (ITL p99 8.7 s at 32 streams). A budget in time rather
+  than tokens, from the measured prefill speed, would bound that.
+
+Reproduce, with the files and binaries of your choice:
+
+```bash
+target/release/furnace-llm-bench real --gguf qwen2.5-0.5b-instruct-q4_k_m.gguf     --llama-server path/to/llama-server --mistralrs path/to/mistralrs
+```
 
 ## Not yet
 
