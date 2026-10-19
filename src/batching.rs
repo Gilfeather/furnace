@@ -353,14 +353,15 @@ mod tests {
     use crate::error::Result;
     use crate::model::BurnModel;
     use crate::tensor::{HostTensor, IoSpec, Values};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Condvar;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Semaphore;
 
     const WIDTH: usize = 4;
 
     /// Doubles its input and records every batch size it sees, and the most passes that ran
-    /// at once. It can be slowed down, and it panics on an input of -1, so tests can check what
-    /// was batched with what.
+    /// at once. It can be slowed down or held, and it panics on an input of -1, so tests can
+    /// check what was batched with what.
     #[derive(Debug)]
     struct Doubler {
         shape: Vec<usize>,
@@ -368,10 +369,34 @@ mod tests {
         delay: Duration,
         running: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
-        /// When non-zero, the first passes wait (up to 5 s) until this many run at once, so a
-        /// test can check concurrency without depending on timing
-        rendezvous: usize,
-        met: Arc<AtomicBool>,
+        holds: Arc<Holds>,
+    }
+
+    /// Input values whose passes wait until released, so a test can keep workers busy for
+    /// exactly as long as it needs without depending on timing
+    #[derive(Debug, Default)]
+    struct Holds {
+        held: Mutex<Vec<f32>>,
+        released: Condvar,
+    }
+
+    impl Holds {
+        fn hold(&self, value: f32) {
+            self.held.lock().unwrap().push(value);
+        }
+
+        fn release(&self, value: f32) {
+            self.held.lock().unwrap().retain(|&v| v != value);
+            self.released.notify_all();
+        }
+
+        /// Block while any of the values is held
+        fn wait(&self, values: &[f32]) {
+            let mut held = self.held.lock().unwrap();
+            while values.iter().any(|v| held.contains(v)) {
+                held = self.released.wait(held).unwrap();
+            }
+        }
     }
 
     impl BurnModel for Doubler {
@@ -392,24 +417,12 @@ mod tests {
             self.batches.lock().unwrap().push(input.batch());
             let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(now, Ordering::SeqCst);
-            if self.rendezvous > 0 && !self.met.load(Ordering::SeqCst) {
-                let deadline = Instant::now() + Duration::from_secs(5);
-                while self.running.load(Ordering::SeqCst) < self.rendezvous
-                    && Instant::now() < deadline
-                {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                let reached = self.running.load(Ordering::SeqCst);
-                self.peak.fetch_max(reached, Ordering::SeqCst);
-                if reached >= self.rendezvous {
-                    self.met.store(true, Ordering::SeqCst);
-                }
-            }
-            std::thread::sleep(self.delay);
-            self.running.fetch_sub(1, Ordering::SeqCst);
             let Values::F32(values) = input.values else {
                 panic!("f32 input");
             };
+            self.holds.wait(&values);
+            std::thread::sleep(self.delay);
+            self.running.fetch_sub(1, Ordering::SeqCst);
             assert!(!values.contains(&-1.0), "poisoned input");
             Ok(vec![HostTensor {
                 shape: input.shape,
@@ -468,7 +481,9 @@ mod tests {
         batcher: Batcher,
         model: Arc<Model>,
         batches: Arc<Mutex<Vec<usize>>>,
+        running: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
+        holds: Arc<Holds>,
         slots: Arc<Semaphore>,
     }
 
@@ -482,27 +497,18 @@ mod tests {
         batch_timeout: Duration,
         delay: Duration,
     ) -> Setup {
-        setup_full(workers, max_batch_size, batch_timeout, delay, 0)
-    }
-
-    fn setup_full(
-        workers: usize,
-        max_batch_size: usize,
-        batch_timeout: Duration,
-        delay: Duration,
-        rendezvous: usize,
-    ) -> Setup {
         let batches = Arc::new(Mutex::new(Vec::new()));
+        let running = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
+        let holds = Arc::new(Holds::default());
         let model = Arc::new(Model::new(
             Box::new(Doubler {
                 shape: vec![WIDTH],
                 batches: batches.clone(),
                 delay,
-                running: Arc::new(AtomicUsize::new(0)),
+                running: running.clone(),
                 peak: peak.clone(),
-                rendezvous,
-                met: Arc::new(AtomicBool::new(false)),
+                holds: holds.clone(),
             }),
             "test",
             0,
@@ -516,7 +522,9 @@ mod tests {
             batcher: Batcher::new(model.clone(), config),
             model,
             batches,
+            running,
             peak,
+            holds,
             slots: Arc::new(Semaphore::new(1000)),
         }
     }
@@ -709,23 +717,33 @@ mod tests {
 
     #[tokio::test]
     async fn idle_workers_run_requests_side_by_side() {
-        // The first two passes wait for each other, so they can only finish if they overlap
-        let s = setup_full(2, 8, Duration::from_secs(5), Duration::from_millis(100), 2);
+        let s = setup_with_workers(2, 8, Duration::from_secs(5), Duration::ZERO);
+        // The first two passes are held, so both run until released
+        s.holds.hold(1.0);
+        s.holds.hold(2.0);
         let first = s.submit(&[1.0]);
         let second = s.submit(&[2.0]);
-        settle().await;
-        // Both workers are busy now, so these two are batched
+        // Each went to an idle worker: both passes run side by side
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while s.running.load(Ordering::SeqCst) < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "the first two never ran together"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        // Both workers are busy, so these two wait in the queue
         let third = s.submit(&[3.0]);
         let fourth = s.submit(&[4.0]);
+        // The worker that frees up takes both as one batch while the other is still busy.
+        // (Freeing both at once could leave two idle workers, which rightly run them apart.)
+        s.holds.release(1.0);
         assert_eq!(first.await.unwrap().unwrap(), expected(&[1.0]));
-        assert_eq!(second.await.unwrap().unwrap(), expected(&[2.0]));
-        assert_eq!(
-            s.peak.load(Ordering::SeqCst),
-            2,
-            "the first two ran side by side"
-        );
         assert_eq!(third.await.unwrap().unwrap(), expected(&[3.0]));
         assert_eq!(fourth.await.unwrap().unwrap(), expected(&[4.0]));
+        s.holds.release(2.0);
+        assert_eq!(second.await.unwrap().unwrap(), expected(&[2.0]));
+        assert_eq!(s.peak.load(Ordering::SeqCst), 2);
         assert_eq!(s.batches(), vec![1, 1, 2]);
     }
 
