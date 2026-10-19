@@ -173,6 +173,44 @@ jobs:
           assets/SHA256SUMS
           assets/furnace.spdx.json
 
+  # The formula in Gilfeather/homebrew-tap (`brew install gilfeather/tap/furnace`), written from
+  # packaging/homebrew/furnace.rb.in with the SHA-256 GitHub records for each asset. Pushes with a
+  # deploy key that can write to the tap and nothing else.
+  homebrew:
+    name: Homebrew formula
+    needs: [create-release, build-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Check out the tap
+      uses: actions/checkout@v5
+      with:
+        repository: Gilfeather/homebrew-tap
+        ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        path: tap
+
+    - name: Update the formula
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ needs.create-release.outputs.version }}
+      run: |
+        mkdir -p tap/Formula
+        python3 packaging/homebrew/render.py "$VERSION" > tap/Formula/furnace.rb
+        cd tap
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add Formula/furnace.rb
+        if git diff --cached --quiet; then
+          echo "Formula already at $VERSION"
+        else
+          git commit -m "furnace $VERSION"
+          git push
+        fi
+
   publish-crate:
     name: Publish to crates.io
     needs: [create-release, build-release]

@@ -11,7 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Kubernetes: a Helm chart (`deploy/helm/furnace`: probes, non-root read-only container, API
   keys, rate limits, TLS from a Secret, ServiceMonitor, autoscaling) and a KServe
   `ClusterServingRuntime` (`deploy/kserve`), both validated in CI
-- `cargo binstall furnace-server` installs the release binary
+- `cargo binstall furnace-server` installs the release binary, and
+  `brew install gilfeather/tap/furnace` installs it on macOS and Linux with the ResNet-18 weights;
+  each release updates the tap's formula
 - Releases carry build provenance attestations for every binary and image, SHA-256 checksums
   and an SPDX SBOM; `SECURITY.md` says how to report a vulnerability and verify a download
 - `docs/MODELS.md`: models known to work, and those that don't yet; `ADOPTERS.md`
