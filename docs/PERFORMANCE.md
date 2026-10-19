@@ -1,5 +1,87 @@
 # Performance
 
+## Serving a Burn model
+
+Furnace is a server, so the question is what it adds around a model, and how it compares with
+the other ways to put one behind HTTP. [`benches/burn`](../benches/burn) serves the same models
+three ways, each in its own process:
+
+- **Furnace**, through the library API (`Model::from_fn`, or a `BurnModel` for the two-input
+  text model), with default settings. Requests use the KServe / Triton v2 protocol with binary
+  tensors.
+- **Hand-written axum**: one route taking raw tensor bytes and calling `forward` on
+  `spawn_blocking`. About the least a server can do, and what a Burn user writes without
+  Furnace.
+- **FastAPI** under uvicorn, with 1 and 4 workers, for the model that returns its input (Python
+  cannot run the Burn models).
+
+The models are plain Burn `Module`s with random weights:
+
+- *echo*, which returns its input, so only the server is measured;
+- *digits*, a small CNN (`[1, 28, 28]` -> 10, 0.05 ms per image);
+- *ResNet-18*, written in Burn (47 ms per image);
+- *encoder*, a 4-layer transformer text classifier taking two INT64 inputs of 128 tokens
+  (10 ms).
+
+N clients, each on its own keep-alive connection, send batch-1 requests back to back. Medians of
+three runs on an AMD Ryzen 9 7940HS (16 threads), Windows 11, Furnace with stock burn-flex 0.22,
+as a crate depending on `furnace-server` gets it.
+
+**16 clients: requests/s, latency p50 / p95**
+
+| Model | Furnace | Hand-written axum | FastAPI, 4 workers | FastAPI, 1 worker |
+|---|---|---|---|---|
+| echo | **85,670**, 0.17 / 0.27 ms | 88,203, 0.17 / 0.27 ms | 24,931, 0.55 / 0.90 ms | 7,238, 2.10 / 2.89 ms |
+| digits | 51,967, 0.27 / 0.52 ms | 54,682, 0.26 / 0.49 ms | | |
+| ResNet-18 | 61, 254 / 366 ms | 61, 253 / 366 ms | | |
+| encoder | **418**, 38 / 46 ms | 412, 38 / 48 ms | | |
+
+| Echo model | Furnace | Hand-written axum | FastAPI, 4 workers | FastAPI, 1 worker |
+|---|---|---|---|---|
+| Ready after start | **30 ms** | 32 ms | 3,063 ms | 1,597 ms |
+| Peak private memory | **6 MB** | 6 MB | | 565 MB |
+| 1 client: requests/s, p50 | **12,203**, 0.07 ms | 9,868, 0.10 ms | 4,587, 0.21 ms | 3,817, 0.25 ms |
+
+What this shows:
+
+- **On real models Furnace runs within a few percent of the hand-written server**, while adding
+  request IDs, metrics, input checks, backpressure and the Triton protocol. Its own work costs
+  about 7 µs more per request: called in process one request at a time, the echo model takes
+  17 µs through Furnace's router and 10 µs through the hand-written one. That is 0.07% of the
+  encoder's time per request, and shows only on the smallest models (digits, 5% fewer requests).
+- **Against FastAPI, as servers**: 3.4 times the requests of 4 uvicorn workers at a third of the
+  latency, ready in 30 ms instead of seconds, in 6 MB instead of hundreds.
+
+**Batching.** With `--max-batch-size 8` (two runs; the default is off):
+
+| 16 clients | Batching off (default) | Batching on |
+|---|---|---|
+| ResNet-18 | 61 req/s, p95 366 ms | **66 req/s, p95 316 ms** |
+| encoder | **418 req/s, p95 46 ms** | 314 req/s, p95 88 ms |
+
+ResNet-18 runs a batch of 4 in about twice the time of one image, so merging requests serves
+more; the encoder takes nearly 4 times as long for 4, so merging only makes requests wait. Hence
+the default: off, matching a hand-written server, with batching one flag away for the models
+it helps.
+
+**The engine.** These numbers use stock burn-flex. This repository's binaries and Docker image
+use a patched copy ([`vendor/burn-flex`](../vendor/README.md)) with faster convolutions: the same
+Burn ResNet-18 takes 12 ms per image instead of 47 ms. A crate depending on `furnace-server` gets
+stock burn-flex until those changes reach a Burn release.
+
+```bash
+cd benches/burn
+cargo build --release
+target/release/furnace-burn-bench                          # all models, 1, 4 and 16 clients
+target/release/furnace-burn-bench --max-batch 8            # with batching on
+target/release/furnace-burn-bench overhead echo            # the server's own work, in process
+# the patched engine:
+cargo build --release --config 'patch.crates-io.burn-flex.path="../../vendor/burn-flex"'
+```
+
+The FastAPI rows need Python with FastAPI, uvicorn and numpy: the virtual environment of
+`benches/compare/fastapi-ort` (below) or `FURNACE_BENCH_PYTHON`.
+
 ## ResNet-18 compared with other engines
 
 The same `models/resnet18.onnx` (resnet18-v1-7 from the ONNX Model Zoo) on Furnace,
@@ -120,13 +202,14 @@ GPU backends (`--features wgpu|metal|cuda`) work but are not tuned; on the integ
 
 ## Concurrent load
 
-N clients, each on its own keep-alive connection, send ResNet-18 requests (one image, binary
-body and response) back to back. Throughput is over 40 timed requests per client after a
+ResNet-18 from ONNX on the patched CPU backend, measured with Furnace 0.8, when batching was on
+by default. N clients, each on its own keep-alive connection, send ResNet-18 requests (one
+image, binary body and response) back to back. Throughput is over 40 timed requests per client after a
 warm-up; latency percentiles are over all of them. Medians of six runs; the servers ran in a
 different order in each run, with a 10 s pause between them, because a laptop that has just
 run a heavy load is slower for a while.
 
-| Clients | Furnace (default) | Furnace, batching off | Furnace, 1 batch at a time | FastAPI + ONNX Runtime |
+| Clients | Furnace, batching on | Furnace, batching off (now the default) | Furnace, 1 batch at a time | FastAPI + ONNX Runtime |
 |---|---|---|---|---|
 | 1 | 113 req/s, 8.9 / 9.9 ms | 117 req/s, 8.6 / 10.3 ms | 112 req/s, 8.9 / 10.5 ms | 125 req/s, 8.0 / 9.2 ms |
 | 2 | 150 req/s, 12.6 / 19.1 ms | 149 req/s, 12.2 / 23.3 ms | 114 req/s, 16.9 / 24.4 ms | 129 req/s, 15.7 / 17.8 ms |
@@ -137,10 +220,11 @@ run a heavy load is slower for a while.
 
 Latencies are p50 / p95 (p90 for one client). The configurations:
 
-- *Default*: `--batch-workers 4 --max-batch-size 8`. Up to four passes run side by side;
+- *Batching on*: `--batch-workers 4 --max-batch-size 8`. Up to four passes run side by side;
   beyond that, queued requests are batched (see [API.md](API.md#dynamic-batching)).
-- *Batching off*: `--max-batch-size 1`, every request runs its own pass at once, as in
-  0.7.0.
+- *Batching off*: `--max-batch-size 1`, every request runs its own pass at once. Now the
+  default, because for some models batching costs throughput
+  ([above](#serving-a-burn-model)).
 - *1 batch at a time*: `--batch-workers 1`, pure dynamic batching with a single model worker.
 - *FastAPI + ONNX Runtime*: [`server.py`](../benches/compare/fastapi-ort/server.py), which
   runs one inference at a time.
@@ -153,10 +237,10 @@ What this shows:
 - On this CPU, throughput tops out at about 175 images/s however requests are grouped. Two
   batch-1 passes side by side (about 13 ms for two images over HTTP) beat one batch-2 pass
   (about 17 ms), so merging requests too early lowers throughput, as the *1 batch at a time*
-  column shows. The default therefore merges only once four passes are running.
+  column shows. With batching on, Furnace therefore merges only once four passes are running.
 - What batching buys is predictable latency. Without a limit every request starts at once and
   they all compete for the cores: with 16 or 32 clients, half the requests finish quickly
-  while others wait several times longer (p95 207 and 435 ms). With the default, p95 stays
+  while others wait several times longer (p95 207 and 435 ms). With batching on, p95 stays
   within 1.3-1.4x of p50 (116 and 236 ms).
 - A lone request is not delayed: one client sees the same latency in every Furnace
   configuration, within run-to-run noise.
