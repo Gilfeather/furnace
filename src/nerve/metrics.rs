@@ -329,6 +329,9 @@ impl Fabric {
                 &a.latency,
             );
         }
+        if m.neurons.iter().any(|n| n.kind == NeuronKind::Effector) {
+            super::effector::render_prometheus_help(out);
+        }
         for (i, cell) in self.0.cells.iter().enumerate() {
             cell.neuron
                 .render_prometheus(out, &format!("neuron=\"{}\"", label(&m.neurons[i].name)));
