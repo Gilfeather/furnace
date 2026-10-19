@@ -1,0 +1,40 @@
+# Serving Burn models through furnace's library API, against calling `forward` directly and
+# against a hand-written axum server. Its own workspace (own Cargo.lock and target/) so its
+# dependencies never enter furnace's, and so it builds against *stock* burn-flex, as a crate
+# that depends on furnace-server from crates.io does. To measure the patched CPU backend this
+# repository ships in its binaries, see README.md.
+[package]
+name = "furnace-burn-bench"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+description = "Serve Burn models with furnace and measure what the server adds"
+license = "MIT"
+
+[workspace]
+
+[features]
+default = []
+wgpu = ["furnace/wgpu", "burn/wgpu"]
+
+[dependencies]
+furnace = { package = "furnace-server", path = "../..", default-features = false }
+burn = { version = "0.22", default-features = false, features = ["std", "flex", "rayon", "simd"] }
+axum = "0.8"
+tokio = { version = "1.53", features = ["full"] }
+reqwest = { version = "0.13", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+# Same settings as furnace's release profile
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
