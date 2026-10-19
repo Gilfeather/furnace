@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `examples/serve_gguf.rs`
 - CI fails if a C or C++ crate (cc, ring, aws-lc, Oniguruma, OpenSSL, ...) enters the dependency
   tree of `furnace` with `llm` or of `furnace-candle`
+- `benches/llm`: furnace's LLM server layer against a hand-written axum server and FastAPI,
+  streaming the same paced mock tokens; furnace adds 0.3 µs per streamed token over the
+  hand-written server, and matches its time to first token up to 256 streams (docs/LLM.md)
+- `SchedulerConfig::max_prefill_tokens` (512): the scheduler prefills waiting prompts up to this
+  many tokens between two decode steps, instead of one prompt per step, and new sequences join
+  the decode step right after their prefill. With a batched step model at 256 streams, tokens/s
+  go from 2,957 to 11,783 and the time to first token from 3.9 s to 22 ms; the inter-token p99
+  from 40.7 ms (two steps) to 22.5 ms
 - Kubernetes: a Helm chart (`deploy/helm/furnace`: probes, non-root read-only container, API
   keys, rate limits, TLS from a Secret, ServiceMonitor, autoscaling) and a KServe
   `ClusterServingRuntime` (`deploy/kserve`), both validated in CI

@@ -1,0 +1,35 @@
+# The LLM server layer alone: furnace's OpenAI routes and SSE streaming against a hand-written
+# axum server and FastAPI, all streaming the same paced mock tokens. Its own workspace (own
+# Cargo.lock and target/) so its dependencies never enter furnace's.
+[package]
+name = "furnace-llm-bench"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+description = "Measure what furnace's LLM server layer adds per streamed token"
+license = "MIT"
+
+[workspace]
+
+[dependencies]
+furnace = { package = "furnace-server", path = "../..", default-features = false, features = ["llm"] }
+axum = "0.8"
+tokio = { version = "1.53", features = ["full"] }
+reqwest = { version = "0.13", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures-util = { version = "0.3", default-features = false }
+tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+# Same settings as furnace's release profile
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
