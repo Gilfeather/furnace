@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Serve LLMs (feature `llm`): `POST /v1/chat/completions`, `POST /v1/completions` and
+  `GET /v1/models` in the OpenAI format, with SSE streaming and usage, OpenAI-shaped errors,
+  cancellation when the client disconnects, 503s at the concurrency limit or a full queue, and
+  metrics (time to first token, inter-token latency, queue time, tokens) in Prometheus and in
+  `/metrics`. `Server::llm` serves an engine next to the other models. Engines implement
+  `furnace::llm::LlmEngine`, or `StepModel` (prefill and decode) to run through furnace's
+  scheduler with a `TextPipeline`: chat templates (minijinja), a pure-Rust tokenizer, sampling,
+  incremental detokenization and stop strings. Mock engines for tests and benchmarks are in
+  `furnace::llm::mock`. See docs/LLM.md
+- `furnace-candle`, a workspace crate (not published yet): quantized GGUF models of the llama
+  and qwen2 families on the CPU through candle, from local files, with
+  `examples/serve_gguf.rs`
+- CI fails if a C or C++ crate (cc, ring, aws-lc, Oniguruma, OpenSSL, ...) enters the dependency
+  tree of `furnace` with `llm` or of `furnace-candle`
 - Kubernetes: a Helm chart (`deploy/helm/furnace`: probes, non-root read-only container, API
   keys, rate limits, TLS from a Secret, ServiceMonitor, autoscaling) and a KServe
   `ClusterServingRuntime` (`deploy/kserve`), both validated in CI
@@ -23,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `forward` directly and against a minimal hand-written axum server
 
 ### Changed
+- `GET /models` reports an empty `default_model` on a server that serves only LLMs; `/predict`
+  and `/model/info` answer 404 there
 - Dynamic batching is off by default (`--max-batch-size 1`, `BatchConfig::default()`). It
   pays only for some models: ResNet-18 on a CPU serves 10-20% more requests with it at 16
   clients, a transformer text encoder about 25% fewer. Pass `--max-batch-size 8` for
