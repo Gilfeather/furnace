@@ -768,8 +768,9 @@ impl Act for Webhook {
 // Process
 
 /// Run a local command. The program and its fixed arguments are set here; the command's
-/// `args` adds `{"args": [...], "stdin": "..."}` (or is itself an array of arguments). A
-/// non-zero exit is a final failure; a program that cannot be started is retried.
+/// `args` adds `{"args": [...], "stdin": "..."}` (or is itself an array of arguments). The
+/// process inherits stdout; its stderr is kept for the error message. A non-zero exit is a
+/// final failure; a program that cannot be started is retried.
 pub struct Process {
     name: String,
     program: String,
@@ -853,7 +854,7 @@ impl Act for Process {
                 } else {
                     std::process::Stdio::null()
                 })
-                .stdout(std::process::Stdio::null())
+                .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::piped())
                 .kill_on_drop(true)
                 .spawn()

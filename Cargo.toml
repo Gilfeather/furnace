@@ -196,6 +196,11 @@ required-features = ["llm"]
 name = "nerve"
 required-features = ["nerve"]
 
+[[example]]
+name = "nerve"
+path = "examples/nerve/main.rs"
+required-features = ["nerve", "llm"]
+
 [[bench]]
 name = "inference_benchmark"
 harness = false

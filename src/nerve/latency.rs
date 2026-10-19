@@ -26,7 +26,7 @@ pub struct LatencyEstimate {
 }
 
 struct Ring {
-    samples: [u32; WINDOW],
+    samples: [u64; WINDOW],
     next: usize,
     len: usize,
 }
@@ -65,13 +65,12 @@ impl LatencyEstimate {
 
     pub fn observe(&self, elapsed: Duration) {
         let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
-        let sample = u32::try_from(nanos).unwrap_or(u32::MAX);
         let count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
         self.sum.fetch_add(nanos, Ordering::Relaxed);
         self.max.fetch_max(nanos, Ordering::Relaxed);
         let mut ring = self.recent.lock().unwrap_or_else(|e| e.into_inner());
         let next = ring.next;
-        ring.samples[next] = sample;
+        ring.samples[next] = nanos;
         ring.next = (next + 1) % WINDOW;
         ring.len = (ring.len + 1).min(WINDOW);
         if count <= 4 || count.is_multiple_of(EVERY) {
@@ -79,8 +78,8 @@ impl LatencyEstimate {
             drop(ring);
             sorted.sort_unstable();
             let at = |q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
-            self.p50.store(u64::from(at(0.50)), Ordering::Relaxed);
-            self.p99.store(u64::from(at(0.99)), Ordering::Relaxed);
+            self.p50.store(at(0.50), Ordering::Relaxed);
+            self.p99.store(at(0.99), Ordering::Relaxed);
         }
     }
 
