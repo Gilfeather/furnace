@@ -1,0 +1,172 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "furnace.fullname" . }}
+  labels:
+    {{- include "furnace.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "furnace.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "furnace.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: furnace
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The image's entrypoint is the server; these replace its default arguments
+          command: ["/app/furnace"]
+          args:
+            - --host
+            - "0.0.0.0"
+            - --port
+            - {{ .Values.http.port | quote }}
+            {{- if .Values.grpc.enabled }}
+            - --grpc-port
+            - {{ .Values.grpc.port | quote }}
+            {{- end }}
+            - --model-name
+            - {{ join "," .Values.models | quote }}
+            {{- if .Values.threads }}
+            - --threads
+            - {{ .Values.threads | quote }}
+            {{- end }}
+            {{- if gt (int .Values.rateLimit.perSecond) 0 }}
+            - --rate-limit
+            - {{ .Values.rateLimit.perSecond | quote }}
+            {{- if gt (int .Values.rateLimit.burst) 0 }}
+            - --rate-limit-burst
+            - {{ .Values.rateLimit.burst | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.tls.existingSecret }}
+            - --tls-cert
+            - /etc/furnace/tls/tls.crt
+            - --tls-key
+            - /etc/furnace/tls/tls.key
+            {{- if .Values.tls.clientCaSecret }}
+            - --tls-client-ca
+            - /etc/furnace/client-ca/{{ .Values.tls.clientCaKey }}
+            {{- end }}
+            {{- end }}
+            {{- range .Values.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: FURNACE_ENV
+              value: production
+            {{- with .Values.resources.limits }}
+            {{- if .cpu }}
+            - name: RAYON_NUM_THREADS
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.cpu
+                  divisor: "1"
+            {{- end }}
+            {{- end }}
+            {{- if .Values.apiKeys.existingSecret }}
+            - name: FURNACE_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.apiKeys.existingSecret }}
+                  key: {{ .Values.apiKeys.secretKey }}
+            {{- end }}
+            {{- if .Values.adminToken.existingSecret }}
+            - name: FURNACE_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.adminToken.existingSecret }}
+                  key: {{ .Values.adminToken.secretKey }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.http.port }}
+            {{- if .Values.grpc.enabled }}
+            - name: grpc
+              containerPort: {{ .Values.grpc.port }}
+            {{- end }}
+          {{- if and .Values.tls.existingSecret .Values.tls.clientCaSecret }}
+          # With mutual TLS the kubelet, having no client certificate, cannot call the probes;
+          # check that the port accepts connections instead
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 2
+          {{- else }}
+          # The probes stay open when API keys are required
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              scheme: {{ include "furnace.scheme" . }}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+              scheme: {{ include "furnace.scheme" . }}
+            periodSeconds: 2
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.tls.existingSecret }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/furnace/tls
+              readOnly: true
+            {{- if .Values.tls.clientCaSecret }}
+            - name: client-ca
+              mountPath: /etc/furnace/client-ca
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- if .Values.tls.existingSecret }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.existingSecret }}
+        {{- if .Values.tls.clientCaSecret }}
+        - name: client-ca
+          secret:
+            secretName: {{ .Values.tls.clientCaSecret }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

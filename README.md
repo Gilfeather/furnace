@@ -14,6 +14,16 @@ Either way you get the KServe / Triton protocol over HTTP and gRPC, dynamic batc
 TLS and more, from a single small binary. No Python, no C++ runtime: the server starts in
 milliseconds and uses a fraction of the memory of a Python stack.
 
+**Try it in 30 seconds** (ResNet-18 built in):
+
+```bash
+docker run --rm -p 3000:3000 ghcr.io/gilfeather/furnace
+curl -s localhost:3000/v2/models/resnet18     # inputs, outputs, shapes
+```
+
+Then send it tensors with any Triton or KServe client, or JSON to `POST /predict`
+([Quick start](#quick-start) below).
+
 | ResNet-18 over HTTP, CPU | Batch 1 | Batch 4 | Ready after | Memory (peak private) | Ships as |
 |---|---|---|---|---|---|
 | **Furnace** | 8.8 ms | **27.0 ms** | **39 ms** | **78 MB** | **5.6 MB binary** + weights |
@@ -46,7 +56,12 @@ engines and how to reproduce: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 - **Release binaries** for Linux (x86_64, musl, aarch64), macOS (Intel, Apple Silicon) and
   Windows come with `resnet18.bpk` on the [releases page](https://github.com/Gilfeather/furnace/releases).
-  Put both in one directory and run `./furnace --model-name resnet18`.
+  Put both in one directory and run `./furnace --model-name resnet18`. With
+  [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), `cargo binstall furnace-server`
+  fetches the binary for your platform. Each release carries checksums, an SBOM and build
+  provenance you can verify ([SECURITY.md](SECURITY.md)).
+- **Docker**: `ghcr.io/gilfeather/furnace`, for x86_64 and ARM64 ([below](#docker)).
+- **Kubernetes**: a Helm chart and a KServe serving runtime in [`deploy/`](deploy/README.md).
 - **As a library**, to serve your own Burn models: see [below](#your-own-burn-models).
 - **crates.io** (package `furnace-server`, command `furnace`). ONNX models are compiled in, so
   point the build at your `.onnx` files:
@@ -142,7 +157,8 @@ ids and masks, a detector's several outputs. A model with one `float32` input an
 fixed shapes is served on `/predict` too, with dynamic batching; any other takes its named
 tensors on [`/v2/models/{model}/infer`](docs/API.md#models-with-several-inputs-or-outputs).
 Models that burn-onnx can't convert (it supports opsets 1–24) are skipped with a build warning
-saying why. If conversion fails, [onnx-simplifier](https://github.com/daquexian/onnx-simplifier)
+saying why. [docs/MODELS.md](docs/MODELS.md) lists the models known to work, and the ones that
+don't yet. If conversion fails, [onnx-simplifier](https://github.com/daquexian/onnx-simplifier)
 often helps. `furnace --help` lists the models in a build.
 
 ## API
@@ -233,7 +249,18 @@ docker run --rm -p 3000:3000 furnace                         # serves resnet18
 docker run --rm -p 3000:3000 furnace --model-name mnist --threads 4
 ```
 
-`--build-arg FEATURES=image` adds JPEG/PNG input. The server stops cleanly on `SIGTERM`.
+`--build-arg FEATURES="grpc tls image"` adds JPEG/PNG input. The server stops cleanly on `SIGTERM`.
+
+### Kubernetes
+
+```bash
+helm install furnace ./deploy/helm/furnace
+```
+
+The chart wires the probes to `/healthz` and `/readyz`, runs the container non-root and
+read-only, and turns API keys, rate limits, TLS from a cert-manager Secret, Prometheus scraping
+and autoscaling on from values. For KServe, [`deploy/kserve`](deploy/kserve) registers Furnace
+as a serving runtime for the Open Inference Protocol. Details: [deploy/README.md](deploy/README.md).
 
 ## Development
 

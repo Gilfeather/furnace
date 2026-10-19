@@ -1,0 +1,19 @@
+# ResNet-18 on Furnace through KServe. The name picks the model built into the image; the
+# storageUri supplies its weights (any URI KServe's storage initializer reads: s3://, gs://,
+# pvc://, https://).
+#
+#   kubectl apply -f servingruntime.yaml -f inferenceservice.yaml
+#   # then, with Triton's or KServe's client, or plain HTTP:
+#   curl http://<ingress>/v2/models/resnet18 -H "Host: resnet18.<namespace>.example.com"
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: resnet18
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: furnace
+      runtime: furnace
+      protocolVersion: v2
+      storageUri: https://github.com/Gilfeather/furnace/releases/download/v0.9.0/resnet18.bpk

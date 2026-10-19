@@ -39,9 +39,8 @@ jobs:
         body: |
           ## 🔥 Furnace ${{ steps.get_version.outputs.version }}
 
-          Lightweight Rust ML inference server powered by the Burn framework.
-          Download the binary for your platform plus `resnet18.bpk` (weights), and place them
-          side by side:
+          An inference server for Burn models, in pure Rust. Download the binary for your
+          platform plus `resnet18.bpk` (weights), and place them side by side:
 
           ```bash
           ./furnace --model-name resnet18 --port 3000
@@ -49,11 +48,21 @@ jobs:
           ./furnace --model-name resnet18 --weights /path/to/resnet18.bpk
           ```
 
+          Or `cargo binstall furnace-server`, or `docker run -p 3000:3000 ghcr.io/gilfeather/furnace`.
+
+          **Verifying a download**: `SHA256SUMS` lists every asset's checksum, `furnace.spdx.json`
+          is the software bill of materials, and every binary and image carries a build provenance
+          attestation: `gh attestation verify furnace-linux-x86_64 --repo ${{ github.repository }}`.
+
           See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for detailed changes.
 
   build-release:
     name: Build Release
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     strategy:
       matrix:
         include:
@@ -111,6 +120,12 @@ jobs:
         mkdir -p release-assets
         cp target/${{ matrix.target }}/release/furnace${{ matrix.os == 'windows-latest' && '.exe' || '' }} release-assets/${{ matrix.asset_name }}
 
+    # Signed statement (Sigstore) of which workflow, commit and runner built this binary
+    - name: Attest build provenance
+      uses: actions/attest-build-provenance@v4
+      with:
+        subject-path: release-assets/${{ matrix.asset_name }}
+
     - name: Upload Release Asset
       uses: softprops/action-gh-release@v3
       with:
@@ -122,6 +137,41 @@ jobs:
       uses: softprops/action-gh-release@v3
       with:
         files: target/${{ matrix.target }}/release/build/furnace-server-*/out/models/resnet18.bpk
+
+  # Checksums of every asset, and a software bill of materials of the source tree
+  release-checksums:
+    name: Checksums and SBOM
+    needs: [create-release, build-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: SBOM (SPDX)
+      uses: anchore/sbom-action@v0
+      with:
+        path: .
+        format: spdx-json
+        output-file: furnace.spdx.json
+        upload-artifact: false
+
+    - name: Checksums
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        mkdir assets
+        gh release download "$GITHUB_REF_NAME" --dir assets --repo "$GITHUB_REPOSITORY"
+        cp furnace.spdx.json assets/
+        (cd assets && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+
+    - name: Upload checksums and SBOM
+      uses: softprops/action-gh-release@v3
+      with:
+        files: |
+          assets/SHA256SUMS
+          assets/furnace.spdx.json
 
   publish-crate:
     name: Publish to crates.io
@@ -159,6 +209,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     strategy:
       matrix:
         include:
@@ -191,16 +243,25 @@ jobs:
       run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
     - name: Build and push
+      id: push
       uses: docker/build-push-action@v7
       with:
         context: .
         push: true
-        build-args: FEATURES=grpc
+        # The same features as the release binaries (the Dockerfile's default)
+        build-args: FEATURES=grpc tls
         tags: ${{ steps.image.outputs.name }}:${{ needs.create-release.outputs.version }}-${{ matrix.arch }}
         labels: |
           org.opencontainers.image.source=https://github.com/${{ github.repository }}
           org.opencontainers.image.version=${{ needs.create-release.outputs.version }}
           org.opencontainers.image.licenses=MIT
+
+    - name: Attest build provenance
+      uses: actions/attest-build-provenance@v4
+      with:
+        subject-name: ${{ steps.image.outputs.name }}
+        subject-digest: ${{ steps.push.outputs.digest }}
+        push-to-registry: true
 
   docker-manifest:
     name: Docker image (multi-arch tags)

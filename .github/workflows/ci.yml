@@ -102,6 +102,27 @@ jobs:
     - name: Clippy with wgpu backend
       run: cargo clippy --no-default-features --features wgpu -- -D warnings
 
+  kubernetes:
+    name: Kubernetes manifests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - uses: azure/setup-helm@v5
+    - name: Install kubeconform
+      run: |
+        curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz | tar xz
+        sudo mv kubeconform /usr/local/bin/
+    # The chart with its defaults, and with every option on; KServe's and the Prometheus
+    # Operator's resources are checked against the community CRD schemas
+    - name: Lint and validate
+      run: |
+        set -euo pipefail
+        schemas=(-schema-location default -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json')
+        helm lint deploy/helm/furnace
+        helm template furnace deploy/helm/furnace | kubeconform -strict -summary "${schemas[@]}"
+        helm template furnace deploy/helm/furnace           --set apiKeys.existingSecret=keys --set adminToken.existingSecret=admin           --set tls.existingSecret=tls --set tls.clientCaSecret=ca           --set rateLimit.perSecond=50 --set rateLimit.burst=100 --set threads=4           --set resources.limits.cpu=2 --set serviceMonitor.enabled=true           --set autoscaling.enabled=true --set 'models={resnet18,mnist}'           | kubeconform -strict -summary "${schemas[@]}"
+        kubeconform -strict -summary "${schemas[@]}" deploy/kserve/*.yaml
+
   vendored-kernels:
     name: Vendored CPU kernels (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

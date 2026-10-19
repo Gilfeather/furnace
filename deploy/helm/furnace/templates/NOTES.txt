@@ -1,0 +1,6 @@
+Furnace is serving {{ join ", " .Values.models }}.
+
+  kubectl port-forward svc/{{ include "furnace.fullname" . }} {{ .Values.http.port }}
+  curl {{ if .Values.tls.existingSecret }}https{{ else }}http{{ end }}://localhost:{{ .Values.http.port }}/v2/models/{{ first .Values.models }}
+
+Triton and KServe clients connect to port {{ .Values.http.port }} (HTTP){{ if .Values.grpc.enabled }} or {{ .Values.grpc.port }} (gRPC){{ end }}.
