@@ -72,17 +72,81 @@ jobs:
       if: matrix.rust == 'stable'
       run: |
         cargo clippy --all-targets -- -D warnings
-        cargo clippy --all-targets --features "image grpc tls" -- -D warnings
+        cargo clippy --all-targets --features "image grpc tls llm" -- -D warnings
 
     - name: Type check
       if: matrix.check-only
-      run: cargo check --all-targets --features "image grpc tls"
+      run: cargo check --all-targets --features "image grpc tls llm"
 
     # With the optional image input; the default build's only extra test is its 415. Examples and
     # benches are left to clippy above, which type-checks them without an optimized build.
     - name: Run tests
       if: ${{ !matrix.check-only }}
-      run: cargo test --profile ci --lib --bins --tests --features "image grpc tls"
+      run: cargo test --profile ci --lib --bins --tests --features "image grpc tls llm"
+
+  llm-candle:
+    name: furnace-candle (GGUF LLMs through candle)
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+
+    # The tests that need a GGUF file are #[ignore]d: run them locally with
+    # FURNACE_QWEN2_GGUF / FURNACE_LLAMA_GGUF and --ignored
+    - name: Clippy and tests
+      run: |
+        cargo clippy -p furnace-candle --all-targets -- -D warnings
+        cargo test -p furnace-candle --profile ci
+
+  # No C or C++ in the LLM layer: none of these crates may be built for furnace with `llm`, or
+  # for furnace-candle, on any of the release targets. Dev-dependencies don't ship and are not
+  # checked.
+  pure-rust:
+    name: Pure-Rust dependency tree (llm)
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: No C or C++ crates
+      shell: bash
+      run: |
+        set -euo pipefail
+        targets=(--target x86_64-unknown-linux-gnu --target x86_64-unknown-linux-musl
+                 --target aarch64-unknown-linux-gnu --target x86_64-apple-darwin
+                 --target aarch64-apple-darwin --target x86_64-pc-windows-msvc)
+        # cc and cmake build C/C++ (Oniguruma, esaxx's C++, ring's assembly); the others are C
+        # libraries or bindings to them, or GPU kernels compiled by nvcc
+        banned='^(cc|cmake|bindgen|pkg-config|ring|aws-lc-rs|aws-lc-sys|openssl|openssl-sys|onig|onig_sys|cudarc|intel-mkl-src|accelerate-src|candle-kernels|candle-flash-attn|candle-metal-kernels|zstd-sys|libz-sys|bzip2-sys|lzma-sys)$'
+        failed=0
+        for package in "-p furnace-server --features llm" "-p furnace-server --no-default-features --features llm" "-p furnace-candle"; do
+          crates=$(cargo tree $package -e normal,build "${targets[@]}" --prefix none -f '{p}' | awk '{print $1}' | sort -u)
+          found=$(grep -E "$banned" <<<"$crates" || true)
+          if [ -n "$found" ]; then
+            echo "::error::C or C++ crates in $package: $found"
+            for crate in $found; do cargo tree $package -e normal,build "${targets[@]}" -i "$crate"; done
+            failed=1
+          else
+            echo "$package: $(wc -l <<<"$crates") crates, no C or C++"
+          fi
+        done
+        # esaxx-rs is pure Rust only without its default `cpp` feature
+        if cargo tree -p furnace-candle -e features "${targets[@]}" -i esaxx-rs | grep -q 'esaxx-rs feature "cpp"'; then
+          echo "::error::esaxx-rs is built with its C++ implementation"
+          failed=1
+        fi
+        exit $failed
 
   gpu-features:
     name: Check GPU backend features
