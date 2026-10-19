@@ -403,7 +403,7 @@ fn request(kind: &str, which: Which, port: u16) -> Request {
             output_bytes,
         };
     }
-    if kind == "hand-written" {
+    if kind == "hand-written" || kind.starts_with("fastapi") {
         return Request {
             url: format!("http://127.0.0.1:{port}/infer"),
             headers: vec![("content-type", "application/octet-stream".into())],
@@ -593,16 +593,35 @@ async fn bench_server(
     let port = free_port();
     let exe = std::env::current_exe().expect("own path");
     let start = Instant::now();
-    let mut child = std::process::Command::new(exe)
-        .args([
-            "serve",
-            kind,
-            which.name(),
-            &port.to_string(),
-            "--backend",
-            backend,
-        ])
-        .args(batching)
+    let mut command = match kind {
+        "fastapi" | "fastapi x4" => {
+            let mut command = std::process::Command::new(python());
+            command
+                .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/fastapi/echo.py"))
+                .args([
+                    "--port",
+                    &port.to_string(),
+                    "--workers",
+                    if kind == "fastapi" { "1" } else { "4" },
+                ]);
+            command
+        }
+        _ => {
+            let mut command = std::process::Command::new(exe);
+            command
+                .args([
+                    "serve",
+                    kind,
+                    which.name(),
+                    &port.to_string(),
+                    "--backend",
+                    backend,
+                ])
+                .args(batching);
+            command
+        }
+    };
+    let mut child = command
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -610,36 +629,80 @@ async fn bench_server(
     let health = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{port}/healthz");
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    loop {
+    // The process to measure: the Python interpreter reports its own pid, since on Windows a
+    // virtual environment's python.exe only launches it
+    let pid = loop {
         // A short TCP probe first: on Windows a refused connection takes about 0.5 s to
         // report, which would swamp the start-up time
         if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(5)).is_ok()
             && let Ok(r) = health.get(&url).send().await
             && r.status().is_success()
         {
-            break;
+            let body = r.text().await.unwrap_or_default();
+            break serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v["pid"].as_u64())
+                .map_or(child.id(), |pid| pid as u32);
         }
         if start.elapsed() > Duration::from_secs(120) {
-            let _ = child.kill();
+            stop(&mut child);
             fail(&format!("{kind} server did not start"));
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    };
     let ready_ms = ms(start.elapsed());
     let req = Arc::new(request(kind, which, port));
     let mut results = Vec::new();
     for &n in clients {
         results.push(load(req.clone(), n, which.requests_per_client()).await);
     }
-    let peak_private_mb = memory::peak_private_mb(child.id());
-    let _ = child.kill();
-    let _ = child.wait();
+    // Several uvicorn workers are several processes: one's memory would understate it
+    let peak_private_mb = if kind == "fastapi x4" {
+        0.0
+    } else {
+        memory::peak_private_mb(pid)
+    };
+    stop(&mut child);
     ServerResult {
         server: kind,
         ready_ms,
         peak_private_mb,
         load: results,
     }
+}
+
+/// The Python with FastAPI, uvicorn and numpy: `$FURNACE_BENCH_PYTHON`, else the virtual
+/// environment of `benches/compare/fastapi-ort`
+fn python() -> std::path::PathBuf {
+    std::env::var_os("FURNACE_BENCH_PYTHON").map_or_else(
+        || {
+            let venv = concat!(env!("CARGO_MANIFEST_DIR"), "/../compare/fastapi-ort/.venv");
+            if cfg!(windows) {
+                std::path::Path::new(venv).join("Scripts/python.exe")
+            } else {
+                std::path::Path::new(venv).join("bin/python")
+            }
+        },
+        std::path::PathBuf::from,
+    )
+}
+
+/// Stop a server with every process it started (uvicorn's workers, Python's launcher)
+fn stop(child: &mut std::process::Child) {
+    if cfg!(windows) {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    } else {
+        // uvicorn stops its workers on SIGTERM
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// furnace's version, from its Cargo.toml (this crate builds furnace from the same checkout)
@@ -729,7 +792,12 @@ async fn main() {
             .await
             .expect("direct run");
         let mut servers = Vec::new();
-        for kind in ["furnace", "hand-written"] {
+        let mut kinds = vec!["furnace", "hand-written"];
+        // Python serves only a model it can run: the echo
+        if which == Which::Echo {
+            kinds.extend(["fastapi", "fastapi x4"]);
+        }
+        for kind in kinds {
             // A laptop that has just run a heavy load is slower for a while
             tokio::time::sleep(Duration::from_secs(5)).await;
             eprintln!("{}: {kind}", which.name());
@@ -836,7 +904,8 @@ async fn overhead(which: Which, backend: BackendKind, n: usize, batching: &[Stri
 
 fn print_report(report: &Report) {
     println!(
-        "furnace {} on {}{}\n",
+        "furnace {} on {}{}
+",
         report.furnace_version,
         report.backend,
         if report.label.is_empty() {
@@ -845,44 +914,58 @@ fn print_report(report: &Report) {
             format!(" ({})", report.label)
         }
     );
-    println!(
-        "| Model | Direct, batch 1 / 4 | furnace, 1 client | Added by furnace | Ready after start (furnace / hand-written) | Peak private (furnace / hand-written) |"
-    );
-    println!("|---|---|---|---|---|---|");
+    println!("| Model | Direct, batch 1 / 4 | furnace, 1 client | Added by furnace |");
+    println!("|---|---|---|---|");
     for m in &report.models {
-        let (f, h) = (&m.servers[0], &m.servers[1]);
-        let one = f.load.iter().find(|l| l.clients == 1);
+        let one = m.servers[0].load.iter().find(|l| l.clients == 1);
         println!(
-            "| {} | {:.2} / {:.2} ms | {} | {} | {:.0} / {:.0} ms | {:.0} / {:.0} MB |",
+            "| {} | {:.3} / {:.3} ms | {} | {} |",
             m.model.name(),
             m.direct.batch1_ms,
             m.direct.batch4_ms,
-            one.map_or("-".into(), |l| format!("{:.2} ms", l.p50_ms)),
+            one.map_or("-".into(), |l| format!("{:.3} ms", l.p50_ms)),
             one.map_or("-".into(), |l| format!(
-                "{:+.2} ms",
+                "{:+.3} ms",
                 l.p50_ms - m.direct.batch1_ms
             )),
-            f.ready_ms,
-            h.ready_ms,
-            f.peak_private_mb,
-            h.peak_private_mb,
         );
     }
-    println!();
-    println!("| Model | Clients | furnace: req/s, p50 / p95 | hand-written: req/s, p50 / p95 |");
-    println!("|---|---|---|---|");
     for m in &report.models {
-        for (f, h) in m.servers[0].load.iter().zip(&m.servers[1].load) {
+        println!(
+            "
+{}
+",
+            m.model.name()
+        );
+        let names: Vec<_> = m.servers.iter().map(|s| s.server).collect();
+        println!("| | {} |", names.join(" | "));
+        println!("|---|{}", "---|".repeat(names.len()));
+        let cell = |f: &dyn Fn(&ServerResult) -> String| {
+            m.servers.iter().map(f).collect::<Vec<_>>().join(" | ")
+        };
+        println!(
+            "| Ready after start | {} |",
+            cell(&|s| format!("{:.0} ms", s.ready_ms))
+        );
+        println!(
+            "| Peak private memory | {} |",
+            cell(&|s| if s.peak_private_mb > 0.0 {
+                format!("{:.0} MB", s.peak_private_mb)
+            } else {
+                "-".into()
+            })
+        );
+        for (i, load) in m.servers[0].load.iter().enumerate() {
             println!(
-                "| {} | {} | {:.0}, {:.2} / {:.2} ms | {:.0}, {:.2} / {:.2} ms |",
-                m.model.name(),
-                f.clients,
-                f.requests_per_second,
-                f.p50_ms,
-                f.p95_ms,
-                h.requests_per_second,
-                h.p50_ms,
-                h.p95_ms,
+                "| {} client(s): req/s, p50 / p95 | {} |",
+                load.clients,
+                cell(&|s| {
+                    let l = &s.load[i];
+                    format!(
+                        "{:.0}, {:.2} / {:.2} ms",
+                        l.requests_per_second, l.p50_ms, l.p95_ms
+                    )
+                })
             );
         }
     }
