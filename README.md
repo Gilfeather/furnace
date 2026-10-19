@@ -26,11 +26,11 @@ Then send it tensors with any Triton or KServe client, or JSON to `POST /predict
 
 | ResNet-18 over HTTP, CPU | Batch 1 | Batch 4 | Ready after | Memory (peak private) | Ships as |
 |---|---|---|---|---|---|
-| **Furnace** | 8.8 ms | **27.0 ms** | **39 ms** | **78 MB** | **5.6 MB binary** + weights |
-| FastAPI + ONNX Runtime | **8.6 ms** | 28.9 ms | 1,863 ms | 694 MB | Python + 102 MB of packages + model |
+| **Furnace** | 9.8 ms | 31.9 ms | **29 ms** | **79 MB** | **8.7 MB binary** + weights |
+| FastAPI + ONNX Runtime | **8.6 ms** | **28.8 ms** | 1,761 ms | 693 MB | Python + 102 MB of packages + model |
 
 Median latency on a 16-thread laptop CPU (AMD Ryzen 9 7940HS). In process, Furnace takes
-8.0 ms per image against ONNX Runtime's 7.1 ms, and the same 25 ms for four. Details, more
+8.6 ms per image against ONNX Runtime's 7.4 ms, and 26.3 ms for four against 25.6 ms. Details, more
 engines and how to reproduce: [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Starting in 42 ms makes
 scaling to zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
 

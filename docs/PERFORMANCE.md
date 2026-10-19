@@ -10,21 +10,21 @@ returns class 258 (Samoyed) with the same logit, 12.42.
 
 | Engine | Threads | Batch 1 median / p95 | Batch 4 median / p95 | Images/s (batch 1 / 4) |
 |---|---|---|---|---|
-| **Furnace** | all | 8.0 / 9.7 ms | 25.1 / 30.0 ms | 125 / 160 |
-| **Furnace server**, HTTP | all | 8.8 / 10.2 ms | 27.0 / 29.6 ms | 114 / 148 |
-| ONNX Runtime | default (physical cores) | 7.1 / 7.9 ms | 25.3 / 26.3 ms | 142 / 158 |
-| ONNX Runtime | 1 | 27.3 / 28.8 ms | 107.0 / 114.7 ms | 37 / 37 |
-| FastAPI + ONNX Runtime, HTTP | default | 8.6 / 9.4 ms | 28.9 / 31.1 ms | 116 / 138 |
-| tract | 16 | 20.8 / 22.5 ms | 218.6 / 234.7 ms | 48 / 18 |
-| tract | 1 | 46.0 / 53.0 ms | 339.3 / 392.3 ms | 22 / 12 |
+| **Furnace** | all | 8.6 / 10.7 ms | 26.3 / 30.0 ms | 116 / 152 |
+| **Furnace server**, HTTP | all | 9.8 / 11.5 ms | 31.9 / 34.7 ms | 102 / 125 |
+| ONNX Runtime | default (physical cores) | 7.4 / 7.9 ms | 25.6 / 26.5 ms | 135 / 156 |
+| ONNX Runtime | 1 | 26.5 / 28.2 ms | 107.1 / 112.1 ms | 38 / 37 |
+| FastAPI + ONNX Runtime, HTTP | default | 8.6 / 9.6 ms | 28.8 / 38.4 ms | 116 / 139 |
+| tract | 16 | 19.2 / 20.4 ms | 232.2 / 248.2 ms | 52 / 17 |
+| tract | 1 | 47.3 / 53.6 ms | 356.8 / 370.3 ms | 21 / 11 |
 
 | Engine | Load | First inference | Peak working set | Peak private | Size | Pure Rust |
 |---|---|---|---|---|---|---|
-| **Furnace** | **1 ms** | 18 ms | **130 MB** | **81 MB** | **3.8 MB** + 46 MB `.bpk` | yes |
-| **Furnace server** | **39 ms** | 18 ms | **124 MB** | **78 MB** | **5.6 MB** + 46 MB `.bpk` | yes |
-| ONNX Runtime | 148 ms | 7 ms | 153 MB | 139 MB | 41.7 MB + 47 MB `.onnx` | no (C++) |
-| FastAPI + ONNX Runtime | 1,863 ms | 10 ms | 214 MB | 694 MB | 102 MB of packages + Python + 47 MB `.onnx` | no |
-| tract (16 threads) | 197 ms | 21 ms | 166 MB | 194 MB | 18.7 MB + 47 MB `.onnx` | yes |
+| **Furnace** | **1 ms** | 20 ms | **130 MB** | **81 MB** | **3.8 MB** + 46 MB `.bpk` | yes |
+| **Furnace server** | **29 ms** | 14 ms | **121 MB** | **79 MB** | **8.7 MB** + 46 MB `.bpk` | yes |
+| ONNX Runtime | 135 ms | 7 ms | 153 MB | 140 MB | 41.7 MB + 47 MB `.onnx` | no (C++) |
+| FastAPI + ONNX Runtime | 1,761 ms | 10 ms | 213 MB | 693 MB | 102 MB of packages + Python + 47 MB `.onnx` | no |
+| tract (16 threads) | 180 ms | 21 ms | 166 MB | 194 MB | 18.7 MB + 47 MB `.onnx` | yes |
 
 - *Load* is reading the model until it is ready to run; for the servers it is the time from
   starting the process to the first successful `/healthz`.
@@ -39,7 +39,7 @@ returns class 258 (Samoyed) with the same logit, 12.42.
   [`benches/compare/fastapi-ort/server.py`](../benches/compare/fastapi-ort/server.py).
 
 Setup: AMD Ryzen 9 7940HS (8 cores, 16 threads), 30 GB RAM, Windows 11, Rust 1.99, release
-builds with fat LTO. Versions: Furnace 0.7.0 on Burn 0.22, tract-onnx 0.23.8, `ort` 2.0.0-rc.14 with ONNX Runtime 1.31, and for the FastAPI row Python 3.14.3, FastAPI 0.143.3, uvicorn 0.54.0 and ONNX Runtime 1.31.0. Each engine runs in its own process: 10 warm-up runs, then 50
+builds with fat LTO. Measured 2026-10-19. Versions: Furnace 0.9.0 on Burn 0.22, tract-onnx 0.23.8, `ort` 2.0.0-rc.14 with ONNX Runtime 1.31, and for the FastAPI row Python 3.14.3, FastAPI 0.143.3, uvicorn 0.54.0 and ONNX Runtime 1.31.0. Each engine runs in its own process: 10 warm-up runs, then 50
 timed runs per batch size. Batch 4 is the same image four times. Tables show the median of
 three such runs. Runs on this laptop vary by about ±10%, so compare engines within a table
 rather than across releases.
@@ -75,7 +75,7 @@ From launching the server to its answers, ResNet-18, median of 10 runs:
 |---|---|---|
 | Furnace binary | 42 ms | 67 ms |
 | Furnace in Docker | 474 ms | 521 ms |
-| FastAPI + ONNX Runtime | 1,863 ms | |
+| FastAPI + ONNX Runtime | 1,761 ms | |
 
 Docker's own start dominates its row (a container that only prints the version takes 722 ms
 here). `python benches/cold_start.py` reproduces both Furnace rows; [SERVERLESS.md](SERVERLESS.md)
@@ -101,7 +101,7 @@ convolutions and pooling, vendored in [`vendor/burn-flex`](../vendor/README.md):
 - **BatchNorm folded into convolutions** at build time (`FURNACE_NO_GRAPH_OPT=1` turns this off).
 
 History on this benchmark at batch 1 (16 threads): 0.4.0 50 ms, 0.5.0 26 ms, 0.6.0 15 ms,
-0.7.0 8.0 ms.
+0.7.0 8.0 ms, 0.9.0 8.6 ms (the same compute path: runs vary by about ±10%).
 
 ### Remaining gap to ONNX Runtime
 
@@ -111,7 +111,7 @@ this CPU's peak, so the remaining gap is per-core work. Next steps, roughly by p
 1. Winograd F(4x4, 3x3) for the narrow layers (fewer multiplications again).
 2. A faster first 7x7 convolution, which has only 3 input channels.
 3. Faster max pooling.
-4. Cheaper large batches. Batch 4 takes 25 ms against 8 ms for batch 1, a gain of only 1.3×,
+4. Cheaper large batches. Batch 4 takes 26 ms against 8.6 ms for batch 1, a gain of only 1.3×,
    so the server's dynamic batching adds no throughput over running passes side by side
    (see below).
 

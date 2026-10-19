@@ -13,7 +13,7 @@ ResNet-18, from launching the server to its answers, median of 10 runs on the la
 |---|---|---|---|
 | Furnace binary (`--features "grpc tls"`) | 31 ms | 42 ms | 67 ms |
 | Furnace in Docker (`ghcr.io/gilfeather/furnace:0.9.0`) | 422 ms | 474 ms | 521 ms |
-| FastAPI + ONNX Runtime ([PERFORMANCE.md](PERFORMANCE.md)) | | 1,863 ms | |
+| FastAPI + ONNX Runtime ([PERFORMANCE.md](PERFORMANCE.md)) | | 1,761 ms | |
 
 In Docker almost all the time is Docker's own: a container that only prints `furnace --version`
 takes 722 ms to create, run and remove on the same machine. What a platform adds depends on the
