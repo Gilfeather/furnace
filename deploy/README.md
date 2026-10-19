@@ -36,3 +36,8 @@ To serve your own models, build an image from the [Dockerfile](../Dockerfile) wi
 The model architecture is compiled into the image, and KServe supplies its weights: the
 InferenceService's name picks the built-in model, and its `storageUri` is a `<model>.bpk` file.
 That is how to roll out fine-tuned weights through KServe without rebuilding the image.
+
+Both manifests are tested in CI ([`kserve-e2e.yml`](../.github/workflows/kserve-e2e.yml)): on a
+kind cluster with KServe v0.21 in standard (RawDeployment) mode, the published image serves
+ResNet-18 with weights fetched by KServe's storage initializer, and answers a v2 inference
+request with 1000 logits.

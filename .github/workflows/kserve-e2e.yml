@@ -70,12 +70,24 @@ jobs:
         kubectl wait inferenceservice/resnet18 --for=condition=Ready --timeout=15m
         kubectl get inferenceservice,pods,svc -o wide
 
+    # The weights reached Furnace through KServe: the storage initializer fetched the storageUri
+    # into /mnt/models, and Furnace loaded them from there
+    - name: Weights from the storageUri
+      run: |
+        set -euo pipefail
+        pod=$(kubectl get pods -l serving.kserve.io/inferenceservice=resnet18 -o name)
+        echo "--- storage-initializer"
+        kubectl logs "$pod" -c storage-initializer
+        echo "--- kserve-container"
+        kubectl logs "$pod" -c kserve-container | tee /tmp/furnace.log
+        grep -q '/mnt/models/resnet18.bpk' /tmp/furnace.log
+
     - name: Inference through the predictor Service
       run: |
         set -euo pipefail
         kubectl port-forward service/resnet18-predictor 8080:80 >/tmp/port-forward.log 2>&1 &
         for attempt in $(seq 1 30); do
-          curl -fsS localhost:8080/v2/health/ready >/dev/null && break
+          curl -fs localhost:8080/v2/health/ready >/dev/null 2>&1 && break
           [ "$attempt" -lt 30 ] || { cat /tmp/port-forward.log; exit 1; }
           sleep 1
         done
