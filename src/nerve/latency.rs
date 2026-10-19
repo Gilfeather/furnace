@@ -74,7 +74,7 @@ impl LatencyEstimate {
         ring.samples[next] = sample;
         ring.next = (next + 1) % WINDOW;
         ring.len = (ring.len + 1).min(WINDOW);
-        if count <= 4 || count % EVERY == 0 {
+        if count <= 4 || count.is_multiple_of(EVERY) {
             let mut sorted = ring.samples[..ring.len].to_vec();
             drop(ring);
             sorted.sort_unstable();

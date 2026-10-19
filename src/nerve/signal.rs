@@ -100,13 +100,11 @@ impl Feature {
 pub fn sketch64(bytes: &[u8]) -> u64 {
     const K: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut h = (bytes.len() as u64).wrapping_mul(K) ^ 0x2545_F491_4F6C_DD1D;
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
-        let word = u64::from_le_bytes(chunk.try_into().expect("8 bytes"));
-        h = (h ^ word).wrapping_mul(K);
+    let (chunks, rest) = bytes.as_chunks::<8>();
+    for chunk in chunks {
+        h = (h ^ u64::from_le_bytes(*chunk)).wrapping_mul(K);
         h ^= h >> 29;
     }
-    let rest = chunks.remainder();
     if !rest.is_empty() {
         let mut word = [0u8; 8];
         word[..rest.len()].copy_from_slice(rest);

@@ -70,6 +70,7 @@ mod metrics;
 mod neuron;
 pub mod receptor;
 mod signal;
+pub mod wire;
 
 pub use fabric::{
     Fabric, FabricBuilder, FnNeuron, MAX_HOPS, Outcome, Pathway, PathwayKind, Summation,
