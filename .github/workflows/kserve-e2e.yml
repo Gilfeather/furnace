@@ -1,0 +1,170 @@
+name: KServe end-to-end
+
+# deploy/kserve on a real cluster: KServe in standard (RawDeployment) mode on kind, the
+# published image, the weights from the release through KServe's storage initializer, and a v2
+# inference request answered by Furnace.
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - deploy/kserve/**
+      - .github/workflows/kserve-e2e.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KIND_VERSION: v0.33.0
+  CERT_MANAGER_VERSION: v1.21.2
+  KSERVE_VERSION: v0.21.0
+
+jobs:
+  kserve:
+    name: ResNet-18 on KServe (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Create kind cluster
+      uses: helm/kind-action@v1.15.1
+      with:
+        version: ${{ env.KIND_VERSION }}
+        cluster_name: kserve
+
+    - name: Install cert-manager
+      run: |
+        set -euo pipefail
+        kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+        kubectl -n cert-manager rollout status deployment --timeout=5m
+
+    - uses: azure/setup-helm@v5
+
+    # Only the InferenceService controller, deploying plain Deployments and Services instead of
+    # Knative, and no Ingress: the test reaches the predictor through its Service
+    - name: Install KServe (standard mode)
+      run: |
+        set -euo pipefail
+        base="https://github.com/kserve/kserve/releases/download/${KSERVE_VERSION}"
+        helm install kserve-crd "$base/helm-chart-kserve-crd-${KSERVE_VERSION}.tgz" \
+          --namespace kserve --create-namespace --wait
+        helm install kserve "$base/helm-chart-kserve-resources-${KSERVE_VERSION}.tgz" \
+          --namespace kserve --wait --timeout 10m \
+          --set kserve.controller.deploymentMode=Standard \
+          --set kserve.controller.gateway.disableIngressCreation=true
+        kubectl -n kserve get deployments,pods
+
+    - name: Deploy ResNet-18
+      run: |
+        set -euo pipefail
+        # The webhooks can take a moment to answer after the controller reports ready
+        for attempt in $(seq 1 30); do
+          if kubectl apply -f deploy/kserve/servingruntime.yaml -f deploy/kserve/inferenceservice.yaml; then
+            break
+          fi
+          [ "$attempt" -lt 30 ] || exit 1
+          sleep 5
+        done
+        kubectl wait inferenceservice/resnet18 --for=condition=Ready --timeout=15m
+        kubectl get inferenceservice,pods,svc -o wide
+
+    # The weights reached Furnace through KServe: the storage initializer fetched the storageUri
+    # into /mnt/models, and Furnace loaded them from there
+    - name: Weights from the storageUri
+      run: |
+        set -euo pipefail
+        pod=$(kubectl get pods -l serving.kserve.io/inferenceservice=resnet18 -o name)
+        echo "--- storage-initializer"
+        kubectl logs "$pod" -c storage-initializer
+        echo "--- kserve-container"
+        kubectl logs "$pod" -c kserve-container | tee /tmp/furnace.log
+        grep -q '/mnt/models/resnet18.bpk' /tmp/furnace.log
+
+    - name: Inference through the predictor Service
+      run: |
+        set -euo pipefail
+        kubectl port-forward service/resnet18-predictor 8080:80 >/tmp/port-forward.log 2>&1 &
+        for attempt in $(seq 1 30); do
+          curl -fs localhost:8080/v2/health/ready >/dev/null 2>&1 && break
+          [ "$attempt" -lt 30 ] || { cat /tmp/port-forward.log; exit 1; }
+          sleep 1
+        done
+
+        echo "--- /v2/health/ready"
+        curl -fsS -w ' %{http_code}\n' localhost:8080/v2/health/ready
+        echo "--- /v2/models/resnet18/ready"
+        curl -fsS -w ' %{http_code}\n' localhost:8080/v2/models/resnet18/ready
+        echo "--- /v2/models/resnet18"
+        curl -fsS localhost:8080/v2/models/resnet18 | tee /tmp/metadata.json
+        echo
+
+        # A 1x3x224x224 FP32 tensor under the input name the model reports
+        python3 - <<'EOF'
+        import json
+        meta = json.load(open("/tmp/metadata.json"))
+        name = meta["inputs"][0]["name"]
+        n = 1 * 3 * 224 * 224
+        data = [((i % 251) / 251.0 - 0.5) * 4.0 for i in range(n)]
+        json.dump({"inputs": [{"name": name, "shape": [1, 3, 224, 224],
+                               "datatype": "FP32", "data": data}]},
+                  open("/tmp/request.json", "w"))
+        EOF
+
+        echo "--- POST /v2/models/resnet18/infer"
+        status=$(curl -sS -o /tmp/response.json -w '%{http_code}' \
+          -H 'Content-Type: application/json' --data-binary @/tmp/request.json \
+          localhost:8080/v2/models/resnet18/infer)
+        echo "HTTP $status"
+        if [ "$status" != 200 ]; then
+          cat /tmp/response.json
+          exit 1
+        fi
+
+        python3 - <<'EOF'
+        import json, math
+        response = json.load(open("/tmp/response.json"))
+        assert response["model_name"] == "resnet18", response["model_name"]
+        out = response["outputs"][0]
+        values = out["data"]
+        assert out["datatype"] == "FP32", out["datatype"]
+        assert out["shape"] == [1, 1000], out["shape"]
+        assert len(values) == 1000, len(values)
+        assert all(math.isfinite(v) for v in values)
+        top = max(range(1000), key=values.__getitem__)
+        print(f"output {out['name']}: shape {out['shape']}, 1000 finite logits, "
+              f"top class {top} ({values[top]:.4f})")
+        EOF
+
+    - name: Diagnostics
+      if: failure()
+      run: |
+        set +e
+        echo "::group::InferenceService"
+        kubectl get inferenceservice -o yaml
+        kubectl describe inferenceservice resnet18
+        echo "::endgroup::"
+        echo "::group::ClusterServingRuntime"
+        kubectl get clusterservingruntime furnace -o yaml
+        echo "::endgroup::"
+        echo "::group::Pods, Deployments, Services"
+        kubectl get pods,deployments,svc -A -o wide
+        kubectl describe pods -l serving.kserve.io/inferenceservice=resnet18
+        kubectl describe deployment resnet18-predictor
+        echo "::endgroup::"
+        echo "::group::Predictor logs (storage initializer and Furnace)"
+        for pod in $(kubectl get pods -l serving.kserve.io/inferenceservice=resnet18 -o name); do
+          kubectl logs "$pod" --all-containers --prefix --tail=-1
+          kubectl logs "$pod" --all-containers --prefix --previous --tail=-1
+        done
+        echo "::endgroup::"
+        echo "::group::KServe controller logs"
+        kubectl -n kserve logs deployment/kserve-controller-manager --all-containers --tail=300
+        echo "::endgroup::"
+        echo "::group::Events"
+        kubectl get events -A --sort-by=.lastTimestamp
+        echo "::endgroup::"
+        echo "::group::inferenceservice-config"
+        kubectl -n kserve get configmap inferenceservice-config -o yaml
+        echo "::endgroup::"
