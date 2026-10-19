@@ -43,4 +43,6 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# candle for furnace-candle, until a candle release without Oniguruma (C) is on crates.io:
+# main plus huggingface/candle#4041 (zip 9), from its author's fork until it is merged
+allow-git = ["https://github.com/Goldziher/candle"]
