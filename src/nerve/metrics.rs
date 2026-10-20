@@ -364,8 +364,8 @@ mod tests {
 
     use super::*;
     use crate::nerve::effector::{Channel, Effector};
-    use crate::nerve::fabric::{FnNeuron, Summation};
-    use crate::nerve::neuron::{Firing, Mechanisms};
+    use crate::nerve::fabric::Summation;
+    use crate::nerve::neuron::{Firing, FnNeuron, Mechanisms};
 
     fn neuron(name: &str, kind: NeuronKind, base: u64) -> NeuronMetrics {
         NeuronMetrics {

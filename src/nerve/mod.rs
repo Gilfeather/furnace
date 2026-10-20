@@ -78,14 +78,14 @@ mod testing;
 pub mod wire;
 
 pub use fabric::{
-    Announced, Fabric, FabricBuilder, FnNeuron, MAX_HOPS, Outcome, Pathway, PathwayKind, Summation,
+    Announced, Fabric, FabricBuilder, MAX_HOPS, Outcome, Pathway, PathwayKind, Summation,
 };
 pub use http::{OUTCOME_HEADER, SIGNAL_HEADER};
 pub use latency::{LatencyEstimate, LatencySnapshot};
 pub use metrics::{
     ArcMetrics, Description, NerveMetrics, NeuronDescription, NeuronMetrics, PathwayMetrics,
 };
-pub use neuron::{Cx, Firing, Habituation, Mechanisms, Neuron, NeuronKind, Quiet};
+pub use neuron::{Cx, Firing, FnNeuron, Habituation, Mechanisms, Neuron, NeuronKind, Quiet};
 pub use receptor::{Afferent, Receptor};
 pub use signal::{
     Answer, Command, Feature, NeuronId, PathwayId, Payload, Reply, Signal, SignalId, TRACE_HOPS,

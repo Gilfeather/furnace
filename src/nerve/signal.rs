@@ -239,6 +239,11 @@ impl Payload {
         }
     }
 
+    /// Whether this payload is a command for `effector`
+    pub fn commands(&self, effector: &str) -> bool {
+        self.as_command().is_some_and(|c| c.effector == effector)
+    }
+
     pub fn as_tensors(&self) -> Option<&[HostTensor]> {
         match self {
             Self::Tensors(t) => Some(t),

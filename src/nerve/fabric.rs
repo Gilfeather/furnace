@@ -18,7 +18,7 @@ use tracing::{debug, warn};
 use super::latency::LatencyEstimate;
 use super::neuron::{Cx, Firing, Gate, Mechanisms, Neuron, NeuronKind, Quiet};
 use super::receptor::{Afferent, Receptor};
-use super::signal::{NeuronId, PathwayId, Payload, Signal};
+use super::signal::{NeuronId, PathwayId, Signal};
 use crate::batching::engine::{self, Batching, Engine, Queued};
 
 /// Hops a signal may take before the fabric assumes a loop and drops it
@@ -960,60 +960,10 @@ impl Batching for Summing {
     }
 }
 
-/// A neuron made from a closure: `Fn(Signal, &Cx) -> Firing`
-pub struct FnNeuron<F> {
-    name: String,
-    kind: NeuronKind,
-    f: F,
-}
-
-impl<F> FnNeuron<F>
-where
-    F: Fn(Signal, &Cx<'_>) -> Firing + Send + Sync + 'static,
-{
-    /// A reflex: feature in, signals (or commands) out, in process
-    pub fn reflex(name: &str, f: F) -> Self {
-        Self {
-            name: name.to_string(),
-            kind: NeuronKind::Reflex,
-            f,
-        }
-    }
-
-    pub fn with_kind(mut self, kind: NeuronKind) -> Self {
-        self.kind = kind;
-        self
-    }
-}
-
-impl<F> Neuron for FnNeuron<F>
-where
-    F: Fn(Signal, &Cx<'_>) -> Firing + Send + Sync + 'static,
-{
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn kind(&self) -> NeuronKind {
-        self.kind
-    }
-
-    fn stimulate(&self, signal: Signal, cx: &Cx<'_>) -> Firing {
-        (self.f)(signal, cx)
-    }
-}
-
-impl Payload {
-    /// Whether this payload is a command for `effector`
-    pub fn commands(&self, effector: &str) -> bool {
-        self.as_command().is_some_and(|c| c.effector == effector)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nerve::neuron::Habituation;
+    use crate::nerve::neuron::{FnNeuron, Habituation};
     use crate::nerve::signal::{Feature, Payload};
     use crate::nerve::testing::{pass, wait_until};
     use std::sync::atomic::AtomicUsize;

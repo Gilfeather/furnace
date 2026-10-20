@@ -141,6 +141,49 @@ pub trait Neuron: Send + Sync + 'static {
     }
 }
 
+/// A neuron made from a closure: `Fn(Signal, &Cx) -> Firing`
+pub struct FnNeuron<F> {
+    name: String,
+    kind: NeuronKind,
+    f: F,
+}
+
+impl<F> FnNeuron<F>
+where
+    F: Fn(Signal, &Cx<'_>) -> Firing + Send + Sync + 'static,
+{
+    /// A reflex: feature in, signals (or commands) out, in process
+    pub fn reflex(name: &str, f: F) -> Self {
+        Self {
+            name: name.to_string(),
+            kind: NeuronKind::Reflex,
+            f,
+        }
+    }
+
+    pub fn with_kind(mut self, kind: NeuronKind) -> Self {
+        self.kind = kind;
+        self
+    }
+}
+
+impl<F> Neuron for FnNeuron<F>
+where
+    F: Fn(Signal, &Cx<'_>) -> Firing + Send + Sync + 'static,
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> NeuronKind {
+        self.kind
+    }
+
+    fn stimulate(&self, signal: Signal, cx: &Cx<'_>) -> Firing {
+        (self.f)(signal, cx)
+    }
+}
+
 /// Habituation: a repeated feature attenuates before it propagates, and the attenuation
 /// decays with time
 #[derive(Clone, Copy, Debug, PartialEq)]
