@@ -81,7 +81,9 @@ configured. Reflex pathways are direct calls on the firing thread: `Receptor::st
 `Reflex::stimulate` → `Effector::stimulate`, no channel between them. Deliberative pathways
 queue to a worker thread that sums the signals of a short window into one firing (temporal
 summation); the window is learned from the pathway's latency (an eighth of its p50, between
-200 µs and 20 ms).
+200 µs and 20 ms). The queue and the worker are the server's batching engine (the one behind
+`--max-batch-size`), run with one worker per pathway, a bounded queue and the learned window
+in place of the configured timeout.
 
 **Selection.** From a neuron that fired, the candidate pathways are those whose p99 fits in
 the signal's remaining deadline; among them the heaviest weight wins; with no deadline every
@@ -320,10 +322,11 @@ Notes on the numbers:
   brain.
 - Not a new engine: reflex models and brains are Burn, candle or anything behind `Model` or
   `LlmEngine`.
-- The deliberative pathway has its own summation worker rather than the server's `Batcher`:
-  the batcher is tied to `Model` and to a request/reply shape, and a signal that is summed
-  has no caller to reply to. The algorithm is the same (a window from the first signal, a
-  bound on the batch) with the window learned instead of configured.
+- A deliberative pathway and the server's `Batcher` are the same engine (`src/batching`):
+  a queue, workers that merge what is queued once they are all busy, a window from the
+  first item, a bound on the batch. The pathway runs it with one worker, a bounded queue, the
+  window learned instead of configured, and a batch that fires the neuron and propagates
+  what it fires instead of replying to a caller.
 - "Pinned" reflex threads are the receptors' own threads (a timer's, a line reader's, the
   request handler's for an HTTP receptor); there is no CPU affinity. A reflex that runs a
   model blocks that thread for the forward pass, which is what makes it a reflex; keep such

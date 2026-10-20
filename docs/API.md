@@ -211,7 +211,8 @@ Each request is validated on its own, so a bad one (wrong size, NaN) gets its ow
 others in its batch are unaffected. `inference_time_ms` includes time spent in the queue.
 Queued requests hold one of the `--max-concurrent-requests` slots, and `--request-timeout-ms`
 covers queueing and inference; a request that times out while queued is dropped from its
-batch.
+batch. The same engine, with one worker and a learned window, sums the signals of a
+deliberative pathway in the nervous system (see [NERVE.md](NERVE.md)).
 
 With batching off, every request runs its own pass on a blocking thread, and up to
 `--max-concurrent-requests` of them run side by side, competing for the cores, as in a

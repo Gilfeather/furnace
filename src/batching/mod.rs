@@ -18,15 +18,20 @@
 //! which gains more than merging the two into one batch. Past a few passes at once,
 //! batching wins: more passes only compete for the same cores, and with no limit every
 //! request slows down together.
+//!
+//! The queue, the workers and the window are the [`engine`]'s, shared with the nervous
+//! system's deliberative pathways; this module is the engine run over a [`Model`] with a
+//! reply for every request.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+pub(crate) mod engine;
+
+use std::marker::PhantomData;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
-use tracing::{debug, error};
+use tracing::debug;
 
+use self::engine::{Batching, Engine, Queued};
 use crate::error::Result;
 use crate::model::{FlatInput, Model};
 use crate::tensor::HostTensor;
@@ -113,238 +118,113 @@ pub type Reply<J = FlatInput> = Result<<J as BatchJob>::Output>;
 
 struct Pending<J: BatchJob> {
     input: J,
-    queued_at: Instant,
     reply: oneshot::Sender<Reply<J>>,
     /// Released once the request is answered, so queued requests count against
     /// `--max-concurrent-requests` like running ones
     permit: OwnedSemaphorePermit,
 }
 
-enum Message<J: BatchJob> {
-    Request(Pending<J>),
-    /// A request that was on its way in gave up, so a worker may stop waiting for it
-    Wake,
+/// Forward passes of `J` on a model: a batch is one pass, and each request gets its reply
+struct Passes<J: BatchJob> {
+    model: Arc<Model>,
+    batch_timeout: Duration,
+    job: PhantomData<fn() -> J>,
+}
+
+impl<J: BatchJob> Batching for Passes<J> {
+    type Item = Pending<J>;
+
+    fn weight(&self, pending: &Pending<J>) -> usize {
+        pending.input.items()
+    }
+
+    /// The client may have timed out and stopped listening
+    fn wanted(&self, pending: &Pending<J>) -> bool {
+        !pending.reply.is_closed()
+    }
+
+    fn window(&self) -> Duration {
+        self.batch_timeout
+    }
+
+    fn run(&self, batch: Vec<Queued<Pending<J>>>) {
+        let items: usize = batch.iter().map(|q| q.item.input.items()).sum();
+        debug!(
+            "Running a batch of {} request(s), {} item(s)",
+            batch.len(),
+            items
+        );
+        let (inputs, replies): (Vec<_>, Vec<_>) = batch
+            .into_iter()
+            .map(|q| (q.item.input, (q.item.reply, q.item.permit)))
+            .unzip();
+        // Should the model panic, the replies are dropped with this frame, failing only
+        // this batch's requests
+        let results = J::run_many(&self.model, inputs);
+        for ((reply, permit), result) in replies.into_iter().zip(results) {
+            // Free the slot before answering, so a client that reads /metrics right after
+            // its response never sees its own request still in flight
+            drop(permit);
+            // The request may have timed out and stopped listening
+            let _ = reply.send(result);
+        }
+    }
 }
 
 /// Handle to the batching workers; they stop when the last handle is dropped
 pub struct Batcher<J: BatchJob = FlatInput> {
-    sender: mpsc::Sender<Message<J>>,
-    /// Requests between entering `/predict` and reaching a worker (or failing)
-    arriving: Arc<AtomicUsize>,
+    engine: Engine<Pending<J>>,
 }
 
 impl<J: BatchJob> Batcher<J> {
     pub fn new(model: Arc<Model>, config: BatchConfig) -> Self {
-        let (sender, receiver) = mpsc::channel();
-        let arriving = Arc::new(AtomicUsize::new(0));
-        let queue = Arc::new(Mutex::new(Queue {
-            receiver,
-            carry: None,
-        }));
-        let busy = Arc::new(AtomicUsize::new(0));
-        let config = BatchConfig {
-            workers: config.workers.max(1),
-            ..config
+        let passes = Passes {
+            model,
+            batch_timeout: config.batch_timeout,
+            job: PhantomData,
         };
-        for i in 0..config.workers {
-            let worker = Worker {
-                model: model.clone(),
-                config,
-                queue: queue.clone(),
-                arriving: arriving.clone(),
-                busy: busy.clone(),
-            };
-            std::thread::Builder::new()
-                .name(format!("furnace-batcher-{i}"))
-                .spawn(move || worker.run())
-                .expect("failed to spawn a batching thread");
-        }
-        Self { sender, arriving }
+        let engine = Engine::start(
+            passes,
+            engine::Config {
+                max_batch: config.max_batch_size,
+                workers: config.workers,
+                capacity: None,
+                waits_unannounced: false,
+            },
+            |i| format!("furnace-batcher-{i}"),
+        );
+        Self { engine }
     }
 
     /// Announce a request that will probably be submitted soon. Hold the guard while
     /// receiving and decoding its body, then pass it to [`Batcher::submit`].
     pub fn arrival(&self) -> Arrival<'_, J> {
-        self.arriving.fetch_add(1, Ordering::SeqCst);
-        Arrival {
-            batcher: self,
-            submitted: false,
-        }
+        Arrival(self.engine.arrival())
     }
 
     /// Queue a request; the receiver yields its result, or an error if the batch it ran
     /// in panicked.
     pub fn submit(
         &self,
-        mut arrival: Arrival<'_, J>,
+        arrival: Arrival<'_, J>,
         input: J,
         permit: OwnedSemaphorePermit,
     ) -> oneshot::Receiver<Reply<J>> {
         let (reply, receiver) = oneshot::channel();
         let pending = Pending {
             input,
-            queued_at: Instant::now(),
             reply,
             permit,
         };
-        // It counts as arriving until a worker receives it, so a worker never waits for
-        // a request that is already in its hands
-        let _ = self.sender.send(Message::Request(pending));
-        arrival.submitted = true;
+        // The queue has no bound, so this fails only once the workers are gone; the
+        // receiver then reports the request as failed
+        let _ = self.engine.submit(Some(arrival.0), pending);
         receiver
     }
 }
 
 /// See [`Batcher::arrival`]
-pub struct Arrival<'a, J: BatchJob = FlatInput> {
-    batcher: &'a Batcher<J>,
-    submitted: bool,
-}
-
-impl<J: BatchJob> Drop for Arrival<'_, J> {
-    fn drop(&mut self) {
-        if !self.submitted {
-            self.batcher.arriving.fetch_sub(1, Ordering::SeqCst);
-            let _ = self.batcher.sender.send(Message::Wake);
-        }
-    }
-}
-
-struct Worker<J: BatchJob> {
-    model: Arc<Model>,
-    config: BatchConfig,
-    queue: Arc<Mutex<Queue<J>>>,
-    arriving: Arc<AtomicUsize>,
-    /// Workers running a batch
-    busy: Arc<AtomicUsize>,
-}
-
-impl<J: BatchJob> Worker<J> {
-    fn run(self) {
-        loop {
-            // One worker at a time collects a batch; the others are busy or wait their turn
-            let batch = {
-                let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
-                let batch = queue.next_batch(&self.config, &self.arriving, &self.busy);
-                // Counted before the next worker can look
-                self.busy.fetch_add(1, Ordering::SeqCst);
-                batch
-            };
-            match batch {
-                Some(batch) => self.run_batch(batch),
-                None => return,
-            }
-            self.busy.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-
-    fn run_batch(&self, batch: Vec<Pending<J>>) {
-        let items: usize = batch.iter().map(|p| p.input.items()).sum();
-        debug!(
-            "Running a batch of {} request(s), {} item(s)",
-            batch.len(),
-            items
-        );
-
-        let (inputs, replies): (Vec<_>, Vec<_>) = batch
-            .into_iter()
-            .map(|p| (p.input, (p.reply, p.permit)))
-            .unzip();
-        // Without unwinding (release builds abort on panic) this is a plain call. With it,
-        // a panicking model drops the replies, failing only this batch's requests.
-        match catch_unwind(AssertUnwindSafe(|| J::run_many(&self.model, inputs))) {
-            Ok(results) => {
-                for ((reply, permit), result) in replies.into_iter().zip(results) {
-                    // Free the slot before answering, so a client that reads /metrics right
-                    // after its response never sees its own request still in flight
-                    drop(permit);
-                    // The request may have timed out and stopped listening
-                    let _ = reply.send(result);
-                }
-            }
-            Err(_) => error!("Inference panicked; failing a batch of {} item(s)", items),
-        }
-    }
-}
-
-struct Queue<J: BatchJob> {
-    receiver: mpsc::Receiver<Message<J>>,
-    /// A request that did not fit into the previous batch; it starts the next one
-    carry: Option<Pending<J>>,
-}
-
-impl<J: BatchJob> Queue<J> {
-    /// Wait for the next batch; `None` once every [`Batcher`] handle is gone
-    fn next_batch(
-        &mut self,
-        config: &BatchConfig,
-        arriving: &AtomicUsize,
-        busy: &AtomicUsize,
-    ) -> Option<Vec<Pending<J>>> {
-        let first = loop {
-            let pending = match self.carry.take() {
-                Some(pending) => pending,
-                None => match self.receiver.recv().ok()? {
-                    Message::Request(pending) => received(pending, arriving),
-                    Message::Wake => continue,
-                },
-            };
-            // Skip requests whose client already gave up (timeout)
-            if !pending.reply.is_closed() {
-                break pending;
-            }
-        };
-
-        // Another worker is idle: it takes the next request, and both run side by side
-        if busy.load(Ordering::SeqCst) + 1 < config.workers {
-            return Some(vec![first]);
-        }
-
-        let deadline = first.queued_at + config.batch_timeout;
-        let mut items = first.input.items();
-        let mut batch = vec![first];
-        while items < config.max_batch_size {
-            let message = match self.receiver.try_recv() {
-                Ok(message) => message,
-                Err(TryRecvError::Disconnected) => break,
-                Err(TryRecvError::Empty) => {
-                    // Nothing queued: wait only for requests already on their way in
-                    if arriving.load(Ordering::SeqCst) == 0 {
-                        break;
-                    }
-                    let now = Instant::now();
-                    if now >= deadline {
-                        break;
-                    }
-                    match self.receiver.recv_timeout(deadline - now) {
-                        Ok(message) => message,
-                        Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
-                    }
-                }
-            };
-            let Message::Request(pending) = message else {
-                continue;
-            };
-            let pending = received(pending, arriving);
-            if pending.reply.is_closed() {
-                continue;
-            }
-            if items + pending.input.items() > config.max_batch_size {
-                self.carry = Some(pending);
-                break;
-            }
-            items += pending.input.items();
-            batch.push(pending);
-        }
-        Some(batch)
-    }
-}
-
-/// A worker has the request now, so it no longer counts as arriving
-fn received<J: BatchJob>(pending: Pending<J>, arriving: &AtomicUsize) -> Pending<J> {
-    arriving.fetch_sub(1, Ordering::SeqCst);
-    pending
-}
+pub struct Arrival<'a, J: BatchJob = FlatInput>(engine::Arrival<'a, Pending<J>>);
 
 #[cfg(test)]
 mod tests {
@@ -353,8 +233,9 @@ mod tests {
     use crate::error::Result;
     use crate::model::BurnModel;
     use crate::tensor::{HostTensor, IoSpec, Values};
-    use std::sync::Condvar;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex};
+    use std::time::Instant;
     use tokio::sync::Semaphore;
 
     const WIDTH: usize = 4;
