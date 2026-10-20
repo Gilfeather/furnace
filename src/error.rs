@@ -29,6 +29,7 @@ impl FurnaceError {
                 ModelError::InputValidation { .. }
                     | ModelError::InvalidDataType(_)
                     | ModelError::InvalidInput(_)
+                    | ModelError::InvalidArgument { .. }
             )
         )
     }

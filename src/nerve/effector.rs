@@ -262,11 +262,20 @@ impl Effector {
         self
     }
 
+    /// How often, and how far apart, to try a command that failed in a way worth retrying
+    ///
+    /// # Panics
+    ///
+    /// Once the effector is shared: a clone, or the fabric, holds it. Configure it first.
     pub fn retry(self, retry: Retry) -> Self {
         self.configure(|i| i.retry = retry)
     }
 
     /// One try, no retry
+    ///
+    /// # Panics
+    ///
+    /// Once the effector is shared: a clone, or the fabric, holds it. Configure it first.
     pub fn no_retry(self) -> Self {
         self.retry(Retry {
             attempts: 1,
@@ -274,10 +283,20 @@ impl Effector {
         })
     }
 
+    /// After this many failures in a row, refuse commands for a while
+    ///
+    /// # Panics
+    ///
+    /// Once the effector is shared: a clone, or the fabric, holds it. Configure it first.
     pub fn breaker(self, breaker: Breaker) -> Self {
         self.configure(|i| i.breaker = breaker)
     }
 
+    /// At most this many commands a second, in bursts of at most `burst`
+    ///
+    /// # Panics
+    ///
+    /// Once the effector is shared: a clone, or the fabric, holds it. Configure it first.
     pub fn rate_limit(self, rate: RateLimit) -> Self {
         self.configure(|i| {
             i.state.get_mut().unwrap_or_else(|e| e.into_inner()).tokens = f64::from(rate.burst);
@@ -286,6 +305,10 @@ impl Effector {
     }
 
     /// After a command, ignore the next ones for this long
+    ///
+    /// # Panics
+    ///
+    /// Once the effector is shared: a clone, or the fabric, holds it. Configure it first.
     pub fn refractory(self, period: Duration) -> Self {
         self.configure(|i| i.refractory = Some(period))
     }
@@ -683,17 +706,29 @@ struct WebhookShared {
 /// An outbound HTTP call: `POST url` with the command's `args` as JSON, or the signal's
 /// payload as it is (JSON, text or bytes) for a plain signal. 5xx, 429 and connection
 /// errors are retried; other 4xx are final.
+///
+/// Plain HTTP/1.1 only: no HTTPS (put a local proxy in front for that) and no redirects, so a
+/// 3xx is a final failure, and enough of them in a row open the breaker.
 pub struct Webhook {
     name: String,
     shared: Arc<WebhookShared>,
 }
 
 impl Webhook {
-    /// `url` is `http://host[:port]/path`
+    /// `url` is `http://host[:port]/path`; each call has 5 seconds, the response included
+    ///
+    /// # Panics
+    ///
+    /// If `url` is not of that form (an `https://` URL among them).
     pub fn new(name: &str, url: &str) -> Self {
         Self::with_timeout(name, url, Duration::from_secs(5))
     }
 
+    /// [`Webhook::new`] with another bound on each call, the response included
+    ///
+    /// # Panics
+    ///
+    /// If `url` is not `http://host[:port]/path`.
     pub fn with_timeout(name: &str, url: &str, timeout: Duration) -> Self {
         let url = wire::Url::parse(url).unwrap_or_else(|e| panic!("webhook '{name}': {e}"));
         Self {
@@ -707,6 +742,10 @@ impl Webhook {
     }
 
     /// Send this header with every call (an authorization token, say)
+    ///
+    /// # Panics
+    ///
+    /// Once the webhook is shared: configure it before handing it to an [`Effector`].
     pub fn header(mut self, name: &str, value: &str) -> Self {
         Arc::get_mut(&mut self.shared)
             .expect("configured before use")
@@ -774,7 +813,12 @@ impl Act for Webhook {
 /// Run a local command. The program and its fixed arguments are set here; the command's
 /// `args` adds `{"args": [...], "stdin": "..."}` (or is itself an array of arguments). The
 /// process inherits stdout; its stderr is kept for the error message. A non-zero exit is a
-/// final failure; a program that cannot be started is retried.
+/// final failure; a program that cannot be started is retried. Writing stdin and running
+/// both count against the timeout, so a program that never reads its input is killed too.
+///
+/// The arguments, from a brain's command too, reach the program as they are: as argv, with
+/// no shell in between, so they cannot inject a command, but the program sees whatever the
+/// brain chose. Fix the arguments here and pass only data on stdin when that matters.
 pub struct Process {
     name: String,
     program: String,
@@ -863,10 +907,15 @@ impl Act for Process {
                 .kill_on_drop(true)
                 .spawn()
                 .map_err(|e| ActError::retry(format!("{program}: {e}")))?;
-            if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
-                let _ = pipe.write_all(&input).await;
-            }
-            match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            let pipe = child.stdin.take();
+            let run = async move {
+                if let (Some(input), Some(mut pipe)) = (stdin, pipe) {
+                    // A program may exit without reading it all; its exit status says how it went
+                    let _ = pipe.write_all(&input).await;
+                }
+                child.wait_with_output().await
+            };
+            match tokio::time::timeout(timeout, run).await {
                 Ok(Ok(output)) if output.status.success() => Ok(()),
                 Ok(Ok(output)) => Err(ActError::fatal(format!(
                     "{program} exited with {}: {}",
@@ -888,21 +937,66 @@ impl Act for Process {
 // File append
 
 /// Append a line per command to a file: `args.line` as it is if it is a string, else one
-/// JSON object `{"at": ..., "signal": ..., "args": ...}`. The file is opened on the first
-/// command and reopened after an error.
+/// JSON object `{"at": ..., "signal": ..., "args": ...}`.
+///
+/// The writing happens on a thread of its own, started with the first command, so a slow disk
+/// never holds up the thread that stimulated the fabric; the lines still go out in the order
+/// the commands came. The file is opened on the first line and reopened after an error.
 pub struct FileAppend {
     name: String,
     path: std::path::PathBuf,
-    file: Mutex<Option<std::fs::File>>,
+    writer: OnceLock<mpsc::Sender<Line>>,
 }
+
+/// A line for the writer thread, and where to say how writing it went
+type Line = (String, tokio::sync::oneshot::Sender<std::io::Result<()>>);
 
 impl FileAppend {
     pub fn new(name: &str, path: impl Into<std::path::PathBuf>) -> Self {
         Self {
             name: name.to_string(),
             path: path.into(),
-            file: Mutex::new(None),
+            writer: OnceLock::new(),
         }
+    }
+
+    /// The writer thread's inbox, starting it on first use
+    fn writer(&self) -> std::io::Result<&mpsc::Sender<Line>> {
+        if let Some(writer) = self.writer.get() {
+            return Ok(writer);
+        }
+        let (sender, lines) = mpsc::channel::<Line>();
+        let path = self.path.clone();
+        std::thread::Builder::new()
+            .name(format!("furnace-file-{}", self.name))
+            .spawn(move || write_lines(&path, &lines))?;
+        // Two first commands at once start two threads; the loser's ends with its sender
+        Ok(self.writer.get_or_init(|| sender))
+    }
+}
+
+/// The writer thread: until the [`FileAppend`] is dropped
+fn write_lines(path: &std::path::Path, lines: &mpsc::Receiver<Line>) {
+    use std::io::Write as _;
+    let mut file: Option<std::fs::File> = None;
+    for (line, done) in lines {
+        let result = (|| {
+            let open = match &mut file {
+                Some(open) => open,
+                None => file.insert(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)?,
+                ),
+            };
+            open.write_all(line.as_bytes())
+        })();
+        if result.is_err() {
+            file = None;
+        }
+        // Nobody may be waiting any more (the fabric is gone)
+        let _ = done.send(result);
     }
 }
 
@@ -912,7 +1006,6 @@ impl Act for FileAppend {
     }
 
     fn act(&self, command: &Command, signal: &Signal) -> Action {
-        use std::io::Write as _;
         let mut line = match command.args.get("line").and_then(|l| l.as_str()) {
             Some(line) => line.to_string(),
             None => serde_json::json!({
@@ -923,24 +1016,28 @@ impl Act for FileAppend {
             .to_string(),
         };
         line.push('\n');
-        let mut file = self.file.lock().unwrap_or_else(|e| e.into_inner());
-        let result = (|| {
-            if file.is_none() {
-                *file = Some(
-                    std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&self.path)?,
-                );
+        let path = self.path.display().to_string();
+        let (done, written) = tokio::sync::oneshot::channel();
+        let sent = self
+            .writer()
+            .map_err(|e| format!("{path}: no writer thread: {e}"))
+            .and_then(|writer| {
+                writer
+                    .send((line, done))
+                    .map_err(|_| format!("{path}: the writer thread is gone"))
+            });
+        if let Err(message) = sent {
+            return Action::Done(Err(ActError::retry(message)));
+        }
+        Action::pending(async move {
+            match written.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(ActError::retry(format!("{path}: {e}"))),
+                Err(_) => Err(ActError::retry(format!(
+                    "{path}: the writer thread is gone"
+                ))),
             }
-            file.as_mut()
-                .expect("opened just now")
-                .write_all(line.as_bytes())
-        })();
-        Action::Done(result.map_err(|e| {
-            *file = None;
-            ActError::retry(format!("{}: {e}", self.path.display()))
-        }))
+        })
     }
 
     fn describe(&self) -> serde_json::Value {
@@ -1333,6 +1430,11 @@ mod tests {
             command("journal", serde_json::json!({"line": "raw line"})),
         );
         fabric.stimulate(r, command("journal", serde_json::json!({"k": 1})));
+        // The lines are written on the effector's own thread
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while effector.metrics().acted < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "raw line");

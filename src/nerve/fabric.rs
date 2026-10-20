@@ -306,11 +306,19 @@ impl FabricBuilder {
 
     /// Add a neuron with its mechanisms. Names must be unique: effectors are addressed by
     /// name in commands.
+    ///
+    /// # Panics
+    ///
+    /// If a neuron of the same name was added already.
     pub fn neuron(&mut self, neuron: impl Neuron, mechanisms: Mechanisms) -> NeuronId {
         self.add(Arc::new(neuron), mechanisms)
     }
 
     /// [`FabricBuilder::neuron`] for a neuron already shared
+    ///
+    /// # Panics
+    ///
+    /// If a neuron of the same name was added already.
     pub fn add(&mut self, neuron: Arc<dyn Neuron>, mechanisms: Mechanisms) -> NeuronId {
         let id = NeuronId(u32::try_from(self.neurons.len()).expect("fewer than 4G neurons"));
         assert!(
@@ -357,6 +365,11 @@ impl FabricBuilder {
         self
     }
 
+    /// Wire the fabric and start its runtimes and its deliberative workers
+    ///
+    /// # Panics
+    ///
+    /// If a pathway names a neuron of another builder, or the runtimes cannot be started.
     pub fn build(self) -> Fabric {
         let count = self.neurons.len();
         for &(from, to, ..) in &self.pathways {
@@ -629,7 +642,10 @@ impl Fabric {
             fabric: self,
         };
         let firing = cell.neuron.stimulate(signal, &cx);
-        let mut outcome = self.after_firing(id, firing, nanos, depth, announced);
+        if matches!(firing, Firing::Quiet) {
+            cell.gate.stayed_quiet(nanos);
+        }
+        let mut outcome = self.after_firing(id, firing, depth, announced);
         outcome.acted += acted;
         outcome
     }
@@ -639,7 +655,6 @@ impl Fabric {
         &self,
         id: NeuronId,
         firing: Firing,
-        nanos: u64,
         depth: usize,
         announced: &mut Option<Announced<'_>>,
     ) -> Outcome {
@@ -659,7 +674,6 @@ impl Fabric {
                 work()
             }
         };
-        cell.gate.fired(nanos);
         cell.counters.fired.fetch_add(1, Ordering::Relaxed);
         let mut outcome = Outcome {
             hops: depth + 1,
@@ -679,7 +693,9 @@ impl Fabric {
         depth: usize,
         announced: &mut Option<Announced<'_>>,
     ) -> Outcome {
-        if depth >= MAX_HOPS {
+        // The depth restarts after a deliberative queue; the trace keeps the whole count, so a
+        // loop through a queue is cut too
+        if depth >= MAX_HOPS || signal.trace.len() >= MAX_HOPS {
             self.0.loops.fetch_add(1, Ordering::Relaxed);
             warn!(
                 "nerve: signal {} dropped after {MAX_HOPS} hops (a loop?)",
@@ -858,8 +874,11 @@ impl Fabric {
             fabric: self,
         };
         let firings = cell.neuron.stimulate_many(admitted, &cx);
+        if firings.iter().all(|f| matches!(f, Firing::Quiet)) {
+            cell.gate.stayed_quiet(nanos);
+        }
         for (firing, at) in firings.into_iter().zip(queued_at) {
-            self.after_firing(pathway.to, firing, nanos, 1, &mut None);
+            self.after_firing(pathway.to, firing, 1, &mut None);
             pathway.latency.observe(at.elapsed());
         }
     }
@@ -1275,6 +1294,28 @@ mod tests {
         let outcome = fabric.stimulate(a, signal(b"round"));
         assert_eq!(outcome.hops, MAX_HOPS);
         assert_eq!(fabric.0.loops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_loop_through_a_queue_is_cut() {
+        let mut b = Fabric::builder();
+        let reflex = b.neuron(pass("reflex"), Mechanisms::NONE);
+        let brain = b.neuron(
+            FnNeuron::reflex("brain", |s, _| Firing::one(s)).with_kind(NeuronKind::Brain),
+            Mechanisms::NONE,
+        );
+        b.deliberative(reflex, brain, 1.0, Summation::none())
+            .reflex(brain, reflex, 1.0);
+        let fabric = b.build();
+        fabric.stimulate(reflex, signal(b"round"));
+        // Each pass through the queue restarts the depth; the trace still counts every hop
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fabric.0.loops.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "the loop never ended");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(fabric.0.loops.load(Ordering::SeqCst), 1);
+        assert!(fabric.0.reached_brain.load(Ordering::SeqCst) < MAX_HOPS as u64);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Brains and model neurons: the slow, large model whose output is commands, and any
 //! [`Model`] as a reflex or a brain.
 //!
-//! - [`Llm`] (feature `llm`) wraps an [`LlmEngine`](crate::llm::LlmEngine): the mock engines of
+//! - `Llm` (feature `llm`) wraps an `LlmEngine`: the mock engines of
 //!   `furnace::llm::mock`, a `Scheduled` step model, the candle adapter. The signal's payload
 //!   becomes the user message, the effectors' names go into the system prompt, and the
 //!   model's answer is parsed as commands: a JSON command object
@@ -146,6 +146,8 @@ pub fn signal_text(signal: &Signal) -> String {
         },
         Payload::Tensors(tensors) => format!("[{} tensor(s)]", tensors.len()),
         Payload::None => String::new(),
+        #[cfg(feature = "llm")]
+        Payload::Prompt(_) => "[a generation request]".to_string(),
     }
 }
 
@@ -508,8 +510,8 @@ impl Neuron for ModelNeuron {
         let Some(inputs) = (self.input)(&signal) else {
             return Firing::Quiet;
         };
-        // Reflexes run inline: the forward is the arc's work. A brain returns Compute, so
-        // the fabric counts it; on a deliberative pathway it is the worker's thread anyway.
+        // On a reflex pathway the forward pass runs inline, as the arc's work; on a
+        // deliberative one it runs on the pathway's worker thread
         let started = std::time::Instant::now();
         let result = self.model.infer(inputs);
         self.latency.observe(started.elapsed());

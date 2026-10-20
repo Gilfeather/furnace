@@ -501,7 +501,23 @@ impl Server {
     }
 
     /// The HTTP API as an axum router, to serve or mount yourself. Panics without a model.
+    ///
+    /// A rate limit without API keys tells clients apart by their address, which axum knows
+    /// only when the router is served with [`ClientAddr`] as connect info; otherwise every
+    /// client shares one budget:
+    ///
+    /// ```no_run
+    /// # async fn run(app: axum::Router) -> std::io::Result<()> {
+    /// let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    /// axum::serve(
+    ///     listener,
+    ///     app.into_make_service_with_connect_info::<furnace::api::ClientAddr>(),
+    /// )
+    /// .await
+    /// # }
+    /// ```
     pub fn router(self) -> Router {
+        warn_if_limited_by_address(&self.config);
         router_with_state(server_state(self.contents, &self.config), &self.config)
     }
 
@@ -609,7 +625,7 @@ struct ServerState {
     #[cfg(feature = "llm")]
     llm: Option<Arc<crate::llm::LlmState>>,
     /// The nervous system: every model's pathway, and the neurons added with `Server::nerve`
-    serving: Serving,
+    serving: Arc<Serving>,
 }
 
 impl ServerState {
@@ -642,14 +658,26 @@ impl ServerState {
     }
 }
 
-/// Build the application router with all middleware applied
+/// Build the application router with all middleware applied. Serve it with [`ClientAddr`]
+/// as connect info for a rate limit by address, as [`Server::router`] explains.
 pub fn router(model: Model, config: &ServerConfig) -> Router {
     router_with_models(vec![model.into()], config)
 }
 
 /// [`router`] for several models; the first is the default for `/predict`
 pub fn router_with_models(models: Vec<ServedModel>, config: &ServerConfig) -> Router {
+    warn_if_limited_by_address(config);
     router_with_state(server_state(models.into(), config), config)
+}
+
+/// A router served by its user may lack the peer address the rate limit needs; say so once,
+/// at startup, rather than let every client silently share one budget
+fn warn_if_limited_by_address(config: &ServerConfig) {
+    if config.rate_limit.is_some() && config.api_keys.is_empty() {
+        warn!(
+            "the rate limit tells clients apart by address: serve this router with              into_make_service_with_connect_info::<furnace::api::ClientAddr>(), or every              client shares one budget"
+        );
+    }
 }
 
 /// The shared state of the HTTP and gRPC servers; also starts the models' warm-ups
@@ -657,19 +685,6 @@ fn server_state(contents: Contents, config: &ServerConfig) -> AppState {
     assert!(!contents.is_empty(), "at least one model to serve");
     let batching = config.batching;
     let inference_slots = Arc::new(Semaphore::new(config.max_concurrent_requests));
-    #[cfg(feature = "llm")]
-    let llm = (!contents.llms.is_empty()).then(|| {
-        let others = contents
-            .models
-            .iter()
-            .map(|served| served.model.get_info().name.clone())
-            .collect();
-        Arc::new(crate::llm::LlmState::new(
-            contents.llms,
-            others,
-            inference_slots.clone(),
-        ))
-    });
     let models = contents
         .models
         .into_iter()
@@ -697,9 +712,23 @@ fn server_state(contents: Contents, config: &ServerConfig) -> AppState {
                 }
             })
             .collect(),
+        #[cfg(feature = "llm")]
+        &contents.llms,
         batching,
         config.max_concurrent_requests,
     );
+    let serving = Arc::new(serving);
+    #[cfg(feature = "llm")]
+    let llm = (!contents.llms.is_empty()).then(|| {
+        let others = models.iter().map(|slot| slot.name.clone()).collect();
+        Arc::new(crate::llm::LlmState::new(
+            contents.llms,
+            others,
+            inference_slots.clone(),
+            serving.clone(),
+            config.request_timeout,
+        ))
+    });
     Arc::new(ServerState {
         models,
         start_time: SystemTime::now(),
@@ -3175,6 +3204,105 @@ pub(crate) mod tests {
         let body = serde_json::json!({ "input": vec![0.5; 784] }).to_string();
         let (status, _) = send(app, predict_request(body)).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// [`DummyModel`], except that a non-zero input makes it panic or take `delay`; the
+    /// warm-up's zeros run as usual
+    #[derive(Debug)]
+    struct Misbehaving {
+        dummy: DummyModel,
+        panics: bool,
+        delay: Duration,
+    }
+
+    impl crate::BurnModel for Misbehaving {
+        fn name(&self) -> &str {
+            self.dummy.name()
+        }
+        fn backend(&self) -> crate::BackendKind {
+            self.dummy.backend()
+        }
+        fn inputs(&self) -> Vec<crate::IoSpec> {
+            self.dummy.inputs()
+        }
+        fn outputs(&self) -> Vec<crate::IoSpec> {
+            self.dummy.outputs()
+        }
+        fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
+            let zeros = matches!(&inputs[0].values, Values::F32(v) if v.iter().all(|x| *x == 0.0));
+            if !zeros {
+                assert!(!self.panics, "the model broke");
+                std::thread::sleep(self.delay);
+            }
+            self.dummy.run(inputs)
+        }
+    }
+
+    fn misbehaving_app(panics: bool, delay: Duration, config: ServerConfig) -> Router {
+        let dummy = DummyModel::new("test_model".to_string(), vec![784], vec![10]);
+        let model = Model::new(
+            Box::new(Misbehaving {
+                dummy,
+                panics,
+                delay,
+            }),
+            "dummy",
+            0,
+        );
+        router(model, &config)
+    }
+
+    fn v2_request(value: f32) -> Request<Body> {
+        Request::builder()
+            .uri("/v2/models/test_model/infer")
+            .method("POST")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "inputs": [{ "name": "input", "shape": [1, 784], "datatype": "FP32", "data": vec![value; 784] }],
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_model_past_the_request_timeout_is_a_504() {
+        let config = ServerConfig {
+            request_timeout: Some(Duration::from_millis(50)),
+            ..ServerConfig::default()
+        };
+        let app = misbehaving_app(false, Duration::from_millis(500), config);
+        let body = serde_json::json!({ "input": vec![0.5; 784] }).to_string();
+        let (status, body) = send(app.clone(), predict_request(body)).await;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert!(String::from_utf8_lossy(&body).contains("INFERENCE_TIMEOUT"));
+        let (status, _) = send(app, v2_request(0.5)).await;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn a_panicking_model_is_a_500_and_the_server_goes_on() {
+        let batching = ServerConfig {
+            batching: crate::batching::BatchConfig {
+                max_batch_size: 8,
+                ..crate::batching::BatchConfig::default()
+            },
+            ..ServerConfig::default()
+        };
+        for config in [ServerConfig::default(), batching] {
+            let app = misbehaving_app(true, Duration::ZERO, config);
+            let body = serde_json::json!({ "input": vec![0.5; 784] }).to_string();
+            let (status, body) = send(app.clone(), predict_request(body)).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(String::from_utf8_lossy(&body).contains("INFERENCE_FAILED"));
+            let (status, _) = send(app.clone(), v2_request(0.5)).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            // The model's pathway still serves what does not make it panic
+            let body = serde_json::json!({ "input": vec![0.0; 784] }).to_string();
+            let (status, _) = send(app, predict_request(body)).await;
+            assert_eq!(status, StatusCode::OK);
+        }
     }
 
     #[tokio::test]

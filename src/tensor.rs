@@ -139,8 +139,10 @@ pub struct HostTensor {
 }
 
 impl HostTensor {
+    /// Items along the batch dimension; 0 for a tensor without one (an empty shape), which no
+    /// model accepts
     pub fn batch(&self) -> usize {
-        self.shape.first().copied().unwrap_or(1)
+        self.shape.first().copied().unwrap_or(0)
     }
 
     /// Items `start..end` along the batch dimension

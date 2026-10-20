@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -34,6 +34,11 @@ const MAX_STOP_STRINGS: usize = 4;
 /// The LLMs of a server
 pub(crate) struct LlmState {
     engines: Vec<Served>,
+    /// The nervous system the requests go through: each LLM is a brain neuron there
+    serving: Arc<crate::nerve::serve::Serving>,
+    /// The server's `request_timeout`: the bound on a whole answer, and on the wait for each
+    /// event of a stream
+    timeout: Option<Duration>,
     /// The server's other models, listed by `/v1/models` too
     other_models: Vec<String>,
     /// The server's concurrency limit (`max_concurrent_requests`), shared with every route
@@ -52,6 +57,8 @@ impl LlmState {
         engines: Vec<Arc<dyn LlmEngine>>,
         other_models: Vec<String>,
         slots: Arc<Semaphore>,
+        serving: Arc<crate::nerve::serve::Serving>,
+        timeout: Option<Duration>,
     ) -> Self {
         for (i, engine) in engines.iter().enumerate() {
             let name = engine.name();
@@ -69,6 +76,8 @@ impl LlmState {
                     metrics: Arc::default(),
                 })
                 .collect(),
+            serving,
+            timeout,
             other_models,
             slots,
             created: unix_seconds(),
@@ -467,7 +476,12 @@ async fn generate(
         params,
         stop,
     };
-    let events = match served.engine.generate(request) {
+    let events = match state
+        .serving
+        .clone()
+        .generate_off_runtime(served.engine.name().to_string(), request)
+        .await
+    {
         Ok(events) => events,
         Err(e) => {
             if matches!(e, EngineError::Busy(_)) {
@@ -484,9 +498,21 @@ async fn generate(
         model: served.engine.name().to_string(),
     };
     if delivery.stream {
-        stream(reply, tracked, delivery.include_usage, permit)
+        stream(
+            reply,
+            tracked,
+            delivery.include_usage,
+            state.timeout,
+            permit,
+        )
     } else {
-        collect(reply, tracked, permit).await
+        match state.timeout {
+            // Dropping the events on timeout cancels the generation
+            Some(timeout) => tokio::time::timeout(timeout, collect(reply, tracked, permit))
+                .await
+                .unwrap_or_else(|_| timeout_response(timeout)),
+            None => collect(reply, tracked, permit).await,
+        }
     }
 }
 
@@ -618,6 +644,8 @@ struct Streamed {
     pending: VecDeque<String>,
     done: bool,
     completion_tokens: usize,
+    /// How long to wait for the engine's next event before giving up on the stream
+    idle: Option<Duration>,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -665,6 +693,14 @@ impl Streamed {
         }
     }
 
+    /// The engine sent nothing for `idle`: an error payload, and the stream ends
+    fn stalled(&mut self, idle: Duration) {
+        let message = timeout_message(idle);
+        let error = error_value(&message, "server_error", None, Some("timeout"));
+        self.pending.push_back(error.to_string());
+        self.end();
+    }
+
     fn end(&mut self) {
         self.pending.push_back("[DONE]".to_string());
         self.done = true;
@@ -677,6 +713,7 @@ fn stream(
     reply: Reply,
     tracked: Tracked,
     include_usage: bool,
+    idle: Option<Duration>,
     permit: OwnedSemaphorePermit,
 ) -> Response {
     let mut streamed = Streamed {
@@ -686,6 +723,7 @@ fn stream(
         pending: VecDeque::new(),
         done: false,
         completion_tokens: 0,
+        idle,
         _permit: permit,
     };
     if streamed.reply.kind == Kind::Chat {
@@ -709,8 +747,16 @@ fn stream(
             if streamed.done {
                 return None;
             }
-            let event = streamed.tracked.next().await;
-            streamed.on(event);
+            match streamed.idle {
+                Some(idle) => match tokio::time::timeout(idle, streamed.tracked.next()).await {
+                    Ok(event) => streamed.on(event),
+                    Err(_) => streamed.stalled(idle),
+                },
+                None => {
+                    let event = streamed.tracked.next().await;
+                    streamed.on(event);
+                }
+            }
         }
     });
     Sse::new(events)
@@ -848,6 +894,24 @@ fn engine_error_response(e: &EngineError, kind: Kind) -> Response {
         Kind::Text => "prompt",
     });
     error_response(status, &e.to_string(), error_kind, param, code)
+}
+
+fn timeout_message(timeout: Duration) -> String {
+    format!(
+        "The generation exceeded the timeout of {}ms",
+        timeout.as_millis()
+    )
+}
+
+/// A whole answer that took longer than the server's `request_timeout`
+fn timeout_response(timeout: Duration) -> Response {
+    error_response(
+        StatusCode::GATEWAY_TIMEOUT,
+        &timeout_message(timeout),
+        "server_error",
+        None,
+        Some("timeout"),
+    )
 }
 
 fn unix_seconds() -> u64 {
