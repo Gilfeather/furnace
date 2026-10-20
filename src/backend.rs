@@ -59,15 +59,15 @@ impl BackendKind {
 
     /// Backends compiled into this binary.
     pub fn available() -> Vec<BackendKind> {
-        #[allow(unused_mut)]
-        let mut backends = vec![BackendKind::Cpu];
-        #[cfg(feature = "wgpu")]
-        backends.push(BackendKind::Wgpu);
-        #[cfg(feature = "metal")]
-        backends.push(BackendKind::Metal);
-        #[cfg(feature = "cuda")]
-        backends.push(BackendKind::Cuda);
-        backends
+        vec![
+            BackendKind::Cpu,
+            #[cfg(feature = "wgpu")]
+            BackendKind::Wgpu,
+            #[cfg(feature = "metal")]
+            BackendKind::Metal,
+            #[cfg(feature = "cuda")]
+            BackendKind::Cuda,
+        ]
     }
 
     pub fn available_names() -> Vec<&'static str> {

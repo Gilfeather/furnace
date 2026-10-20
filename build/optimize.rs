@@ -15,7 +15,7 @@
 // Shared by build.rs and the crate's tests (via `#[path]`), so it only uses onnx-ir's
 // re-exported protobuf types.
 
-use onnx_ir::{ModelProto, NodeProto, TensorProto};
+use onnx_ir::{ModelProto, NodeProto, TensorProto, ValueInfoProto};
 use std::collections::{HashMap, HashSet};
 
 /// ONNX `TensorProto.DataType.FLOAT`
@@ -34,28 +34,8 @@ pub fn fold_conv_batchnorm(model: &mut ModelProto) -> FoldReport {
     let mut report = FoldReport::default();
     let graph = model.graph.mut_or_insert_default();
 
-    // How many node inputs read each value (initializer sharing and fan-out checks)
-    let mut readers: HashMap<String, usize> = HashMap::new();
-    for node in &graph.node {
-        for input in node.input.iter().filter(|i| !i.is_empty()) {
-            *readers.entry(input.clone()).or_default() += 1;
-        }
-    }
-    let graph_outputs: HashSet<String> = graph.output.iter().map(|o| o.name.clone()).collect();
-    let producer: HashMap<String, usize> = graph
-        .node
-        .iter()
-        .enumerate()
-        .flat_map(|(i, n)| n.output.iter().map(move |o| (o.clone(), i)))
-        .collect();
-    let init_index: HashMap<String, usize> = graph
-        .initializer
-        .iter()
-        .enumerate()
-        .map(|(i, t)| (t.name.clone(), i))
-        .collect();
-
     // Plan every fold against the unmodified graph, then apply them
+    let index = GraphIndex::new(&graph.node, &graph.initializer, &graph.output);
     let mut plans = Vec::new();
     for (bn_idx, bn) in graph.node.iter().enumerate() {
         if bn.op_type != "BatchNormalization" || !bn.domain.is_empty() {
@@ -66,19 +46,16 @@ pub fn fold_conv_batchnorm(model: &mut ModelProto) -> FoldReport {
         } else {
             bn.name.clone()
         };
-        match plan_fold(
-            bn,
-            &graph.node,
-            &producer,
-            &readers,
-            &graph_outputs,
-            &init_index,
-            &graph.initializer,
-        ) {
+        match index.plan_fold(bn) {
             Ok(plan) => plans.push((bn_idx, plan)),
             Err(reason) => report.skipped.push((label, reason)),
         }
     }
+    let GraphIndex {
+        init_index,
+        graph_outputs,
+        ..
+    } = index;
 
     let mut remove_nodes = HashSet::new();
     let mut remove_inits = HashSet::new();
@@ -138,129 +115,167 @@ struct FoldPlan {
     dropped_inits: Vec<String>,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn plan_fold(
-    bn: &NodeProto,
-    nodes: &[NodeProto],
-    producer: &HashMap<String, usize>,
-    readers: &HashMap<String, usize>,
-    graph_outputs: &HashSet<String>,
-    init_index: &HashMap<String, usize>,
-    inits: &[TensorProto],
-) -> Result<FoldPlan, String> {
-    if bn.input.len() != 5 {
-        return Err(format!("expected 5 inputs, found {}", bn.input.len()));
-    }
-    if bn.output.iter().skip(1).any(|o| !o.is_empty()) {
-        return Err("training-mode outputs are used".to_string());
-    }
-    let x = &bn.input[0];
-    let &conv_idx = producer.get(x).ok_or("input is not produced by a node")?;
-    let conv = &nodes[conv_idx];
-    if conv.op_type != "Conv" || !conv.domain.is_empty() {
-        return Err(format!("input comes from {}, not Conv", conv.op_type));
-    }
-    if readers.get(x).copied().unwrap_or(0) != 1 || graph_outputs.contains(x) {
-        return Err("Conv output is used elsewhere".to_string());
-    }
-    if conv.input.len() < 2 {
-        return Err("Conv has no weight input".to_string());
-    }
+/// Lookups over the unmodified graph that planning a fold needs
+struct GraphIndex<'a> {
+    nodes: &'a [NodeProto],
+    inits: &'a [TensorProto],
+    /// The node producing each value
+    producer: HashMap<String, usize>,
+    /// How many node inputs read each value (initializer sharing and fan-out checks)
+    readers: HashMap<String, usize>,
+    graph_outputs: HashSet<String>,
+    init_index: HashMap<String, usize>,
+}
 
-    let tensor = |name: &str| -> Result<&TensorProto, String> {
-        init_index
-            .get(name)
-            .map(|&i| &inits[i])
-            .ok_or_else(|| format!("'{name}' is not an initializer"))
-    };
-    let unshared = |name: &str| -> Result<(), String> {
-        match readers.get(name).copied().unwrap_or(0) {
-            1 => Ok(()),
-            n => Err(format!("'{name}' is read by {n} nodes")),
+impl<'a> GraphIndex<'a> {
+    fn new(nodes: &'a [NodeProto], inits: &'a [TensorProto], outputs: &[ValueInfoProto]) -> Self {
+        let mut readers: HashMap<String, usize> = HashMap::new();
+        for node in nodes {
+            for input in node.input.iter().filter(|i| !i.is_empty()) {
+                *readers.entry(input.clone()).or_default() += 1;
+            }
         }
-    };
-
-    let weight_name = conv.input[1].clone();
-    let weight = tensor(&weight_name)?;
-    unshared(&weight_name)?;
-    let out_channels = *weight.dims.first().ok_or("Conv weight has no dims")? as usize;
-
-    let [gamma, beta, mean, var] = [1, 2, 3, 4].map(|i| bn.input[i].as_str());
-    let gamma_v = floats(tensor(gamma)?)?;
-    let beta_v = floats(tensor(beta)?)?;
-    let mean_v = floats(tensor(mean)?)?;
-    let var_v = floats(tensor(var)?)?;
-    for (name, v) in [
-        (gamma, &gamma_v),
-        (beta, &beta_v),
-        (mean, &mean_v),
-        (var, &var_v),
-    ] {
-        if v.len() != out_channels {
-            return Err(format!(
-                "'{name}' has {} values for {out_channels} output channels",
-                v.len()
-            ));
+        Self {
+            nodes,
+            inits,
+            producer: nodes
+                .iter()
+                .enumerate()
+                .flat_map(|(i, n)| n.output.iter().map(move |o| (o.clone(), i)))
+                .collect(),
+            readers,
+            graph_outputs: outputs.iter().map(|o| o.name.clone()).collect(),
+            init_index: inits
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (t.name.clone(), i))
+                .collect(),
         }
     }
-    let epsilon = bn
-        .attribute
-        .iter()
-        .find(|a| a.name == "epsilon")
-        .map_or(1e-5, |a| a.f);
 
-    let w = floats(weight)?;
-    if w.is_empty() || !w.len().is_multiple_of(out_channels) {
-        return Err("Conv weight size is not a multiple of its output channels".to_string());
-    }
-    let per_channel = w.len() / out_channels;
-
-    let has_bias = conv.input.get(2).is_some_and(|b| !b.is_empty());
-    let (bias_name, bias_v) = if has_bias {
-        let name = conv.input[2].clone();
-        unshared(&name)?;
-        let v = floats(tensor(&name)?)?;
-        if v.len() != out_channels {
-            return Err("Conv bias size does not match its output channels".to_string());
+    fn plan_fold(&self, bn: &NodeProto) -> Result<FoldPlan, String> {
+        let Self {
+            nodes,
+            inits,
+            producer,
+            readers,
+            graph_outputs,
+            init_index,
+        } = self;
+        if bn.input.len() != 5 {
+            return Err(format!("expected 5 inputs, found {}", bn.input.len()));
         }
-        (name, v)
-    } else {
-        // Reuse beta's initializer (already shaped [C]) as the new bias
-        unshared(beta)?;
-        (beta.to_string(), vec![0.0; out_channels])
-    };
+        if bn.output.iter().skip(1).any(|o| !o.is_empty()) {
+            return Err("training-mode outputs are used".to_string());
+        }
+        let x = &bn.input[0];
+        let &conv_idx = producer.get(x).ok_or("input is not produced by a node")?;
+        let conv = &nodes[conv_idx];
+        if conv.op_type != "Conv" || !conv.domain.is_empty() {
+            return Err(format!("input comes from {}, not Conv", conv.op_type));
+        }
+        if readers.get(x).copied().unwrap_or(0) != 1 || graph_outputs.contains(x) {
+            return Err("Conv output is used elsewhere".to_string());
+        }
+        if conv.input.len() < 2 {
+            return Err("Conv has no weight input".to_string());
+        }
 
-    let scale: Vec<f32> = (0..out_channels)
-        .map(|c| gamma_v[c] / (var_v[c] + epsilon).sqrt())
-        .collect();
-    let new_weight: Vec<f32> = w
-        .iter()
-        .enumerate()
-        .map(|(i, v)| v * scale[i / per_channel])
-        .collect();
-    let new_bias: Vec<f32> = (0..out_channels)
-        .map(|c| (bias_v[c] - mean_v[c]) * scale[c] + beta_v[c])
-        .collect();
+        let tensor = |name: &str| -> Result<&TensorProto, String> {
+            init_index
+                .get(name)
+                .map(|&i| &inits[i])
+                .ok_or_else(|| format!("'{name}' is not an initializer"))
+        };
+        let unshared = |name: &str| -> Result<(), String> {
+            match readers.get(name).copied().unwrap_or(0) {
+                1 => Ok(()),
+                n => Err(format!("'{name}' is read by {n} nodes")),
+            }
+        };
 
-    let mut dropped_inits = Vec::new();
-    for name in [gamma, mean, var] {
-        unshared(name)?;
-        dropped_inits.push(name.to_string());
+        let weight_name = conv.input[1].clone();
+        let weight = tensor(&weight_name)?;
+        unshared(&weight_name)?;
+        let out_channels = *weight.dims.first().ok_or("Conv weight has no dims")? as usize;
+
+        let [gamma, beta, mean, var] = [1, 2, 3, 4].map(|i| bn.input[i].as_str());
+        let gamma_v = floats(tensor(gamma)?)?;
+        let beta_v = floats(tensor(beta)?)?;
+        let mean_v = floats(tensor(mean)?)?;
+        let var_v = floats(tensor(var)?)?;
+        for (name, v) in [
+            (gamma, &gamma_v),
+            (beta, &beta_v),
+            (mean, &mean_v),
+            (var, &var_v),
+        ] {
+            if v.len() != out_channels {
+                return Err(format!(
+                    "'{name}' has {} values for {out_channels} output channels",
+                    v.len()
+                ));
+            }
+        }
+        let epsilon = bn
+            .attribute
+            .iter()
+            .find(|a| a.name == "epsilon")
+            .map_or(1e-5, |a| a.f);
+
+        let w = floats(weight)?;
+        if w.is_empty() || !w.len().is_multiple_of(out_channels) {
+            return Err("Conv weight size is not a multiple of its output channels".to_string());
+        }
+        let per_channel = w.len() / out_channels;
+
+        let has_bias = conv.input.get(2).is_some_and(|b| !b.is_empty());
+        let (bias_name, bias_v) = if has_bias {
+            let name = conv.input[2].clone();
+            unshared(&name)?;
+            let v = floats(tensor(&name)?)?;
+            if v.len() != out_channels {
+                return Err("Conv bias size does not match its output channels".to_string());
+            }
+            (name, v)
+        } else {
+            // Reuse beta's initializer (already shaped [C]) as the new bias
+            unshared(beta)?;
+            (beta.to_string(), vec![0.0; out_channels])
+        };
+
+        let scale: Vec<f32> = (0..out_channels)
+            .map(|c| gamma_v[c] / (var_v[c] + epsilon).sqrt())
+            .collect();
+        let new_weight: Vec<f32> = w
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v * scale[i / per_channel])
+            .collect();
+        let new_bias: Vec<f32> = (0..out_channels)
+            .map(|c| (bias_v[c] - mean_v[c]) * scale[c] + beta_v[c])
+            .collect();
+
+        let mut dropped_inits = Vec::new();
+        for name in [gamma, mean, var] {
+            unshared(name)?;
+            dropped_inits.push(name.to_string());
+        }
+        if has_bias {
+            unshared(beta)?;
+            dropped_inits.push(beta.to_string());
+        }
+
+        Ok(FoldPlan {
+            conv_idx,
+            weight_name,
+            bias_name,
+            new_weight,
+            new_bias,
+            new_output: bn.output[0].clone(),
+            dropped_inits,
+        })
     }
-    if has_bias {
-        unshared(beta)?;
-        dropped_inits.push(beta.to_string());
-    }
-
-    Ok(FoldPlan {
-        conv_idx,
-        weight_name,
-        bias_name,
-        new_weight,
-        new_bias,
-        new_output: bn.output[0].clone(),
-        dropped_inits,
-    })
 }
 
 /// Values of a FLOAT initializer stored either as `float_data` or little-endian `raw_data`
