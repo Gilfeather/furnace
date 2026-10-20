@@ -2904,7 +2904,7 @@ dependencies = [
 
 [[package]]
 name = "furnace-server"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "axum",
  "burn",
@@ -2924,7 +2924,6 @@ dependencies = [
  "tokio",
  "toml",
  "tower",
- "tower-http",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -6622,23 +6621,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "tower-http"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08a05a66a4fdd61cbbe0a1d755ffe0ca6aba159dd4820936a0ff8a8278245b9c"
-dependencies = [
- "bitflags",
- "bytes",
- "http",
- "http-body",
- "http-body-util",
- "percent-encoding",
- "pin-project-lite",
- "tower-layer",
- "tower-service",
 ]
 
 [[package]]

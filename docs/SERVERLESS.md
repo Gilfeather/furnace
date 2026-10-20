@@ -12,7 +12,7 @@ ResNet-18, from launching the server to its answers, median of 10 runs on the la
 | | Accepting requests | Ready (`/readyz` 200, after the warm-up inference) | First inference answered |
 |---|---|---|---|
 | Furnace binary (`--features "grpc tls"`) | 23 ms | 29 ms | 40 ms |
-| Furnace in Docker (`ghcr.io/gilfeather/furnace:0.9.0`) | 404 ms | 427 ms | 458 ms |
+| Furnace in Docker (`ghcr.io/gilfeather/furnace:0.10.0`) | 404 ms | 427 ms | 458 ms |
 | FastAPI + ONNX Runtime ([PERFORMANCE.md](PERFORMANCE.md)) | | 1,761 ms | |
 
 In Docker almost all the time is Docker's own: a container that only prints `furnace --version`
@@ -28,7 +28,7 @@ Reproduce:
 ```bash
 cargo build --release --manifest-path benches/burn/Cargo.toml
 benches/burn/target/release/furnace-burn-bench cold-start binary ./target/release/furnace --model-name resnet18
-benches/burn/target/release/furnace-burn-bench cold-start docker ghcr.io/gilfeather/furnace:0.9.0
+benches/burn/target/release/furnace-burn-bench cold-start docker ghcr.io/gilfeather/furnace:0.10.0
 ```
 
 The image is 139 MB with ResNet-18's 46 MB of weights; a smaller image pulls faster when a
@@ -56,10 +56,10 @@ Cloud Run starts instances on demand and scales to zero by default. It pulls ima
 Artifact Registry, so copy the image there first:
 
 ```bash
-docker pull ghcr.io/gilfeather/furnace:0.9.0
-docker tag ghcr.io/gilfeather/furnace:0.9.0 REGION-docker.pkg.dev/PROJECT/REPO/furnace:0.9.0
-docker push REGION-docker.pkg.dev/PROJECT/REPO/furnace:0.9.0
-gcloud run deploy furnace --image REGION-docker.pkg.dev/PROJECT/REPO/furnace:0.9.0 \
+docker pull ghcr.io/gilfeather/furnace:0.10.0
+docker tag ghcr.io/gilfeather/furnace:0.10.0 REGION-docker.pkg.dev/PROJECT/REPO/furnace:0.10.0
+docker push REGION-docker.pkg.dev/PROJECT/REPO/furnace:0.10.0
+gcloud run deploy furnace --image REGION-docker.pkg.dev/PROJECT/REPO/furnace:0.10.0 \
   --port 3000 --cpu 2 --memory 512Mi --min-instances 0
 ```
 
@@ -68,7 +68,7 @@ gcloud run deploy furnace --image REGION-docker.pkg.dev/PROJECT/REPO/furnace:0.9
 ```toml
 # fly.toml
 [build]
-  image = "ghcr.io/gilfeather/furnace:0.9.0"
+  image = "ghcr.io/gilfeather/furnace:0.10.0"
 
 [http_service]
   internal_port = 3000

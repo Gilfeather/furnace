@@ -2,11 +2,11 @@
 # Published as `furnace-server` (the `furnace` crate name belongs to another project); the
 # library and the binary are both still called `furnace`.
 name = "furnace-server"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Furnace Contributors"]
-description = "Inference server for Burn models, in pure Rust: serve your own Burn modules or ONNX files over the KServe / Triton protocol"
+description = "Fast, unified, Rust-native, Axum-compatible inference endpoints for Burn models and LLMs: KServe / Triton and OpenAI APIs from one pure-Rust server"
 documentation = "https://docs.rs/furnace-server"
 homepage = "https://github.com/Gilfeather/furnace"
 repository = "https://github.com/Gilfeather/furnace"
