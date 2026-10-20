@@ -34,10 +34,15 @@ struct Ring {
 /// A snapshot for metrics, in microseconds
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LatencySnapshot {
+    /// Measurements so far
     pub count: u64,
+    /// Median of the recent window; `None` before the first measurement
     pub p50_us: Option<f64>,
+    /// 99th percentile of the recent window; `None` before the first measurement
     pub p99_us: Option<f64>,
+    /// Mean of every measurement; `None` before the first
     pub mean_us: Option<f64>,
+    /// Largest measurement so far; `None` before the first
     pub max_us: Option<f64>,
 }
 
@@ -48,6 +53,7 @@ impl Default for LatencyEstimate {
 }
 
 impl LatencyEstimate {
+    /// An estimate with no measurements yet
     pub fn new() -> Self {
         Self {
             recent: Mutex::new(Ring {
@@ -63,6 +69,7 @@ impl LatencyEstimate {
         }
     }
 
+    /// Record one measurement
     pub fn observe(&self, elapsed: Duration) {
         let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
         let count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
@@ -104,14 +111,17 @@ impl LatencyEstimate {
         self.get(&self.p50)
     }
 
+    /// `None` until the first measurement
     pub fn p99(&self) -> Option<Duration> {
         self.get(&self.p99)
     }
 
+    /// Measurements so far
     pub fn count(&self) -> u64 {
         self.count.load(Ordering::Relaxed)
     }
 
+    /// Count, percentiles, mean and max, in microseconds
     pub fn snapshot(&self) -> LatencySnapshot {
         let count = self.count();
         let us = |d: Option<Duration>| d.map(|d| d.as_secs_f64() * 1e6);

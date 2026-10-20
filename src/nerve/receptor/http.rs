@@ -51,6 +51,7 @@ impl Http {
         self
     }
 
+    /// `GET path` instead of `POST`
     pub fn get(mut self) -> Self {
         self.mount.method = HttpMethod::Get;
         self

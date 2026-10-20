@@ -20,13 +20,16 @@ const MAX_BODY: usize = 16 << 20;
 /// A parsed `http://host[:port]/path?query` URL
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Url {
+    /// Host name or address, IPv6 without its brackets
     pub host: String,
+    /// 80 unless the URL gives one
     pub port: u16,
     /// Path and query, starting with `/`
     pub path: String,
 }
 
 impl Url {
+    /// The error names the URL and what is wrong with it (an `https://` URL among them)
     pub fn parse(url: &str) -> Result<Self, String> {
         let rest = url
             .strip_prefix("http://")
@@ -69,12 +72,16 @@ impl Url {
 /// A response with its body collected
 #[derive(Debug)]
 pub struct Response {
+    /// The HTTP status code
     pub status: u16,
+    /// Name and value, in the order received
     pub headers: Vec<(String, String)>,
+    /// The whole body, de-chunked
     pub body: Bytes,
 }
 
 impl Response {
+    /// The first header named `name`, ignoring case
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -93,7 +100,9 @@ enum Framing {
 
 /// A response whose body is still being read, chunk by chunk (an event stream)
 pub struct Streaming {
+    /// The HTTP status code
     pub status: u16,
+    /// Name and value, in the order received
     pub headers: Vec<(String, String)>,
     stream: TcpStream,
     framing: Framing,
@@ -241,6 +250,7 @@ impl Default for Client {
 }
 
 impl Client {
+    /// An empty pool, with `timeout` per request
     pub fn new(timeout: Duration) -> Self {
         Self {
             pool: Mutex::new(HashMap::new()),

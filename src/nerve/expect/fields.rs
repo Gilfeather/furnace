@@ -18,7 +18,9 @@ pub enum Extraction {
     /// Text as a log line, a JSON body as JSON: whatever the payload is
     #[default]
     Auto,
+    /// Always as a log line
     LogLines,
+    /// As JSON, text included; as a log line if it is not a JSON object
     Json,
 }
 
@@ -27,13 +29,16 @@ pub enum Extraction {
 pub struct Observation {
     /// The template's key ([`template_key`] of [`Observation::template_text`])
     pub template: Option<u64>,
+    /// The template as text
     pub template_text: Option<String>,
+    /// The named fields
     pub fields: Map<String, Value>,
     /// The line, or the body as text, for the brain's context
     pub text: Option<String>,
 }
 
 impl Observation {
+    /// The field `name`
     pub fn field(&self, name: &str) -> Option<&Value> {
         self.fields.get(name)
     }

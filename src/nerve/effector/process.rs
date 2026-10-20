@@ -26,6 +26,7 @@ pub struct Process {
 }
 
 impl Process {
+    /// Run `program`, with no fixed arguments and a 30 s timeout
     pub fn new(name: &str, program: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -36,11 +37,13 @@ impl Process {
         }
     }
 
+    /// Fixed arguments, before any the command adds
     pub fn args(mut self, args: &[&str]) -> Self {
         self.base_args = args.iter().map(|a| a.to_string()).collect();
         self
     }
 
+    /// Bound on each run, stdin included; a run that outlasts it is killed and retried
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self

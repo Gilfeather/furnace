@@ -52,7 +52,9 @@ pub struct Summation {
     /// How long after the first signal the worker waits for more; `None` learns it from the
     /// pathway's latency (an eighth of the p50, within the bounds below)
     pub window: Option<Duration>,
+    /// Lower bound of a learned window
     pub min_window: Duration,
+    /// Upper bound of a learned window
     pub max_window: Duration,
     /// Signals waiting at once; beyond it, new ones are dropped (and counted) rather than
     /// queued without bound
@@ -90,21 +92,25 @@ impl Summation {
         }
     }
 
+    /// Sum at most `n` signals into one firing; at least 1
     pub fn max_batch(mut self, n: usize) -> Self {
         self.max_batch = n.max(1);
         self
     }
 
+    /// A fixed summation window instead of a learned one
     pub fn window(mut self, window: Duration) -> Self {
         self.window = Some(window);
         self
     }
 
+    /// Signals waiting at once before new ones are dropped; at least 1
     pub fn capacity(mut self, n: usize) -> Self {
         self.capacity = n.max(1);
         self
     }
 
+    /// Firings that may run at the same time; at least 1
     pub fn workers(mut self, n: usize) -> Self {
         self.workers = n.max(1);
         self
@@ -119,9 +125,13 @@ impl Summation {
 
 /// A directed connection from one neuron to the next, with a measured latency
 pub struct Pathway {
+    /// Its index in the fabric
     pub id: PathwayId,
+    /// The neuron that fires into it
     pub from: NeuronId,
+    /// The neuron it stimulates
     pub to: NeuronId,
+    /// Direct call or queue
     pub kind: PathwayKind,
     /// Priority among eligible pathways from the same neuron
     pub weight: f32,
@@ -139,6 +149,7 @@ pub struct Pathway {
 }
 
 impl Pathway {
+    /// Signal-in to signal-out on this hop, measured
     pub fn latency(&self) -> &LatencyEstimate {
         &self.latency
     }
@@ -299,6 +310,7 @@ impl Default for FabricBuilder {
 }
 
 impl FabricBuilder {
+    /// An empty builder
     pub fn new() -> Self {
         Self {
             neurons: Vec::new(),
@@ -485,6 +497,7 @@ impl FabricBuilder {
 }
 
 impl Fabric {
+    /// An empty [`FabricBuilder`]
     pub fn builder() -> FabricBuilder {
         FabricBuilder::new()
     }
@@ -510,14 +523,17 @@ impl Fabric {
         self.0.by_name.get(name).copied()
     }
 
+    /// A neuron's name
     pub fn name(&self, id: NeuronId) -> &str {
         self.0.cells[id.index()].neuron.name()
     }
 
+    /// A neuron's kind
     pub fn kind(&self, id: NeuronId) -> NeuronKind {
         self.0.cells[id.index()].kind
     }
 
+    /// Every neuron, by id
     pub fn neurons(&self) -> impl Iterator<Item = (NeuronId, &dyn Neuron)> {
         self.0
             .cells
@@ -526,6 +542,7 @@ impl Fabric {
             .map(|(i, c)| (NeuronId(i as u32), &*c.neuron))
     }
 
+    /// Every pathway, by id
     pub fn pathways(&self) -> &[Pathway] {
         &self.0.pathways
     }

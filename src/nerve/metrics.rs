@@ -27,21 +27,34 @@ pub struct NerveMetrics {
     pub no_eligible_pathway: u64,
     /// Signals waiting in deliberative queues now
     pub waiting: u64,
+    /// Each neuron's counters, by id
     pub neurons: Vec<NeuronMetrics>,
+    /// Each pathway's counters and latency, by id
     pub pathways: Vec<PathwayMetrics>,
     /// Stimulus-to-action latency of each reflex arc (receptor → effector, never queued)
     pub arcs: Vec<ArcMetrics>,
 }
 
+/// One neuron's counters (in `GET /metrics` and `GET /nerve`)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NeuronMetrics {
+    /// The neuron's name
     pub name: String,
+    /// What kind of neuron
     pub kind: NeuronKind,
+    /// Signals that reached the neuron's gate
     pub received: u64,
+    /// Times the neuron fired
     pub fired: u64,
+    /// Signals below the threshold as they arrived
     pub quiet_by_threshold: u64,
+    /// Signals attenuated below the threshold by habituation
     pub quiet_by_habituation: u64,
+    /// Signals ignored because the neuron fired too recently
     pub quiet_by_refractory: u64,
+    /// Signals that passed the gate but the neuron was not interested in (`Firing::Quiet`):
+    /// the fourth reason next to the `quiet_by_*` ones, not a total of quiet signals
+    /// (`reason="not_interested"` in Prometheus)
     pub quiet: u64,
     /// Blocking computations run (`Firing::Compute`)
     pub computed: u64,
@@ -50,53 +63,76 @@ pub struct NeuronMetrics {
     pub extra: serde_json::Value,
 }
 
+/// One pathway's counters and latency (in `GET /metrics` and `GET /nerve`)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PathwayMetrics {
+    /// The name of the neuron that fires into it
     pub from: String,
+    /// The name of the neuron it stimulates
     pub to: String,
+    /// Reflex or deliberative
     pub kind: PathwayKind,
+    /// Priority among eligible pathways from the same neuron
     pub weight: f32,
+    /// Signals that took the pathway
     pub signals: u64,
+    /// Signals that could not take it: too slow for their deadline
     pub ineligible: u64,
+    /// Signals dropped because the queue was full
     pub overflow: u64,
+    /// Signal-in to signal-out on this hop
     pub latency: LatencySnapshot,
     /// The summation window a deliberative pathway waits now
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_us: Option<f64>,
 }
 
+/// Stimulus-to-action latency of one reflex arc
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ArcMetrics {
     /// The receptor
     pub from: String,
     /// The effector
     pub to: String,
+    /// Stimulus-to-action, from the receptor's stimulus to the effector
     pub latency: LatencySnapshot,
 }
 
 /// `GET /nerve`: the neurons, their mechanisms, the pathways and the measured latencies
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Description {
+    /// Each neuron with its mechanisms and counters, by id
     pub neurons: Vec<NeuronDescription>,
+    /// Each pathway's counters and latency, by id
     pub pathways: Vec<PathwayMetrics>,
+    /// Stimulus-to-action latency of each reflex arc
     pub arcs: Vec<ArcMetrics>,
+    /// Signals that reached a brain over signals received
     pub brain_fraction: f64,
 }
 
+/// One neuron in `GET /nerve`
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NeuronDescription {
+    /// Its index in the fabric
     pub id: NeuronId,
+    /// The neuron's name
     pub name: String,
+    /// What kind of neuron
     pub kind: NeuronKind,
+    /// Its threshold, habituation and refractory period
     pub mechanisms: serde_json::Value,
     /// Ids of the pathways leaving it
     pub out: Vec<usize>,
+    /// The same counters as in `GET /metrics`
     pub counters: NeuronMetrics,
+    /// Whatever the neuron adds about itself ([`Neuron::describe`](super::Neuron::describe))
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub describe: serde_json::Value,
 }
 
 impl Fabric {
+    /// The fabric's counters, pathways and arcs, for `GET /metrics`
     pub fn metrics(&self) -> NerveMetrics {
         let inner = &self.0;
         NerveMetrics {
@@ -114,6 +150,7 @@ impl Fabric {
         }
     }
 
+    /// Neurons, mechanisms, pathways and latencies, for `GET /nerve`
     pub fn describe(&self) -> Description {
         let inner = &self.0;
         Description {

@@ -19,6 +19,7 @@ pub struct Retry {
     pub attempts: u32,
     /// Wait before the second try; doubles each time
     pub backoff: Duration,
+    /// Ceiling on the doubled wait
     pub max_backoff: Duration,
 }
 
@@ -54,12 +55,16 @@ impl Default for Breaker {
 /// have to wait longer than `max_wait` for a token is dropped
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RateLimit {
+    /// Sustained commands a second
     pub per_second: f64,
+    /// Commands at once: the bucket's size
     pub burst: u32,
+    /// Longest a command waits for a token before it is dropped
     pub max_wait: Duration,
 }
 
 impl RateLimit {
+    /// `per_second` sustained, `burst` at once, waiting at most 1 s for a token
     pub fn new(per_second: f64, burst: u32) -> Self {
         Self {
             per_second: per_second.max(1e-6),
@@ -68,17 +73,22 @@ impl RateLimit {
         }
     }
 
+    /// Wait at most this long for a token, then drop the command
     pub fn max_wait(mut self, max_wait: Duration) -> Self {
         self.max_wait = max_wait;
         self
     }
 }
 
+/// Where a circuit breaker stands
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BreakerState {
+    /// Commands go through
     Closed,
+    /// Commands are dropped until the cooldown ends
     Open,
+    /// Cooldown over: one trial command decides whether it closes or opens again
     HalfOpen,
 }
 

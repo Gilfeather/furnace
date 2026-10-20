@@ -73,6 +73,8 @@
 //! See [docs/NERVE.md](https://github.com/Gilfeather/furnace/blob/main/docs/NERVE.md) for
 //! the concepts, the demo and the measurements.
 
+#![warn(missing_docs)]
+
 pub mod brain;
 pub mod consolidation;
 pub mod effector;

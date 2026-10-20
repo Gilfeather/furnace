@@ -25,6 +25,7 @@ pub enum NeuronKind {
 }
 
 impl NeuronKind {
+    /// The name in JSON and in the Prometheus `kind` label
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Receptor => "receptor",
@@ -53,10 +54,12 @@ impl Firing {
         Self::Fire(vec![signal])
     }
 
+    /// Blocking work to run where the pathway says
     pub fn compute(work: impl FnOnce() -> Vec<Signal> + Send + 'static) -> Self {
         Self::Compute(Box::new(work))
     }
 
+    /// Whether the neuron was not interested
     pub fn is_quiet(&self) -> bool {
         matches!(self, Self::Quiet)
     }
@@ -102,8 +105,10 @@ impl Cx<'_> {
 /// (threshold, habituation, refractory) runs before `stimulate`, so a neuron only sees the
 /// signals that got through.
 pub trait Neuron: Send + Sync + 'static {
+    /// Unique in the fabric: effectors are addressed by it in commands
     fn name(&self) -> &str;
 
+    /// What kind of neuron this is; a reflex unless overridden
     fn kind(&self) -> NeuronKind {
         NeuronKind::Reflex
     }
@@ -161,6 +166,7 @@ where
         }
     }
 
+    /// The same neuron as another kind (a brain, an effector)
     pub fn with_kind(mut self, kind: NeuronKind) -> Self {
         self.kind = kind;
         self
@@ -209,6 +215,7 @@ impl Default for Habituation {
 }
 
 impl Habituation {
+    /// Habituation recovering with time constant `tau`, the default gain and capacity
     pub fn new(tau: Duration) -> Self {
         Self {
             tau,
@@ -216,6 +223,7 @@ impl Habituation {
         }
     }
 
+    /// Attenuation per repeat, clamped to 0..=1
     pub fn gain(mut self, gain: f32) -> Self {
         self.gain = gain.clamp(0.0, 1.0);
         self
@@ -233,6 +241,7 @@ impl Habituation {
 pub struct Mechanisms {
     /// Fires only if `intensity >= threshold`; 0 lets everything through
     pub threshold: f32,
+    /// Attenuation of repeated features; `None` never habituates
     pub habituation: Option<Habituation>,
     /// After firing, ignore signals for this long
     pub refractory: Option<Duration>,
@@ -252,16 +261,19 @@ impl Mechanisms {
         refractory: None,
     };
 
+    /// Fire only at or above this intensity
     pub fn threshold(mut self, threshold: f32) -> Self {
         self.threshold = threshold;
         self
     }
 
+    /// Attenuate repeated features
     pub fn habituation(mut self, habituation: Habituation) -> Self {
         self.habituation = Some(habituation);
         self
     }
 
+    /// Ignore signals for `period` after firing
     pub fn refractory(mut self, period: Duration) -> Self {
         self.refractory = Some(period);
         self
@@ -283,6 +295,7 @@ pub enum Quiet {
 }
 
 impl Quiet {
+    /// The name in JSON and in the Prometheus `reason` label
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Threshold => "threshold",

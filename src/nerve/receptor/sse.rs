@@ -19,6 +19,8 @@ pub struct Sse {
 }
 
 impl Sse {
+    /// Follow `url`, a plain `http://host[:port]/path` (no HTTPS); a URL of another form is
+    /// logged when the receptor starts, and nothing is read
     pub fn new(name: &str, url: &str) -> Self {
         Self {
             source: Source::new(name),
@@ -27,6 +29,7 @@ impl Sse {
         }
     }
 
+    /// How each event's urgency is stamped
     pub fn urgency(mut self, rule: UrgencyRule) -> Self {
         self.source.rule = rule;
         self
