@@ -40,4 +40,6 @@ That is how to roll out fine-tuned weights through KServe without rebuilding the
 Both manifests are tested in CI ([`kserve-e2e.yml`](../.github/workflows/kserve-e2e.yml)): on a
 kind cluster with KServe v0.21 in standard (RawDeployment) mode, the published image serves
 ResNet-18 with weights fetched by KServe's storage initializer, and answers a v2 inference
-request with 1000 logits.
+request with 1000 logits. The workflow runs on pull requests that touch `deploy/kserve`, against
+the released image the manifests name; to test another build, run it by hand (Actions → KServe
+end-to-end → Run workflow) with `image` set to an image the cluster can pull.

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Furnace in a small container: the server binary and its weights on a distroless base image.
 #
 #   docker build -t furnace .                        # compiles every models/*.onnx in
@@ -17,12 +18,21 @@ WORKDIR /src
 COPY . .
 ARG FEATURES="grpc tls"
 ARG MODELS_DIR=models
-RUN set -eu; \
+# The registry and target/ live in BuildKit cache mounts, so a rebuild after a source change
+# recompiles furnace only, not Burn, rustls and tonic. The weights are copied from the out
+# directory of this build's build script, which Cargo reports: target/ may hold others from
+# earlier builds with other features.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    set -eu; \
     FURNACE_MODELS_DIR="/src/${MODELS_DIR}" \
-        cargo build --release --locked --bin furnace ${FEATURES:+--features "$FEATURES"}; \
+        cargo build --release --locked --bin furnace ${FEATURES:+--features "$FEATURES"} \
+        --message-format=json-render-diagnostics > /tmp/build.json; \
+    out=$(grep '"reason":"build-script-executed"' /tmp/build.json | grep '#furnace-server@' \
+        | sed 's/.*"out_dir":"\([^"]*\)".*/\1/'); \
     mkdir -p /out; \
     cp target/release/furnace /out/; \
-    for f in target/release/build/furnace-server-*/out/models/*.bpk; do \
+    for f in "$out"/models/*.bpk; do \
         if [ -e "$f" ]; then cp "$f" /out/; fi; \
     done; \
     ls -l /out

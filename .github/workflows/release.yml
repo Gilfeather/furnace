@@ -90,8 +90,9 @@ jobs:
       uses: actions/checkout@v5
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
       with:
+        toolchain: stable
         targets: ${{ matrix.target }}
 
     - name: Install musl tools
@@ -112,7 +113,7 @@ jobs:
         curl -fsSL "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
 
     - name: Build release binary
-      run: cargo build --release --target ${{ matrix.target }} --features "grpc tls"
+      run: cargo build --release --locked --target ${{ matrix.target }} --features "grpc tls"
 
     - name: Rename binary
       shell: bash
@@ -225,7 +226,9 @@ jobs:
       uses: actions/checkout@v5
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: stable
 
     - name: Authenticate with crates.io
       id: auth
