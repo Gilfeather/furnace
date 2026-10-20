@@ -14,7 +14,7 @@ The same API as an OpenAPI 3 spec: [openapi.json](openapi.json).
 | `POST /admin/models/{model}/reload` | Reload a model without downtime (with `--admin-token`) |
 | `/v2/...` | Inference over the KServe / Triton Open Inference Protocol, for every model, by named tensors |
 | `/v1/chat/completions`, `/v1/completions`, `/v1/models` | LLMs in the OpenAI format (`--features llm`, [LLM.md](LLM.md)) |
-| `GET /nerve`, `GET /nerve/effectors/{name}/events`, the fabric's own routes | The nervous system (`--features nerve`, [NERVE.md](NERVE.md)): its description with measured latencies, an SSE effector's commands, and each HTTP receptor's route |
+| `GET /nerve`, `GET /nerve/effectors/{name}/events`, the fabric's own routes | The nervous system ([NERVE.md](NERVE.md)), which every route above runs on: its description with measured latencies, an SSE effector's commands, and each HTTP receptor's route |
 
 ## `GET /healthz` (alias `GET /health`)
 
@@ -211,8 +211,13 @@ Each request is validated on its own, so a bad one (wrong size, NaN) gets its ow
 others in its batch are unaffected. `inference_time_ms` includes time spent in the queue.
 Queued requests hold one of the `--max-concurrent-requests` slots, and `--request-timeout-ms`
 covers queueing and inference; a request that times out while queued is dropped from its
-batch. The same engine, with one worker and a learned window, sums the signals of a
-deliberative pathway in the nervous system (see [NERVE.md](NERVE.md)).
+batch. A model's batching is its deliberative pathway in the nervous system: the same engine,
+with one worker and a learned window, sums the signals of your own pathways (see
+[NERVE.md](NERVE.md#the-server-runs-on-it)).
+
+A batch size that a graph exported for a fixed batch cannot run is the client's error, `400`,
+on every route; a model whose forward pass panics answers `500 INFERENCE_FAILED` and goes on
+serving (where panics unwind; furnace's release builds abort).
 
 With batching off, every request runs its own pass on a blocking thread, and up to
 `--max-concurrent-requests` of them run side by side, competing for the cores, as in a
@@ -359,6 +364,8 @@ another model path for a `--model-path` model; the path is read on the server.
 With the `llm` feature, `POST /v1/chat/completions`, `POST /v1/completions` and
 `GET /v1/models` serve LLMs in the OpenAI format, streaming included, next to the routes above.
 Their requests, streaming format, errors and metrics are in [LLM.md](LLM.md).
+`--request-timeout-ms` covers them too: a whole answer that takes longer is a `504`, and a
+stream whose model sends nothing for that long ends with an error payload and `[DONE]`.
 
 ## TLS
 

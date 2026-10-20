@@ -5,9 +5,9 @@
 //! events die of habituation at the receptor and never reach anything.
 //!
 //! ```bash
-//! cargo run --release --features nerve,llm --example nerve
+//! cargo run --release --features llm --example nerve
 //! # Keep serving after the demo stream, to poke at it with curl:
-//! cargo run --release --features nerve,llm --example nerve -- --serve
+//! cargo run --release --features llm --example nerve -- --serve
 //! curl -X POST localhost:3000/events -d 'ALERT: smoke in rack 4'
 //! curl -X POST localhost:3000/events -d 'door 7 opened'
 //! curl localhost:3000/nerve | jq .
