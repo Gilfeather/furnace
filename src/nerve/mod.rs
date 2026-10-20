@@ -62,6 +62,7 @@
 //! the concepts, the demo and the measurements.
 
 pub mod brain;
+pub mod consolidation;
 pub mod effector;
 mod fabric;
 pub(crate) mod http;
