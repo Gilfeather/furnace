@@ -310,5 +310,4 @@ means the same thing in every table:
   `benches/compare` killed it without `SIGTERM`, and `benches/compare` left FastAPI's
   interpreter running on Windows.
 
-Tables above measured before the change are within the laptop's ±10% of what the shared
-definitions give.
+The tables above were measured with the earlier definitions.
