@@ -590,7 +590,7 @@ impl Fabric {
         signal.origin = receptor;
         self.0.received.fetch_add(1, Ordering::Relaxed);
         let mut announced = announced;
-        self.drive(receptor, signal, 0, &mut announced)
+        self.drive(receptor, signal, 0, &mut announced, Instant::now())
     }
 
     /// [`Fabric::stimulate`] by the receptor's name
@@ -598,16 +598,17 @@ impl Fabric {
         Some(self.stimulate(self.neuron(receptor)?, signal))
     }
 
-    /// Run `id`'s gate and `stimulate`, then propagate what it fires
+    /// Run `id`'s gate and `stimulate`, then propagate what it fires; `now` is when the
+    /// signal arrived, which the caller has read already
     fn drive(
         &self,
         id: NeuronId,
         mut signal: Signal,
         depth: usize,
         announced: &mut Option<Announced<'_>>,
+        now: Instant,
     ) -> Outcome {
         let cell = &self.0.cells[id.index()];
-        let now = Instant::now();
         let nanos = self.nanos(now);
         cell.counters.received.fetch_add(1, Ordering::Relaxed);
         if let Err(reason) = cell.gate.admit(&mut signal, nanos) {
@@ -718,7 +719,7 @@ impl Fabric {
                         Some(pathway) => Some(pathway),
                         None => {
                             self.0.commands_direct.fetch_add(1, Ordering::Relaxed);
-                            return self.drive(target, signal, depth, announced);
+                            return self.drive(target, signal, depth, announced, now);
                         }
                     }
                 }
@@ -751,7 +752,7 @@ impl Fabric {
         pathway.signals.fetch_add(1, Ordering::Relaxed);
         match &pathway.queue {
             None => {
-                let outcome = self.drive(pathway.to, signal, depth, announced);
+                let outcome = self.drive(pathway.to, signal, depth, announced, now);
                 pathway.latency.observe(now.elapsed());
                 outcome
             }

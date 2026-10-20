@@ -74,12 +74,21 @@ impl LatencyEstimate {
         ring.next = (next + 1) % WINDOW;
         ring.len = (ring.len + 1).min(WINDOW);
         if count <= 4 || count.is_multiple_of(EVERY) {
-            let mut sorted = ring.samples[..ring.len].to_vec();
+            // On the stack, and only the two order statistics: no allocation, no full sort
+            let len = ring.len;
+            let mut samples = ring.samples;
             drop(ring);
-            sorted.sort_unstable();
-            let at = |q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
-            self.p50.store(at(0.50), Ordering::Relaxed);
-            self.p99.store(at(0.99), Ordering::Relaxed);
+            let samples = &mut samples[..len];
+            let rank = |q: f64| ((len - 1) as f64 * q).round() as usize;
+            let (p50, p99) = (rank(0.50), rank(0.99));
+            let (below, &mut at_p99, _) = samples.select_nth_unstable(p99);
+            let at_p50 = if p50 == p99 {
+                at_p99
+            } else {
+                *below.select_nth_unstable(p50).1
+            };
+            self.p50.store(at_p50, Ordering::Relaxed);
+            self.p99.store(at_p99, Ordering::Relaxed);
         }
     }
 

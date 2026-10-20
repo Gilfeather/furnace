@@ -16,6 +16,7 @@
 //! reaches the effector registered as `alarm`. A plain (non-command) signal that reaches an
 //! effector acts with the signal's payload as its arguments.
 
+use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -208,6 +209,8 @@ pub struct EffectorMetrics {
 
 struct Inner {
     act: Box<dyn Act>,
+    /// The command a plain signal with no JSON payload (tensors, nothing) acts as
+    plain: Command,
     retry: Retry,
     breaker: Breaker,
     rate: Option<RateLimit>,
@@ -218,7 +221,6 @@ struct Inner {
     state: Mutex<LoopState>,
     counters: Counters,
     latency: LatencyEstimate,
-    runtime: OnceLock<tokio::runtime::Handle>,
 }
 
 /// An [`Act`] with its local loop: retry with backoff, circuit breaker, rate limit,
@@ -234,9 +236,11 @@ impl Effector {
     /// in a row for 10 s, no rate limit, no refractory period
     pub fn new(act: impl Act) -> Self {
         let now = Instant::now();
+        let plain = Command::new(act.name(), serde_json::Value::Null);
         Self {
             inner: Arc::new(Inner {
                 act: Box::new(act),
+                plain,
                 retry: Retry::default(),
                 breaker: Breaker::default(),
                 rate: None,
@@ -252,7 +256,6 @@ impl Effector {
                 }),
                 counters: Counters::default(),
                 latency: LatencyEstimate::new(),
-                runtime: OnceLock::new(),
             }),
         }
     }
@@ -491,26 +494,27 @@ impl Neuron for Effector {
 
     fn stimulate(&self, signal: Signal, cx: &Cx<'_>) -> Firing {
         let inner = &self.inner;
-        let _ = inner.runtime.set(cx.efferent().clone());
         let delay = match inner.admit(cx.now) {
             Admission::After(delay) => delay,
             Admission::Refractory | Admission::Open | Admission::RateLimited => {
                 return Firing::Quiet;
             }
         };
+        // Borrowed unless a plain signal's payload has to become JSON arguments; owned only
+        // for the motor side's runtime
         let command = match signal.payload.as_command() {
-            Some(command) => command.clone(),
+            Some(command) => Cow::Borrowed(command),
             // A plain signal: the payload is the argument
-            None => Command::new(
-                self.name(),
-                signal.payload.to_json().unwrap_or(serde_json::Value::Null),
-            ),
+            None => match signal.payload.to_json() {
+                Some(args) => Cow::Owned(Command::new(self.name(), args)),
+                None => Cow::Borrowed(&inner.plain),
+            },
         };
         let started = cx.now;
         let spawn = |pending: Option<ActFuture>, attempt: u32, delay: Duration| {
             cx.efferent().spawn(run(
                 self.inner.clone(),
-                command.clone(),
+                command.clone().into_owned(),
                 signal.clone(),
                 pending,
                 attempt,
