@@ -90,6 +90,14 @@ aliases before 1.0. Renames are listed as old name -> new name.
   message renders each surprise with its context and the expectations installed for its template,
   asking for the verdict a shadow check or a false alarm needs. `SYSTEM_PROMPT` and
   `surprise_prompt` are public.
+- `Expectations::react(signal, now)` and `Expect::act_at(command, signal, now)`: the
+  expectations neuron and the `expect` effector at a time of the caller's, for replays.
+  `Expectation::param` is public.
+- benches/nerve: `expect-nab` (the Numenta Anomaly Benchmark, scored with NAB's method
+  reimplemented and checked against the published `numenta` scores) and `expect-bgl` (Loghub's
+  BGL log against a brain on every line and habituation alone, replayed in log time and live,
+  optionally with a GGUF brain), with `fetch-data.sh` for the datasets
+  ([NERVE.md](docs/NERVE.md#measured-on-public-data)).
 
 ### Changed
 - `/predict`, v2 over HTTP and v2 over gRPC share one inference path: the concurrency slot,
@@ -168,6 +176,8 @@ aliases before 1.0. Renames are listed as old name -> new name.
   codes disagreed with the ones the routes send.
 
 ### Fixed
+- The `expect` effector's budget of writes per minute counts accepted writes only: counting
+  refused ones let a brain that retried on every surprise lock itself out.
 - An ONNX file named after a reserved Rust keyword (`final.onnx`, `override.onnx`, ...)
   generates `model_final` instead of a module that does not compile.
 - A batch size a fixed-batch graph cannot run is a `400` on `/predict` too (was `500` with a

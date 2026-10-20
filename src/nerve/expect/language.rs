@@ -339,7 +339,7 @@ impl Expectation {
     }
 
     /// A parameter's value, for learning and for `GET /nerve`
-    pub(crate) fn param(&self, name: &str) -> Option<f64> {
+    pub fn param(&self, name: &str) -> Option<f64> {
         Some(match (&self.kind, name) {
             (Kind::Rate { min, .. }, "min") => *min as f64,
             (Kind::Rate { max, .. }, "max") => *max as f64,

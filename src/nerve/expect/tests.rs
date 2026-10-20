@@ -369,14 +369,15 @@ fn the_budgets_and_the_approval_mode() {
         x.write(Write::Add(e(id)), None, true, now).unwrap();
     }
     assert!(x.write(Write::Add(e("c")), None, true, now).is_err(), "max");
-    // Every write counts against the budget, refused ones too
+    // A refused write does not count: replacing one is not a new one, and is the third
+    assert!(x.write(Write::Add(e("a")), None, true, now).is_ok());
     assert!(
-        x.write(Write::Add(e("a")), None, true, now).is_err(),
+        x.write(Write::Add(e("b")), None, true, now).is_err(),
         "per minute"
     );
-    // A minute later; replacing one is not a new one
+    // A minute later
     assert!(
-        x.write(Write::Add(e("a")), None, true, now + 61 * SECOND)
+        x.write(Write::Add(e("b")), None, true, now + 61 * SECOND)
             .is_ok()
     );
 

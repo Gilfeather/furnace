@@ -682,7 +682,6 @@ impl Expectations {
                 if state.writes.len() >= config.writes_per_minute {
                     return Err(Refused("over the budget of writes per minute".into()));
                 }
-                state.writes.push_back(now);
             }
             match write {
                 Write::Retire(id) => {
@@ -715,8 +714,12 @@ impl Expectations {
                 }
             }
         })();
-        if result.is_err() {
-            state.counts.refused += 1;
+        // Only accepted writes count against the budget: a brain retrying refused ones on
+        // every surprise would otherwise keep itself locked out
+        match &result {
+            Ok(()) if from_brain => state.writes.push_back(now),
+            Ok(()) => {}
+            Err(_) => state.counts.refused += 1,
         }
         result
     }
@@ -1104,6 +1107,52 @@ impl Expectations {
         Ok(())
     }
 
+    /// What this neuron fires for `signal` seen at `now`: the rule's commands for a signal
+    /// that fits (and a shadow check when one is due), or the surprise. [`Neuron::stimulate`]
+    /// is this at the fabric's clock; a replay calls it with times of its own, as [`Self::due`].
+    pub fn react(&self, signal: Signal, now: Instant) -> Vec<Signal> {
+        // An absence the timer raised: on to the brain
+        if signal.feature.kind == ABSENCE {
+            return vec![signal];
+        }
+        let (verdict, observation, context, current) = self.take(&signal, now);
+        let surprise = |reason, broken, absorbed_by| Surprise {
+            reason,
+            at: self.0.name.clone(),
+            broken,
+            absorbed_by,
+            observation: observation.to_json(),
+            context: context.clone(),
+            expectations: current.clone(),
+        };
+        match verdict {
+            Verdict::Absorbed(commands, check) => {
+                let mut fired: Vec<Signal> = commands
+                    .into_iter()
+                    .map(|c| signal.derive(Payload::command(c)))
+                    .collect();
+                if let Some(id) = check {
+                    let mut shadow = signal.derive(Payload::json(
+                        serde_json::json!({"surprise": surprise(Reason::Shadow, Vec::new(), Some(id))}),
+                    ));
+                    shadow.reply = None;
+                    fired.push(shadow);
+                }
+                fired
+            }
+            Verdict::Surprise(reason, broken, commands) => {
+                let mut fired: Vec<Signal> = commands
+                    .into_iter()
+                    .map(|c| signal.derive(Payload::command(c)))
+                    .collect();
+                fired.push(signal.derive(Payload::json(
+                    serde_json::json!({"surprise": surprise(reason, broken, None)}),
+                )));
+                fired
+            }
+        }
+    }
+
     /// The counters now
     pub fn snapshot(&self) -> ExpectMetrics {
         let state = self.lock();
@@ -1170,46 +1219,7 @@ impl Neuron for Expectations {
     }
 
     fn stimulate(&self, signal: Signal, cx: &Cx<'_>) -> Firing {
-        // An absence the timer raised: on to the brain
-        if signal.feature.kind == ABSENCE {
-            return Firing::one(signal);
-        }
-        let (verdict, observation, context, current) = self.take(&signal, cx.now);
-        let surprise = |reason, broken, absorbed_by| Surprise {
-            reason,
-            at: self.0.name.clone(),
-            broken,
-            absorbed_by,
-            observation: observation.to_json(),
-            context: context.clone(),
-            expectations: current.clone(),
-        };
-        match verdict {
-            Verdict::Absorbed(commands, check) => {
-                let mut fired: Vec<Signal> = commands
-                    .into_iter()
-                    .map(|c| signal.derive(Payload::command(c)))
-                    .collect();
-                if let Some(id) = check {
-                    let mut shadow = signal.derive(Payload::json(
-                        serde_json::json!({"surprise": surprise(Reason::Shadow, Vec::new(), Some(id))}),
-                    ));
-                    shadow.reply = None;
-                    fired.push(shadow);
-                }
-                Firing::Fire(fired)
-            }
-            Verdict::Surprise(reason, broken, commands) => {
-                let mut fired: Vec<Signal> = commands
-                    .into_iter()
-                    .map(|c| signal.derive(Payload::command(c)))
-                    .collect();
-                fired.push(signal.derive(Payload::json(
-                    serde_json::json!({"surprise": surprise(reason, broken, None)}),
-                )));
-                Firing::Fire(fired)
-            }
-        }
+        Firing::Fire(self.react(signal, cx.now))
     }
 
     fn describe(&self) -> Value {
@@ -1296,14 +1306,10 @@ fn list(value: Option<&Value>) -> Vec<&Value> {
     }
 }
 
-impl Act for Expect {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn act(&self, command: &Command, signal: &Signal) -> Action {
+impl Expect {
+    /// [`Act::act`] at `now`: what a replay calls, with times of its own
+    pub fn act_at(&self, command: &Command, signal: &Signal, now: Instant) -> Action {
         let args = &command.args;
-        let now = Instant::now();
         let e = &self.expectations;
         let mut errors: Vec<String> = Vec::new();
         if args.get("approve").is_some() {
@@ -1347,6 +1353,16 @@ impl Act for Expect {
         } else {
             Action::Done(Err(ActError::fatal(errors.join("; "))))
         }
+    }
+}
+
+impl Act for Expect {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn act(&self, command: &Command, signal: &Signal) -> Action {
+        self.act_at(command, signal, Instant::now())
     }
 
     fn describe(&self) -> Value {

@@ -597,7 +597,8 @@ once per silence; the next match arms it again.
   "absorb everything": an absorbing rule must name a template or fields, at least as
   specifically as the surprise it answers (no wildcard absorb); a rule's commands only reach
   the effectors in `ExpectConfig::effectors`; at most `max` (256) rules and `writes_per_minute`
-  (60) writes, refused ones included; with `approval`, new absorbing rules from the brain wait
+  (60) accepted writes (a refused write does not count, or a brain retrying on every surprise
+  would lock itself out); with `approval`, new absorbing rules from the brain wait
   for `Expectations::approve`, which is the operator's and not a command.
 - **Forgetting.** A rule not matched for its `ttl_s` (or an hour) expires; rules that declare
   `depends_on` retire when that state changes (`Expectations::changed`, or `{"changed": [...]}`).
@@ -638,6 +639,97 @@ dropout was one absence, nothing normal was paged, and the brain was called for 
 21 checks of young rules and a 1% sample of the rest: about 110 calls, 1.6% of the stream. This
 checks the mechanism; it measures nothing about an LLM writing the rules, which is the next
 step (the LLM adapter), nor about real logs.
+
+### Measured on public data
+
+[`benches/nerve`](../benches/nerve) runs expectations on two labelled public datasets, which
+`benches/nerve/fetch-data.sh DIR` downloads (they are not in the repository): Loghub's BGL log
+and the Numenta Anomaly Benchmark. One run per condition, Windows 11, a mock LLM as the brain
+unless said otherwise. The runs were stopped before everything was measured again after the
+fixes below; what was not measured is said so.
+
+```bash
+bash benches/nerve/fetch-data.sh DIR
+cd benches/nerve && cargo build --release
+target/release/furnace-nerve-bench expect-nab --data DIR
+target/release/furnace-nerve-bench expect-bgl --data DIR [--gguf model.gguf]
+```
+
+**NAB** (58 series, 365,558 rows, 116 labelled windows). The detector is an `Expectations`
+neuron per series with a scripted brain: a `range` on the value and one on its change, both
+`learn`ing, and an `every` at the sampling interval. During NAB's probationary period (the
+first 15%) the brain answers every violation `normal`, so the ranges learn the envelope; then it
+narrows what may still be learned to half the envelope's width, and after that a violation pages
+unless it paged within a third of the probationary period. A page is an anomaly score of 1. The
+scorer is NAB's (scaled-sigmoid weights, probationary rows left out, one threshold for the corpus,
+normalised against the null detector) reimplemented in Rust; it reproduces the published
+`numenta` detector's scores from its published outputs (70.1, 63.2 and 74.3 here against 70.1,
+63.1 and 74.3; the one-tenth difference is an exact threshold sweep against NAB's optimiser).
+
+| Detector | Standard | Reward low FP | Reward low FN |
+|---|---|---|---|
+| ARTime (published) | 74.9 | 65.2 | 80.4 |
+| numenta HTM (published) | 70.1 | 63.1 | 74.3 |
+| contextOSE (published) | 69.9 | 67.0 | 73.2 |
+| htmjava (published) | 65.5 | 53.3 | 70.4 |
+| knncad (published) | 58.0 | 43.4 | 64.8 |
+| relativeEntropy (published) | 54.6 | 47.6 | 58.8 |
+| **expectations, scripted brain** | **52.1** | **40.0** | **58.0** |
+| randomCutForest (published) | 51.7 | 38.4 | 59.7 |
+| twitterADVec (published) | 47.1 | 33.6 | 53.5 |
+| windowedGaussian (published) | 39.6 | 20.9 | 47.4 |
+| skyline (published) | 35.7 | 27.1 | 44.5 |
+| random (published) | 16.8 | 5.8 | 25.9 |
+| null | 0.0 | 0.0 | 0.0 |
+
+The brain was called for 4.0% of the rows (14,591 times: the first row of each series, the
+violations of the probationary period, the checks of young rules and a 1% sample, and 4,407
+absences of the `every` rules on series whose sampling is irregular, which page nothing and only
+cost calls). Two ranges and a script are in the middle of the published table: well ahead of
+windowedGaussian, Twitter's and Skyline, behind the HTM and ARTime detectors, which model the
+sequence and not only its envelope. An earlier run whose cooldown used the series' length,
+which NAB does not give a detector, scored 49.6, 39.7 and 54.6; the table is the corrected run.
+`rate` was not used: NAB's series are sampled evenly, so a count per window says nothing.
+
+**BGL** (4,747,963 lines over 214 days; 348,460 labelled alerts, all of them on lines of severity
+`FATAL` or `FAILURE`). The brain pages on those two severities, so it finds every alert but
+also pages on 508,449 `FATAL` lines that are not labelled: its line-level precision is 0.407,
+and no setup in front of it can do better than the brain itself. A synthetic heartbeat, one a
+minute of log time with 20 dropouts of 15 minutes, is merged in by time.
+
+Replayed in log time (the brain answers at once; its latency is the next table's subject):
+
+| Setup | Brain calls | Precision | Recall | Alert episodes paged | Dropouts found |
+|---|---|---|---|---|---|
+| Every line to the brain | 5,056,861 | 0.407 | 1.000 | 100% | 0 of 20 |
+| Habituation only | 384,321 | 0.087 | 0.004 | 100% | 0 of 20 |
+| Expectations | not measured after the fix below | | | | |
+
+Habituation cuts the brain's calls by 13× and keeps one page per alert episode (alerts less
+than a minute apart), but it drops nearly every alert line: 0.4% line-level recall. The run with
+expectations exposed two defects instead of measuring them. The `expect` effector took the wall
+clock for its write budget, so a replay compressing 214 days into seconds exhausted the budget at
+once; and the budget counted refused writes, so a brain that kept retrying on every surprise kept
+itself locked out (4.67 million refused writes). Both are fixed (`Expect::act_at` takes the time;
+only accepted writes count). The corrected replay was not run.
+
+Live, 3,000 consecutive lines with 673 alerts (from the second half of the log) through a `Lines`
+receptor at 50 lines/s; the mock LLM takes 400 ms per window of up to 8 lines plus 20 ms per
+further line, 4 windows at once:
+
+| Setup | Brain | Brain calls | Pages | Precision | Recall | Line to page p50 | p99 |
+|---|---|---|---|---|---|---|---|
+| Every line to the brain | mock LLM | 3,000 | 1,176 | 0.565 | 0.988 | 721 ms | 948 ms |
+| Habituation only | mock LLM | 84 | 64 | 0.141 | 0.013 | 435 ms | 841 ms |
+| Expectations | mock LLM | 442 | 1,184 | 0.568 | 1.000 | **0.07 ms** | 821 ms |
+| Expectations | qwen2.5-0.5b-instruct Q4_K_M through candle, CPU | 12 | 0 | — | 0.000 | — | — |
+
+With expectations the brain was asked 442 times instead of 3,000 (197 new templates, 245 checks
+of young rules), and 1,056 of the 1,184 pages came from rules in the periphery in 0.06 ms; the
+p99 is the pages that still waited for the brain. The real model did not keep up: in the ten
+minutes the run waits for the brain, it answered 12 of the 3,000 surprises and wrote no rule
+that took, so nothing was paged. A 0.5B model on a laptop CPU with a long prompt is too slow
+for this rate; a larger or faster model was not tried.
 
 ## What it is not, and limits
 
