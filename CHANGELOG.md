@@ -96,46 +96,6 @@ aliases before 1.0. Renames are listed as old name -> new name.
 - `tls::MAX_HANDSHAKES` (1024): TLS handshakes in flight per listener. Past it the listener
   stops accepting until one ends, so clients that connect and never send a ClientHello cannot
   hold an unbounded number of tasks and sockets.
-- Consolidation, level 1 (`furnace::nerve::consolidation`): a verified cache of a brain's
-  decisions, the foundation for later levels. `FabricBuilder::consolidate` puts a `Recall`
-  reflex in front of a brain and records its decisions (`Record`) in a `Memory`, by default an
-  `EngramStore`: bounded and set-associative, keyed by the signal's feature or a key of your
-  own. After `after` agreeing decisions (3) a key's decision is answered in microseconds without
-  the brain; a sample of those answers (5%, and always the first 3) is still sent to the brain
-  after the reflex acted and compared, never acted on. A disagreement or `failures` effector
-  failures in a row (`EngramStore::watch`) dissolve the engram. Opt-in per effector; volatile
-  argument fields are left out of the comparison. A brain declares the external state it
-  consults (`depends_on`); change notifications to an `Inhibit` neuron dissolve the engrams
-  tagged with what changed (`{"inhibit": ["customer:42"]}`) or void every engram made under a
-  dependency's old version (`{"advance": ["customers"]}`). A brain without declarations is
-  taken to decide from its input alone. Counters and the top engrams are on the recall neuron
-  in `GET /nerve` and `/metrics`. Measured on Loghub's HDFS and BGL logs in
-  [NERVE.md](docs/NERVE.md#consolidation).
-- Expectations v1 (`furnace::nerve::expect`): the brain programs the periphery. An
-  `Expectations` neuron behind a receptor matches every signal against rules the brain
-  installs through the `expect` effector (`match`, `rate`, `every`, `range`, `then`, `never`,
-  each with a selector by template and fields, `on_match` absorb or act, `on_violation`
-  escalate or act, `learn` bounds, `ttl_s`, `depends_on`, provenance). Fitting signals are
-  absorbed in process; what breaks a rule, what no rule covers and what did not come (a timer
-  raises absences) reach the brain as a JSON surprise with its context. Log lines become a
-  template and fields (numbers masked), JSON bodies their fields. Shadow checks of absorbed
-  signals, false-alarm verdicts that tune learnable parameters, scope limits (no wildcard
-  absorb, at least as specific as the surprise answered, allowed effectors only, budgets of
-  rules and writes, optional operator approval), counters and the rules in `GET /nerve`.
-  Checked on a synthetic stream with a scripted brain ([NERVE.md](docs/NERVE.md#expectations-the-brain-programs-the-periphery)).
-- The LLM adapter for expectations (`furnace::nerve::expect::llm`, feature `llm`): `brain(name,
-  engine)` is an `Llm` brain whose system prompt teaches the expectation language and whose user
-  message renders each surprise with its context and the expectations installed for its template,
-  asking for the verdict a shadow check or a false alarm needs. `SYSTEM_PROMPT` and
-  `surprise_prompt` are public.
-- `Expectations::react(signal, now)` and `Expect::act_at(command, signal, now)`: the
-  expectations neuron and the `expect` effector at a time of the caller's, for replays.
-  `Expectation::param` is public.
-- benches/nerve: `expect-nab` (the Numenta Anomaly Benchmark, scored with NAB's method
-  reimplemented and checked against the published `numenta` scores) and `expect-bgl` (Loghub's
-  BGL log against a brain on every line and habituation alone, replayed in log time and live,
-  optionally with a GGUF brain), with `fetch-data.sh` for the datasets
-  ([NERVE.md](docs/NERVE.md#measured-on-public-data)).
 
 ### Changed
 - `/predict`, v2 over HTTP and v2 over gRPC share one inference path: the concurrency slot,
@@ -214,8 +174,6 @@ aliases before 1.0. Renames are listed as old name -> new name.
   codes disagreed with the ones the routes send.
 
 ### Fixed
-- The `expect` effector's budget of writes per minute counts accepted writes only: counting
-  refused ones let a brain that retried on every surprise lock itself out.
 - An ONNX file named after a reserved Rust keyword (`final.onnx`, `override.onnx`, ...)
   generates `model_final` instead of a module that does not compile.
 - A batch size a fixed-batch graph cannot run is a `400` on `/predict` too (was `500` with a

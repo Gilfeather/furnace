@@ -6,9 +6,6 @@
 //! ```bash
 //! cargo build --release
 //! target/release/furnace-nerve-bench [hop|arc|brain|memory|webhook|serve-bench|all]
-//! target/release/furnace-nerve-bench consolidation --logs DIR [--json PATH]
-//! target/release/furnace-nerve-bench expect-bgl --data DIR [--gguf PATH] [--json PATH]
-//! target/release/furnace-nerve-bench expect-nab --data DIR [--json PATH]
 //!     [--runs 3] [--clients 1,4,16] [--servers furnace,hand-written,fastapi] [--json PATH]
 //! ```
 //!
@@ -27,15 +24,7 @@
 //! - *serve-bench*: the demo served over HTTP by furnace (`Server::nerve`), by a hand-written
 //!   axum server and by FastAPI, loaded by N clients on keep-alive connections.
 //!
-//! `serve KIND PORT` runs one server on its own. `consolidation` replays public logs through
-//! a brain with consolidation off and on, once (see `consolidation.rs`); it is not part of
-//! `all`, since it needs the logs. `expect-bgl` and `expect-nab` measure expectations on
-//! public datasets (`fetch-data.sh DIR` downloads them; see `expect_bgl.rs`, `expect_nab.rs`).
-
-mod consolidation;
-mod expect_bgl;
-mod expect_llm;
-mod expect_nab;
+//! `serve KIND PORT` runs one server on its own.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -931,34 +920,6 @@ async fn main() {
             fail("usage: serve KIND PORT");
         };
         serve(kind, port).await;
-        return;
-    }
-    if args.first().map(String::as_str) == Some("expect-bgl") {
-        let dir = flag("--data").unwrap_or_else(|| fail("expect-bgl needs --data DIR"));
-        let gguf = flag("--gguf");
-        let report = tokio::task::block_in_place(|| expect_bgl::bench(&dir, gguf.as_deref()));
-        expect_bgl::print(&report);
-        if let Some(path) = flag("--json") {
-            write_json(&path, &report);
-        }
-        return;
-    }
-    if args.first().map(String::as_str) == Some("expect-nab") {
-        let dir = flag("--data").unwrap_or_else(|| fail("expect-nab needs --data DIR"));
-        let report = tokio::task::block_in_place(|| expect_nab::bench(&dir));
-        expect_nab::print(&report);
-        if let Some(path) = flag("--json") {
-            write_json(&path, &report);
-        }
-        return;
-    }
-    if args.first().map(String::as_str) == Some("consolidation") {
-        let dir = flag("--logs").unwrap_or_else(|| fail("consolidation needs --logs DIR"));
-        let report = tokio::task::block_in_place(|| consolidation::bench(&dir));
-        consolidation::print(&report);
-        if let Some(path) = flag("--json") {
-            write_json(&path, &report);
-        }
         return;
     }
     let what = args
