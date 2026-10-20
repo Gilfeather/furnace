@@ -186,7 +186,7 @@ let triage = b.neuron(FnNeuron::reflex("triage", |signal, _| {
     }
 }), Mechanisms::NONE);
 let brain = b.neuron(Llm::new("brain", engine), Mechanisms::NONE);
-let alarm = b.neuron(Effector::new(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")), Mechanisms::NONE);
+let alarm = b.neuron(Effector::new(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")?), Mechanisms::NONE);
 b.reflex(events, triage, 1.0);
 b.reflex(triage, alarm, 1.0);
 b.deliberative(triage, brain, 2.0, Summation::default());

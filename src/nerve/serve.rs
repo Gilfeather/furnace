@@ -24,7 +24,7 @@ use super::effector::{Effector, Respond};
 use super::fabric::{Announced, Fabric, FabricBuilder, Outcome, Summation};
 use super::latency::LatencyEstimate;
 use super::neuron::{Cx, Firing, Mechanisms, Neuron, NeuronKind};
-use super::signal::{Answer, Feature, NeuronId, PathwayId, Payload, Reply, Signal};
+use super::signal::{Answer, Feature, NeuronId, PathwayId, Payload, ReplyHandle, Signal};
 use crate::batching::BatchConfig;
 use crate::error::Result;
 use crate::model::Model;
@@ -152,7 +152,7 @@ impl Neuron for Served {
             "backend": info.backend,
             "inputs": model.inputs().iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
             "outputs": model.outputs().iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
-            "forward": self.latency.snapshot(),
+            "forward_latency_ms": self.latency.snapshot(),
         })
     }
 }
@@ -249,7 +249,7 @@ impl Serving {
         #[cfg(feature = "llm")] llms: &[Arc<dyn crate::llm::LlmEngine>],
         batching: BatchConfig,
         capacity: usize,
-    ) -> Self {
+    ) -> std::result::Result<Self, crate::nerve::BuildError> {
         // Only a server with models answers requests through the fabric
         let respond = (!models.is_empty())
             .then(|| builder.neuron(Effector::new(Respond::new(RESPOND)), Mechanisms::NONE));
@@ -320,12 +320,12 @@ impl Serving {
                 (name, entrance)
             })
             .collect();
-        Self {
-            fabric: builder.build(),
+        Ok(Self {
+            fabric: builder.build()?,
             routes: wired.into_iter().collect(),
             #[cfg(feature = "llm")]
             llms,
-        }
+        })
     }
 
     /// [`generate`](Self::generate) on a blocking thread: an engine renders the chat template
@@ -358,7 +358,7 @@ impl Serving {
         let Some(&entrance) = self.llms.get(name) else {
             return Err(lost());
         };
-        let (reply, mut receiver) = Reply::required();
+        let (reply, mut receiver) = ReplyHandle::required();
         let signal =
             Signal::new(Feature::NONE, Payload::Prompt(Arc::new(request))).with_reply(reply);
         // The chain is synchronous: the brain has answered when this returns
@@ -395,7 +395,7 @@ impl Serving {
             error!("nerve: no pathway for model '{model}'");
             return Err(Refused::Lost);
         };
-        let (reply, receiver) = Reply::required();
+        let (reply, receiver) = ReplyHandle::required();
         let signal = Signal::new(Feature::NONE, Payload::tensors(inputs)).with_reply(reply);
         let chain = if route.deliberative {
             Chain::Ran(
@@ -543,18 +543,21 @@ mod tests {
     fn serving_of(model: Arc<Model>, batching: BatchConfig) -> Arc<Serving> {
         let name = model.get_info().name.clone();
         let source = model.clone();
-        Arc::new(Serving::build(
-            FabricBuilder::new(),
-            vec![ServedModel {
-                name,
-                batches: model.is_simple() || model.batches_named(),
-                source: Arc::new(move || source.clone()),
-            }],
-            #[cfg(feature = "llm")]
-            &[],
-            batching,
-            1000,
-        ))
+        Arc::new(
+            Serving::build(
+                FabricBuilder::new(),
+                vec![ServedModel {
+                    name,
+                    batches: model.is_simple() || model.batches_named(),
+                    source: Arc::new(move || source.clone()),
+                }],
+                #[cfg(feature = "llm")]
+                &[],
+                batching,
+                1000,
+            )
+            .unwrap(),
+        )
     }
 
     fn setup(max_batch_size: usize, batch_timeout: Duration, delay: Duration) -> Setup {
@@ -926,7 +929,8 @@ mod tests {
             &[],
             BatchConfig::default(),
             10,
-        );
+        )
+        .unwrap();
         let names: Vec<String> = serving
             .fabric()
             .neurons()

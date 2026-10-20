@@ -15,7 +15,7 @@ furnace-server = { version = "0.10", default-features = false }
 The nervous system is always built: the server's own routes run on it. The `nerve` feature is
 still accepted and changes nothing. Everything is pure Rust and adds no dependency: `nerve`
 uses what the crate already has, plus a small HTTP/1.1 client over Tokio sockets for the
-outbound side (`furnace::nerve::wire`).
+outbound side (internal to the crate).
 
 ## Why a fly dodges a hand
 
@@ -149,11 +149,11 @@ let brain = b.neuron(Llm::new("brain", engine), Mechanisms::NONE);
 
 // Effectors, by name, each with its local loop
 let alarm = b.neuron(
-    Effector::new(Webhook::new("alarm", "http://127.0.0.1:9000/alarm"))
+    Effector::new(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")?)
         .refractory(Duration::from_millis(100)),
     Mechanisms::NONE,
 );
-b.neuron(Effector::new(Webhook::new("webhook", "http://127.0.0.1:9000/hook")), Mechanisms::NONE);
+b.neuron(Effector::new(Webhook::new("webhook", "http://127.0.0.1:9000/hook")?), Mechanisms::NONE);
 b.neuron(Effector::new(FileAppend::new("log", "journal.log")), Mechanisms::NONE);
 b.neuron(Effector::new(Respond::new("respond")), Mechanisms::NONE);
 
@@ -199,10 +199,10 @@ within noise.
 | Receptor | Source | Feature | Urgency |
 |---|---|---|---|
 | `Http` | a route, `POST` or `GET` | sketch of the body, or your own `fn(&Ingest) -> Feature` | `x-deadline-ms` header, else the route's `UrgencyRule` |
-| `Channel` | your code: `ChannelSender::emit` runs the chain inline, `send` queues to the receptor's thread | whatever you give the signal | the rule |
+| `ChannelIn` | your code: `ChannelSender::emit` runs the chain inline, `send` queues to the receptor's thread | whatever you give the signal | the rule |
 | `Timer` | one signal per period | the tick, or one fixed feature | the rule |
 | `Lines` | stdin, a TCP connection, or a TCP port it listens on | sketch of the line | the rule |
-| `Sse` | an upstream `text/event-stream`, with reconnects and `Last-Event-ID` | sketch of the event's data | the rule |
+| `SseIn` | an upstream `text/event-stream`, with reconnects and `Last-Event-ID` | sketch of the event's data | the rule |
 
 An `UrgencyRule` is a fixed deadline (`within`) or a deadline derived from the stream's
 measured rate (`before_next(1.0)`: act before the next sample). Every receptor measures its
@@ -211,7 +211,7 @@ rate and stamps it on the signal.
 ### Effectors (`furnace::nerve::effector`)
 
 An `Effector` wraps an `Act` and supplies the loop: `Retry` (3 attempts from 100 ms backoff by
-default), `Breaker` (open after 5 consecutive failures for 10 s, then one trial), `RateLimit`
+default), `Breaker` (open after 5 consecutive failures for 10 s, then one trial), `ActRateLimit`
 (a token bucket that paces or drops) and `refractory`. Acts that finish at once run inline on
 the reflex arc; the rest run on the efferent runtime. Implement `Act` for your own device.
 
@@ -221,8 +221,8 @@ the reflex arc; the rest run on the efferent runtime. Implement `Act` for your o
 | `Webhook` | `POST url` with the command's args as JSON, or the payload as it is; 5xx and 429 are retried; plain `http://`, no redirects; the timeout covers the whole call, response body included |
 | `Process` | runs a local command with fixed arguments plus `{"args": [...], "stdin": "..."}`; writing stdin counts against the timeout; the args reach argv as they are, with no shell |
 | `FileAppend` | appends `args.line`, or a JSON line with the time, the signal id and the args, on a thread of its own, in order |
-| `Channel` | hands `Delivery { command, signal }` to the code holding the receiver |
-| `Sse` | pushes `{"signal", "effector", "args"}` to subscribers of `GET /nerve/effectors/{name}/events` |
+| `ChannelOut` | hands `Delivery { command, signal }` to the code holding the receiver |
+| `SseOut` | pushes `{"signal", "effector", "args"}` to subscribers of `GET /nerve/effectors/{name}/events` |
 
 ### Brains (`furnace::nerve::brain`)
 
@@ -240,19 +240,28 @@ window; `ModelNeuron::reflex` is the same model inline on a reflex arc (a small 
 In `/metrics` (`nerve` in the JSON, `furnace_nerve_*` in Prometheus) and `GET /nerve`:
 
 - per neuron: `received`, `fired`, `quiet_by_threshold`, `quiet_by_habituation`,
-  `quiet_by_refractory`, `quiet` (signals the neuron itself was not interested in, not a total;
-  `reason="not_interested"` in Prometheus); effectors add `acted`, `failed`, `retries`,
+  `quiet_by_refractory`, `quiet_not_interested` (signals the neuron itself was not interested
+  in; `reason="not_interested"` in Prometheus), `computed` (firings from blocking work, every
+  firing of a brain); effectors add `acted`, `failed`, `retries`,
   `dropped_open`, `dropped_rate`, `quiet_refractory`, commands in flight, the breaker's state
   and the latency to the world; brains add generations, commands and the generation latency
-- per pathway: signals, p50 / p99 / mean / max latency from signal-in to signal-out, how many
+- per pathway: signals, the latency from signal-in to signal-out (`latency_ms`), how many
   signals it was too slow for, and the current summation window
 - `brain_fraction`: signals that reached a brain over signals received
-- per reflex arc (receptor → effector, never queued): stimulus to effector call, p50 / p99
+- per reflex arc (receptor → effector, never queued): stimulus to effector call (`latency_ms`)
+
+Every latency is a histogram of every measurement, as the server's own request latencies are,
+with buckets from 1 µs to 10 s. In the JSON a latency is `{"count", "p50", "p95", "p99",
+"mean", "max"}` in milliseconds, the percentiles estimated from the buckets (`latency_ms` on
+pathways, arcs and effectors, `generation_latency_ms` on an LLM brain, `forward_latency_ms` on
+a model). Pathway selection does not use these: it reads the p99 of each pathway's most recent
+128 measurements, so it follows a change within a few signals.
 
 The JSON has all of it. Prometheus has the fabric's counters and `brain_fraction`, each
 neuron's counters (`kind` and `reason` labels), each pathway's signals (`kind="reflex"` or
-`"deliberative"`), the pathway and arc latencies as `quantile="0.5"` and `"0.99"` gauges in
-seconds with a `_count`, and each effector's counters, `inflight` and `circuit_open`. What a
+`"deliberative"`), the pathway and arc latencies as histograms in seconds
+(`furnace_nerve_pathway_latency_seconds_bucket`, `_sum`, `_count`, and the same for
+`arc`), and each effector's counters, `inflight` and `circuit_open`. What a
 brain, a recall neuron or an expectations neuron adds, and an effector's latency, are in the
 JSON only.
 
@@ -379,7 +388,7 @@ let engrams = EngramStore::new(
         .forget_after(Duration::from_secs(3600)),
 );
 // Effector failures reach the engrams they acted for
-b.neuron(Effector::new(engrams.watch(Webhook::new("page", url))), Mechanisms::NONE);
+b.neuron(Effector::new(engrams.watch(Webhook::new("page", url)?)), Mechanisms::NONE);
 let (recall, _brain) = b.consolidate(brain, Mechanisms::NONE, Summation::default(), &engrams);
 b.reflex(triage, recall, 1.0); // whatever fed the brain now feeds `recall`
 // Change notifications: {"inhibit": ["customer:42"]} or {"advance": ["customers"]}

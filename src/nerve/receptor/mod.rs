@@ -4,10 +4,10 @@
 //!
 //! - [`Http`]: a route; the feature is a 64-bit sketch of the body, the urgency comes from a
 //!   deadline header or the route's default
-//! - [`Channel`]: an in-process stream, fed from your own code
+//! - [`ChannelIn`]: an in-process stream, fed from your own code
 //! - [`Timer`]: periodic signals
 //! - [`Lines`]: a line stream, from stdin, a TCP connection or a TCP port
-//! - [`Sse`]: an upstream Server-Sent-Events feed
+//! - [`SseIn`]: an upstream Server-Sent-Events feed
 //!
 //! A receptor's own `stimulate` passes the signal on: the mechanisms in front of it are what
 //! make it more than a source.
@@ -18,8 +18,8 @@ mod lines;
 mod sse;
 mod timer;
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{OnceLock, Weak};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -28,10 +28,10 @@ use super::fabric::{Fabric, Inner, Outcome};
 use super::neuron::Neuron;
 use super::signal::{Feature, NeuronId, Payload, Signal, Urgency};
 
-pub use channel::{Channel, ChannelSender};
+pub use channel::{ChannelIn, ChannelSender};
 pub use http::{DEADLINE_HEADER, Http};
 pub use lines::Lines;
-pub use sse::Sse;
+pub use sse::SseIn;
 pub use timer::Timer;
 
 /// Feature kinds the receptors use, so sketches of different origins never collide
@@ -42,22 +42,88 @@ pub mod kinds {
     pub const TEXT: u16 = 2;
     /// A timer's tick, or its one fixed feature ([`Timer`](super::Timer))
     pub const TIMER: u16 = 3;
-    /// A sketch of an upstream event's data ([`Sse`](super::Sse))
+    /// A sketch of an upstream event's data ([`SseIn`](super::Sse))
     pub const SSE: u16 = 4;
 }
 
+/// The fabric's stop signal, raised when the fabric is dropped
+#[derive(Default)]
+pub(crate) struct Stop {
+    raised: AtomicBool,
+    /// For threads sleeping in [`Afferent::sleep`]
+    lock: Mutex<()>,
+    wake: Condvar,
+    /// For tasks awaiting [`Afferent::stopped`]
+    notify: tokio::sync::Notify,
+}
+
+impl Stop {
+    pub(crate) fn raise(&self) {
+        self.raised.store(true, Ordering::Release);
+        // Under the lock, so a thread between its check and its wait cannot miss it
+        drop(self.lock.lock().unwrap_or_else(|e| e.into_inner()));
+        self.wake.notify_all();
+        self.notify.notify_waiters();
+    }
+
+    fn is_raised(&self) -> bool {
+        self.raised.load(Ordering::Acquire)
+    }
+}
+
 /// A receptor's way into the fabric, given to it by [`Fabric::start`]. It holds the fabric
-/// weakly: once the fabric is gone, [`Afferent::emit`] returns `None` and the receptor's
-/// task should stop.
+/// weakly, and carries the fabric's stop signal: once the fabric is dropped,
+/// [`is_stopped`](Self::is_stopped) is true, [`sleep`](Self::sleep) returns `false` at once,
+/// [`stopped`](Self::stopped) resolves and [`emit`](Self::emit) returns `None`. A receptor's
+/// thread or task ends then.
 #[derive(Clone)]
 pub struct Afferent {
     inner: Weak<Inner>,
     id: NeuronId,
+    stop: Arc<Stop>,
 }
 
 impl Afferent {
-    pub(crate) fn new(inner: Weak<Inner>, id: NeuronId) -> Self {
-        Self { inner, id }
+    pub(crate) fn new(inner: Weak<Inner>, id: NeuronId, stop: Arc<Stop>) -> Self {
+        Self { inner, id, stop }
+    }
+
+    /// Whether the fabric was dropped: the receptor should end what it started
+    pub fn is_stopped(&self) -> bool {
+        self.stop.is_raised()
+    }
+
+    /// Block this thread for `duration`, or less if the fabric stops meanwhile. `false` once
+    /// it stopped: a receptor's thread sleeps with this between samples rather than with
+    /// `std::thread::sleep`, so that it ends with the fabric.
+    pub fn sleep(&self, duration: Duration) -> bool {
+        let deadline = Instant::now() + duration;
+        let mut guard = self.stop.lock.lock().unwrap_or_else(|e| e.into_inner());
+        while !self.stop.is_raised() {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                return true;
+            };
+            guard = self
+                .stop
+                .wake
+                .wait_timeout(guard, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        false
+    }
+
+    /// Resolves once the fabric was dropped; a receptor's task selects on it
+    pub async fn stopped(&self) {
+        loop {
+            let notified = self.stop.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.stop.is_raised() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// This receptor's id
@@ -85,7 +151,10 @@ impl Afferent {
 
 /// A neuron that is also a source: started with the fabric, and possibly mounted as a route
 pub trait Receptor: Neuron {
-    /// Start sampling (a thread, or a task on [`Afferent::runtime`]); return at once
+    /// Start sampling (a thread, or a task on [`Afferent::runtime`]); return at once. What it
+    /// starts ends when the fabric is dropped: wait with [`Afferent::sleep`] or select on
+    /// [`Afferent::stopped`], and stop when [`Afferent::emit`] returns `None`. Tasks on the
+    /// fabric's runtime are cancelled with it.
     fn start(&self, _afferent: Afferent) {}
 
     /// Mount this receptor as an HTTP route: the fabric's router
@@ -308,5 +377,31 @@ impl Source {
             a.extend(b.clone());
         }
         value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_stop_signal_wakes_a_sleeping_receptor() {
+        let stop = Arc::new(Stop::default());
+        let afferent = Afferent::new(Weak::new(), NeuronId(0), stop.clone());
+        assert!(afferent.sleep(Duration::from_millis(1)));
+        let sleeper = std::thread::spawn({
+            let afferent = afferent.clone();
+            move || afferent.sleep(Duration::from_secs(3600))
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        stop.raise();
+        assert!(!sleeper.join().unwrap());
+        assert!(afferent.is_stopped());
+        assert!(!afferent.sleep(Duration::from_secs(3600)));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(afferent.stopped());
     }
 }

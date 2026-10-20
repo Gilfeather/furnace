@@ -19,6 +19,10 @@ enum LineSource {
 /// A stream of text lines: one signal per line, the feature a sketch of the line, the
 /// payload the line as text. From stdin, from a TCP connection to a host, or from every
 /// connection to a TCP port this receptor listens on. Reading runs on threads of its own.
+///
+/// With the fabric, the listener closes its port and reconnecting stops. A read in progress
+/// (stdin, or a connection whose peer sends nothing) ends with its stream: its next line, or
+/// the stream's end, finds the fabric gone.
 pub struct Lines {
     source: Source,
     from: LineSource,
@@ -148,10 +152,9 @@ impl Receptor for Lines {
                             }
                             Err(e) => debug!("nerve: lines receptor: connect {addr}: {e}"),
                         }
-                        if afferent.fabric().is_none() {
+                        if afferent.fabric().is_none() || !afferent.sleep(backoff.next()) {
                             return;
                         }
-                        std::thread::sleep(backoff.next());
                     }
                 }));
             }
@@ -163,19 +166,38 @@ impl Receptor for Lines {
                         return;
                     }
                 };
-                spawn(Box::new(move || {
+                // Accepting on the fabric's runtime, so that the port closes with the fabric
+                let Some(runtime) = afferent.runtime() else {
+                    return;
+                };
+                let listener = match listener.set_nonblocking(true).and_then(|()| {
+                    let _entered = runtime.enter();
+                    tokio::net::TcpListener::from_std(listener)
+                }) {
+                    Ok(listener) => listener,
+                    Err(e) => {
+                        warn!("nerve: lines receptor cannot listen on {addr}: {e}");
+                        return;
+                    }
+                };
+                runtime.spawn(async move {
                     let meter = Arc::new(RateMeter::new());
-                    for stream in listener.incoming() {
-                        let Ok(stream) = stream else { continue };
-                        if afferent.fabric().is_none() {
-                            return;
-                        }
+                    loop {
+                        let accepted = tokio::select! {
+                            accepted = listener.accept() => accepted,
+                            () = afferent.stopped() => return,
+                        };
+                        let Ok(stream) = accepted.and_then(|(s, _)| s.into_std()) else {
+                            continue;
+                        };
                         let (afferent, meter) = (afferent.clone(), meter.clone());
                         std::thread::spawn(move || {
-                            pump_lines(stream, &afferent, rule, &meter);
+                            if stream.set_nonblocking(false).is_ok() {
+                                pump_lines(stream, &afferent, rule, &meter);
+                            }
                         });
                     }
-                }));
+                });
             }
         }
     }
@@ -185,6 +207,21 @@ impl Receptor for Lines {
 mod tests {
     use super::*;
     use crate::nerve::testing::{fabric_with_receptor, wait_until};
+
+    #[test]
+    fn a_listening_receptor_closes_its_port_with_the_fabric() {
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let (fabric, _r, seen) = fabric_with_receptor(Lines::listen("in", &addr.to_string()));
+        fabric.start();
+        let mut client = std::net::TcpStream::connect(addr).unwrap();
+        std::io::Write::write_all(&mut client, b"hello\n").unwrap();
+        wait_until(|| seen.lock().unwrap().len() == 1);
+        drop(fabric);
+        wait_until(|| std::net::TcpListener::bind(addr).is_ok());
+    }
 
     #[test]
     fn lines_receptor_reads_a_tcp_stream() {

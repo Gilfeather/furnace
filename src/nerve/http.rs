@@ -18,7 +18,7 @@ use axum::routing::{get, post};
 use super::fabric::{Fabric, Outcome};
 use super::neuron::Quiet;
 use super::receptor::{HttpMethod, Ingest, Receptor};
-use super::signal::{Answer, NeuronId, Reply};
+use super::signal::{Answer, NeuronId, ReplyHandle};
 
 /// What became of the request's signal, on responses the chain did not answer itself
 pub const OUTCOME_HEADER: HeaderName = HeaderName::from_static("x-furnace-nerve");
@@ -75,7 +75,7 @@ async fn ingest(State(mounted): State<Arc<Mounted>>, headers: HeaderMap, body: B
     }) else {
         return (StatusCode::BAD_REQUEST, "the receptor ignored this request").into_response();
     };
-    let (reply, mut receiver) = Reply::new();
+    let (reply, mut receiver) = ReplyHandle::new();
     let id = signal.id;
     let wait = mounted.receptor.respond_within();
     // The synchronous chain runs here, on this thread, before the next line

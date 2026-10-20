@@ -16,8 +16,37 @@ pub const LATENCY_BUCKETS: &[f64] = &[
     2.5, 5.0, 10.0,
 ];
 
-/// A latency histogram with fixed buckets ([`LATENCY_BUCKETS`] plus `+Inf`)
+/// Bucket upper bounds in seconds, from 1 µs to 10 s, for the nervous system's hops, which
+/// take microseconds
+pub const FINE_LATENCY_BUCKETS: &[f64] = &[
+    0.000_001,
+    0.000_002_5,
+    0.000_005,
+    0.000_01,
+    0.000_025,
+    0.000_05,
+    0.000_1,
+    0.000_25,
+    0.0005,
+    0.001,
+    0.0025,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+];
+
+/// A latency histogram with fixed buckets (by default [`LATENCY_BUCKETS`], plus `+Inf`)
 pub struct Histogram {
+    /// Upper bounds in seconds, ascending
+    bounds: &'static [f64],
     /// Observations per bucket (not cumulative); the last one is `+Inf`
     counts: Vec<AtomicU64>,
     sum_nanos: AtomicU64,
@@ -41,23 +70,34 @@ impl Default for Histogram {
 }
 
 impl Histogram {
-    /// An empty histogram
+    /// An empty histogram with [`LATENCY_BUCKETS`]
     pub fn new() -> Self {
+        Self::with_buckets(LATENCY_BUCKETS)
+    }
+
+    /// An empty histogram with these upper bounds in seconds, ascending (such as
+    /// [`FINE_LATENCY_BUCKETS`]), plus `+Inf`
+    pub fn with_buckets(bounds: &'static [f64]) -> Self {
         Self {
-            counts: (0..=LATENCY_BUCKETS.len())
-                .map(|_| AtomicU64::new(0))
-                .collect(),
+            bounds,
+            counts: (0..=bounds.len()).map(|_| AtomicU64::new(0)).collect(),
             sum_nanos: AtomicU64::new(0),
         }
+    }
+
+    /// Observations so far
+    pub fn count(&self) -> u64 {
+        self.counts.iter().map(|c| c.load(Ordering::Relaxed)).sum()
     }
 
     /// Count one observation
     pub fn observe(&self, elapsed: Duration) {
         let seconds = elapsed.as_secs_f64();
-        let bucket = LATENCY_BUCKETS
+        let bucket = self
+            .bounds
             .iter()
             .position(|&bound| seconds <= bound)
-            .unwrap_or(LATENCY_BUCKETS.len());
+            .unwrap_or(self.bounds.len());
         self.counts[bucket].fetch_add(1, Ordering::Relaxed);
         self.sum_nanos.fetch_add(
             u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
@@ -94,16 +134,16 @@ impl Histogram {
         let mut below = 0u64;
         for (i, &count) in counts.iter().enumerate() {
             if count > 0 && (below + count) as f64 >= rank {
-                let Some(&upper) = LATENCY_BUCKETS.get(i) else {
-                    return LATENCY_BUCKETS.last().copied();
+                let Some(&upper) = self.bounds.get(i) else {
+                    return self.bounds.last().copied();
                 };
-                let lower = if i == 0 { 0.0 } else { LATENCY_BUCKETS[i - 1] };
+                let lower = if i == 0 { 0.0 } else { self.bounds[i - 1] };
                 let fraction = ((rank - below as f64) / count as f64).clamp(0.0, 1.0);
                 return Some(lower + (upper - lower) * fraction);
             }
             below += count;
         }
-        LATENCY_BUCKETS.last().copied()
+        self.bounds.last().copied()
     }
 
     /// The median, 95th and 99th percentiles in milliseconds, as [`quantile`](Self::quantile)
@@ -131,7 +171,8 @@ impl Histogram {
         let mut cumulative = 0;
         for (i, count) in counts.iter().enumerate() {
             cumulative += count;
-            let le = LATENCY_BUCKETS
+            let le = self
+                .bounds
                 .get(i)
                 .map_or_else(|| "+Inf".to_string(), |b| b.to_string());
             let _ = writeln!(

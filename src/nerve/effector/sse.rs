@@ -9,12 +9,12 @@ use crate::nerve::signal::{Command, Signal};
 /// on the fabric's router, one `data:` event per command, as
 /// `{"signal": id, "effector": name, "args": ...}`. Without subscribers, commands are
 /// dropped silently (and counted as acted).
-pub struct Sse {
+pub struct SseOut {
     name: String,
     sender: tokio::sync::broadcast::Sender<Bytes>,
 }
 
-impl Sse {
+impl SseOut {
     /// `capacity` events are kept for slow subscribers before they lose some
     pub fn new(name: &str, capacity: usize) -> Self {
         let (sender, _) = tokio::sync::broadcast::channel(capacity.max(1));
@@ -35,7 +35,7 @@ impl Sse {
     }
 }
 
-impl Act for Sse {
+impl Act for SseOut {
     fn name(&self) -> &str {
         &self.name
     }
@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn sse_pushes_to_subscribers() {
-        let sse = Sse::new("push", 16);
+        let sse = SseOut::new("push", 16);
         let mut subscriber = sse.subscribe();
         let effector = Effector::new(sse);
         let (fabric, r) = fabric_with(effector.clone());

@@ -9,8 +9,8 @@
 //! - [`Webhook`]: an outbound HTTP call (a webhook, another service's API), JSON or bytes
 //! - [`Process`]: run a local command with arguments, for devices and scripts
 //! - [`FileAppend`]: append to a file (a log, a journal)
-//! - [`Channel`]: an in-process channel, for your own code
-//! - [`Sse`]: push commands to Server-Sent-Events subscribers
+//! - [`ChannelOut`]: an in-process channel, for your own code
+//! - [`SseOut`]: push commands to Server-Sent-Events subscribers
 //!
 //! Effectors are addressed by name: a command `{ "effector": "alarm", "args": {...} }`
 //! reaches the effector registered as `alarm`. A plain (non-command) signal that reaches an
@@ -39,38 +39,54 @@ use super::neuron::{Cx, Firing, Neuron, NeuronKind};
 use super::signal::{Command, Signal};
 use crate::telemetry::{render_family, render_labelled};
 
-pub use channel::{Channel, Delivery};
+pub use channel::{ChannelOut, Delivery};
 pub use file_append::FileAppend;
+pub use local_loop::{ActRateLimit, Breaker, BreakerState, Retry};
 use local_loop::{Admission, run};
-pub use local_loop::{Breaker, BreakerState, RateLimit, Retry};
 pub use process::Process;
 pub use respond::Respond;
-pub use sse::Sse;
+pub use sse::SseOut;
 pub use webhook::Webhook;
 
-/// Why an act failed, and whether trying again could help
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActError {
-    /// What went wrong, for the log
-    pub message: String,
-    /// Whether a retry could succeed
-    pub retry: bool,
+/// Why an act failed. [`retryable`](Self::retryable) says whether trying again could help;
+/// the effector's loop retries those.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ActError {
+    /// The target answered with this HTTP status, not a 2xx. 429 and 5xx are retryable.
+    #[error("status {0}")]
+    Status(u16),
+    /// The act did not finish in time: a call, a process
+    #[error("{0}: timed out")]
+    Timeout(String),
+    /// The target could not be reached, or the connection broke
+    #[error("{0}")]
+    Unreachable(String),
+    /// Any other failure that may pass: a full queue, a busy device
+    #[error("{0}")]
+    Transient(String),
+    /// A failure that will not pass: a bad command, a missing program
+    #[error("{0}")]
+    Fatal(String),
 }
 
 impl ActError {
-    /// A failure that may pass: a timeout, a 503, a full queue
+    /// A failure that may pass ([`Transient`](Self::Transient))
     pub fn retry(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            retry: true,
-        }
+        Self::Transient(message.into())
     }
 
-    /// A failure that will not pass: a 400, a bad command
+    /// A failure that will not pass ([`Fatal`](Self::Fatal))
     pub fn fatal(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            retry: false,
+        Self::Fatal(message.into())
+    }
+
+    /// Whether a retry could succeed
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::Status(status) => *status == 429 || *status >= 500,
+            Self::Timeout(_) | Self::Unreachable(_) | Self::Transient(_) => true,
+            Self::Fatal(_) => false,
         }
     }
 }
@@ -162,7 +178,7 @@ pub struct EffectorMetrics {
     /// Where the circuit breaker stands
     pub breaker: BreakerState,
     /// Of successful commands, from the effector's call to the world's acknowledgement
-    pub latency: super::latency::LatencySnapshot,
+    pub latency_ms: super::latency::LatencySnapshot,
 }
 
 struct EffectorInner {
@@ -171,7 +187,7 @@ struct EffectorInner {
     plain: Command,
     retry: Retry,
     breaker: Breaker,
-    rate: Option<RateLimit>,
+    rate: Option<ActRateLimit>,
     refractory: Option<Duration>,
     epoch: Instant,
     /// Nanoseconds since `epoch` of the last command admitted; 0 before any
@@ -258,7 +274,7 @@ impl Effector {
     /// # Panics
     ///
     /// Once the effector is shared: a clone, or the fabric, holds it. Configure it first.
-    pub fn rate_limit(self, rate: RateLimit) -> Self {
+    pub fn rate_limit(self, rate: ActRateLimit) -> Self {
         self.configure(|i| {
             i.state.get_mut().unwrap_or_else(|e| e.into_inner()).tokens = f64::from(rate.burst);
             i.rate = Some(rate);
@@ -293,7 +309,7 @@ impl Effector {
             quiet_refractory: load(&c.quiet_refractory),
             inflight: load(&c.inflight),
             breaker,
-            latency: self.inner.latency.snapshot(),
+            latency_ms: self.inner.latency.snapshot(),
         }
     }
 
@@ -349,7 +365,7 @@ impl Neuron for Effector {
         match inner.act.act(&command, &signal) {
             Action::Done(Ok(())) => inner.succeeded(started),
             Action::Done(Err(error)) => {
-                if error.retry && inner.retry.attempts > 1 {
+                if error.retryable() && inner.retry.attempts > 1 {
                     inner.counters.retries.fetch_add(1, Ordering::Relaxed);
                     spawn(None, 1, inner.backoff(1));
                 } else {

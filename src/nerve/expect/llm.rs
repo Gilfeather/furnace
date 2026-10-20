@@ -249,7 +249,7 @@ mod tests {
         );
         let llm = b.neuron(brain("brain", engine.clone()), Mechanisms::NONE);
         b.deliberative(expect, llm, 1.0, Summation::none());
-        let fabric = b.build();
+        let fabric = b.build().unwrap();
         let line = |text: &str| {
             fabric.stimulate(logs, Signal::new(Feature::NONE, Payload::text(text)));
         };

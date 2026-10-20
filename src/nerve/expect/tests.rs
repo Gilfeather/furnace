@@ -36,9 +36,9 @@ fn rig(config: ExpectConfig, script: Script) -> Rig {
         Effector::new(expectations.effector("expect")).no_retry(),
         Mechanisms::NONE,
     );
-    let (page_act, page) = effector::Channel::new("page", 64);
+    let (page_act, page) = effector::ChannelOut::new("page", 64);
     b.neuron(Effector::new(page_act), Mechanisms::NONE);
-    let (ticket_act, ticket) = effector::Channel::new("ticket", 64);
+    let (ticket_act, ticket) = effector::ChannelOut::new("ticket", 64);
     b.neuron(Effector::new(ticket_act), Mechanisms::NONE);
     let seen = Arc::new(Mutex::new(Vec::new()));
     let calls = Arc::new(AtomicUsize::new(0));
@@ -60,7 +60,7 @@ fn rig(config: ExpectConfig, script: Script) -> Rig {
     let brain = b.neuron(brain, Mechanisms::NONE);
     b.deliberative(expect, brain, 1.0, Summation::none());
     Rig {
-        fabric: b.build(),
+        fabric: b.build().unwrap(),
         input,
         expect,
         expectations,

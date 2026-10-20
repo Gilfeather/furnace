@@ -49,7 +49,7 @@ use furnace::llm::{
 };
 use furnace::nerve::brain::{Llm, ModelNeuron};
 use furnace::nerve::effector::{Effector, FileAppend, Process, Respond, Webhook};
-use furnace::nerve::receptor::{Channel, Http, kinds};
+use furnace::nerve::receptor::{ChannelIn, Http, kinds};
 use furnace::nerve::{
     Fabric, FabricBuilder, Feature, Firing, FnNeuron, Habituation, Mechanisms, Payload, Signal,
     Summation, Urgency,
@@ -196,9 +196,9 @@ fn build_fabric(
     let events = b.receptor(Http::new("events", "/events").text(), habituation);
     // Frames carry no deadline of their own: a novel frame may take the brain's time. A
     // sensor loop that must act before its next sample would add
-    // `Channel::with_urgency(.., UrgencyRule::before_next(1.0))`, and the brain's pathway
+    // `ChannelIn::with_urgency(.., UrgencyRule::before_next(1.0))`, and the brain's pathway
     // would then never be eligible for it.
-    let (frames, frame_sender) = Channel::new("frames", 1024);
+    let (frames, frame_sender) = ChannelIn::new("frames", 1024);
     let frames = b.receptor(frames, habituation);
 
     // Reflexes
@@ -260,11 +260,12 @@ fn build_fabric(
     // Effectors
     let hook = format!("http://127.0.0.1:{HOOK_PORT}/hook");
     let alarm = b.neuron(
-        Effector::new(Webhook::new("alarm", &hook)).refractory(Duration::from_millis(50)),
+        Effector::new(Webhook::new("alarm", &hook).expect("an http:// URL"))
+            .refractory(Duration::from_millis(50)),
         Mechanisms::NONE,
     );
     b.neuron(
-        Effector::new(Webhook::new("webhook", &hook)),
+        Effector::new(Webhook::new("webhook", &hook).expect("an http:// URL")),
         Mechanisms::NONE,
     );
     let (program, args): (&str, &[&str]) = if cfg!(windows) {
@@ -447,8 +448,8 @@ async fn summary() {
             pathway["to"].as_str().unwrap_or(""),
             pathway["kind"].as_str().unwrap_or(""),
             pathway["signals"],
-            pathway["latency"]["p50_us"].as_f64().unwrap_or(0.0),
-            pathway["latency"]["p99_us"].as_f64().unwrap_or(0.0)
+            pathway["latency_ms"]["p50"].as_f64().unwrap_or(0.0) * 1e3,
+            pathway["latency_ms"]["p99"].as_f64().unwrap_or(0.0) * 1e3
         );
     }
     for arc in nerve["arcs"].as_array().into_iter().flatten() {
@@ -456,9 +457,9 @@ async fn summary() {
             "  reflex arc {} -> {}: stimulus to effector call p50 {:.1} µs, p99 {:.1} µs ({} times)",
             arc["from"].as_str().unwrap_or(""),
             arc["to"].as_str().unwrap_or(""),
-            arc["latency"]["p50_us"].as_f64().unwrap_or(0.0),
-            arc["latency"]["p99_us"].as_f64().unwrap_or(0.0),
-            arc["latency"]["count"]
+            arc["latency_ms"]["p50"].as_f64().unwrap_or(0.0) * 1e3,
+            arc["latency_ms"]["p99"].as_f64().unwrap_or(0.0) * 1e3,
+            arc["latency_ms"]["count"]
         );
     }
 }

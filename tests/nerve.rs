@@ -9,7 +9,7 @@ use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode};
 use furnace::Server;
-use furnace::nerve::effector::{Channel, Delivery, Effector, FileAppend, Respond, Sse};
+use furnace::nerve::effector::{ChannelOut, Delivery, Effector, FileAppend, Respond, SseOut};
 use furnace::nerve::receptor::Http;
 use furnace::nerve::{
     Fabric, Firing, FnNeuron, Habituation, Mechanisms, NeuronKind, OUTCOME_HEADER, Summation,
@@ -68,14 +68,14 @@ fn demo() -> Demo {
         .with_kind(NeuronKind::Brain),
         Mechanisms::NONE,
     );
-    let (alarm, alarms) = Channel::new("alarm", 16);
+    let (alarm, alarms) = ChannelOut::new("alarm", 16);
     let alarm = b.neuron(Effector::new(alarm), Mechanisms::NONE);
     b.neuron(Effector::new(Respond::new("respond")), Mechanisms::NONE);
     b.neuron(
         Effector::new(FileAppend::new("journal", &journal)),
         Mechanisms::NONE,
     );
-    b.neuron(Effector::new(Sse::new("push", 16)), Mechanisms::NONE);
+    b.neuron(Effector::new(SseOut::new("push", 16)), Mechanisms::NONE);
     b.reflex(events, classify, 1.0);
     b.reflex(classify, alarm, 1.0);
     b.deliberative(
@@ -237,7 +237,7 @@ async fn nerve_and_metrics_describe_the_fabric() {
     assert_eq!(pathways.len(), 3);
     assert_eq!(pathways[0]["kind"], "reflex");
     assert_eq!(pathways[0]["signals"], 2);
-    assert!(pathways[0]["latency"]["p50_us"].as_f64().unwrap() > 0.0);
+    assert!(pathways[0]["latency_ms"]["p50"].as_f64().unwrap() > 0.0);
     assert_eq!(
         (&pathways[1]["to"], &pathways[1]["signals"]),
         (&serde_json::json!("alarm"), &serde_json::json!(1))
@@ -248,7 +248,7 @@ async fn nerve_and_metrics_describe_the_fabric() {
     let arcs = nerve["arcs"].as_array().unwrap();
     assert!(
         arcs.iter()
-            .any(|a| a["from"] == "events" && a["to"] == "alarm" && a["latency"]["count"] == 1),
+            .any(|a| a["from"] == "events" && a["to"] == "alarm" && a["latency_ms"]["count"] == 1),
         "{arcs:?}"
     );
 
@@ -282,8 +282,9 @@ async fn nerve_and_metrics_describe_the_fabric() {
         "furnace_nerve_signals_received_total 3\n",
         "furnace_nerve_brain_fraction 0.333",
         "furnace_nerve_neuron_quiet_total{neuron=\"events\",reason=\"habituation\"} 1\n",
-        "furnace_nerve_pathway_latency_seconds{from=\"events\",to=\"classify\",quantile=\"0.99\"}",
-        "furnace_nerve_arc_latency_seconds{from=\"events\",to=\"alarm\",quantile=\"0.5\"}",
+        "# TYPE furnace_nerve_pathway_latency_seconds histogram\n",
+        "furnace_nerve_pathway_latency_seconds_bucket{from=\"events\",to=\"classify\",le=\"+Inf\"} ",
+        "furnace_nerve_arc_latency_seconds_count{from=\"events\",to=\"alarm\"} 1\n",
         "furnace_nerve_effector_acted_total{neuron=\"alarm\"} 1\n",
         "# TYPE furnace_nerve_effector_acted_total counter\n",
     ] {

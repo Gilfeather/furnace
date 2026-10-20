@@ -11,26 +11,29 @@ use crate::nerve::signal::{Feature, Payload, Signal};
 /// test. [`ChannelSender::emit`] runs the chain inline on the caller's thread (no queue at
 /// all); [`ChannelSender::send`] queues to the receptor's own thread, which samples the
 /// queue and never blocks the caller.
-pub struct Channel {
+pub struct ChannelIn {
     source: Arc<Source>,
-    receiver: Mutex<Option<mpsc::Receiver<Signal>>>,
+    /// `None` on the queue tells the receptor's thread to end
+    receiver: Mutex<Option<mpsc::Receiver<Option<Signal>>>>,
+    /// Sends that `None` when the receptor is dropped with its fabric, while senders live on
+    stop: mpsc::SyncSender<Option<Signal>>,
 }
 
-/// The feeding end of a [`Channel`]
+/// The feeding end of a [`ChannelIn`]
 #[derive(Clone)]
 pub struct ChannelSender {
     source: Arc<Source>,
-    sender: mpsc::SyncSender<Signal>,
+    sender: mpsc::SyncSender<Option<Signal>>,
 }
 
-impl Channel {
+impl ChannelIn {
     /// A channel receptor and its sender; `capacity` bounds what waits for the sampling
     /// thread, and `send` fails beyond it rather than blocking
     pub fn new(name: &str, capacity: usize) -> (Self, ChannelSender) {
         Self::with_urgency(name, capacity, UrgencyRule::NONE)
     }
 
-    /// [`Channel::new`] with the rule its signals are stamped by
+    /// [`ChannelIn::new`] with the rule its signals are stamped by
     pub fn with_urgency(name: &str, capacity: usize, rule: UrgencyRule) -> (Self, ChannelSender) {
         let (sender, receiver) = mpsc::sync_channel(capacity.max(1));
         let mut source = Source::new(name);
@@ -40,9 +43,17 @@ impl Channel {
             Self {
                 source: source.clone(),
                 receiver: Mutex::new(Some(receiver)),
+                stop: sender.clone(),
             },
             ChannelSender { source, sender },
         )
+    }
+}
+
+impl Drop for ChannelIn {
+    fn drop(&mut self) {
+        // A full queue means the thread is busy: it ends at its next emit, the fabric gone
+        let _ = self.stop.try_send(None);
     }
 }
 
@@ -61,13 +72,15 @@ impl ChannelSender {
     /// Queue the signal for the receptor's thread; `Err` with the signal if the queue is full
     /// or the receptor is gone
     pub fn send(&self, signal: Signal) -> Result<(), Box<Signal>> {
-        self.sender.try_send(signal).map_err(|e| match e {
-            mpsc::TrySendError::Full(s) | mpsc::TrySendError::Disconnected(s) => Box::new(s),
+        self.sender.try_send(Some(signal)).map_err(|e| match e {
+            mpsc::TrySendError::Full(s) | mpsc::TrySendError::Disconnected(s) => {
+                Box::new(s.expect("a sender sends signals"))
+            }
         })
     }
 }
 
-impl Neuron for Channel {
+impl Neuron for ChannelIn {
     fn name(&self) -> &str {
         &self.source.name
     }
@@ -86,7 +99,7 @@ impl Neuron for Channel {
     }
 }
 
-impl Receptor for Channel {
+impl Receptor for ChannelIn {
     fn start(&self, afferent: Afferent) {
         let _ = self.source.afferent.set(afferent.clone());
         let Some(receiver) = self
@@ -101,7 +114,7 @@ impl Receptor for Channel {
         std::thread::Builder::new()
             .name(format!("furnace-receptor-{name}"))
             .spawn(move || {
-                while let Ok(signal) = receiver.recv() {
+                while let Ok(Some(signal)) = receiver.recv() {
                     if afferent.emit(signal).is_none() {
                         return;
                     }
@@ -118,7 +131,7 @@ mod tests {
 
     #[test]
     fn channel_receptor_emits_inline_and_through_its_thread() {
-        let (channel, sender) = Channel::new("stream", 16);
+        let (channel, sender) = ChannelIn::new("stream", 16);
         let (_fabric, r, seen) = fabric_with_receptor(channel);
         let outcome = sender
             .emit(sender.signal(Feature::sketch(b"a"), Payload::text("a")))

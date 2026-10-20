@@ -28,6 +28,12 @@ use super::signal::{Command, Payload, Signal};
 use crate::model::Model;
 use crate::tensor::HostTensor;
 
+/// What a brain fires: the result of its blocking work (a forward pass, a generation), run
+/// already where the pathway put it, so the fabric counts it as computed
+fn computed(signals: Vec<Signal>) -> Firing {
+    Firing::compute(move || signals)
+}
+
 /// Commands in a model's output text: the whole text as JSON, or every JSON object or array
 /// found in it. Accepted shapes, in any of those:
 ///
@@ -169,7 +175,7 @@ impl BrainCounters {
             "without_commands": load(&self.without_commands),
             "commands": load(&self.commands),
             "completion_tokens": load(&self.completion_tokens),
-            "generation": latency.snapshot(),
+            "generation_latency_ms": latency.snapshot(),
         })
     }
 }
@@ -385,7 +391,7 @@ mod llm {
             let result = generate_all(&*self.engine, cx.efferent(), vec![request])
                 .pop()
                 .unwrap_or_else(|| Err("no result".to_string()));
-            Firing::Fire(self.fired(&signal, result, started))
+            computed(self.fired(&signal, result, started))
         }
 
         /// The signals of a summation window: all their generations at once. An engine with
@@ -401,7 +407,7 @@ mod llm {
             signals
                 .iter()
                 .zip(results)
-                .map(|(signal, result)| Firing::Fire(self.fired(signal, result, started)))
+                .map(|(signal, result)| computed(self.fired(signal, result, started)))
                 .collect()
         }
 
@@ -516,7 +522,7 @@ impl Neuron for ModelNeuron {
         let started = std::time::Instant::now();
         let result = self.model.infer(inputs);
         self.latency.observe(started.elapsed());
-        Firing::Fire(self.fired(&signal, result))
+        computed(self.fired(&signal, result))
     }
 
     fn stimulate_many(&self, signals: Vec<Signal>, _cx: &Cx<'_>) -> Vec<Firing> {
@@ -537,7 +543,7 @@ impl Neuron for ModelNeuron {
             let results = self.model.infer_many(requests);
             self.latency.observe(started.elapsed());
             for (i, result) in indexes.into_iter().zip(results) {
-                firings[i] = Some(Firing::Fire(self.fired(&signals[i], result)));
+                firings[i] = Some(computed(self.fired(&signals[i], result)));
             }
         }
         firings
@@ -592,7 +598,7 @@ mod tests {
         assert_eq!(tricky[0].args, "a } b");
     }
 
-    use crate::nerve::effector::{Channel, Effector};
+    use crate::nerve::effector::{ChannelOut, Effector};
     use crate::nerve::fabric::{Fabric, Summation};
     use crate::nerve::neuron::Mechanisms;
     use crate::nerve::signal::{Feature, NeuronId};
@@ -610,7 +616,7 @@ mod tests {
         let mut b = Fabric::builder();
         let r = b.neuron(pass("in"), Mechanisms::NONE);
         let brain = b.neuron(brain, Mechanisms::NONE);
-        let (channel, receiver) = Channel::new("out", 64);
+        let (channel, receiver) = ChannelOut::new("out", 64);
         b.neuron(Effector::new(channel), Mechanisms::NONE);
         b.deliberative(
             r,
@@ -618,7 +624,7 @@ mod tests {
             1.0,
             Summation::default().window(Duration::from_millis(5)),
         );
-        (b.build(), r, receiver)
+        (b.build().unwrap(), r, receiver)
     }
 
     fn signal(text: &str) -> Signal {
@@ -653,6 +659,7 @@ mod tests {
         let brain = metrics.neurons.iter().find(|n| n.name == "brain").unwrap();
         assert_eq!(brain.extra["generations"], 1);
         assert_eq!(brain.extra["commands"], 1);
+        assert_eq!(brain.computed, 1);
         assert_eq!(metrics.brain_fraction, 1.0);
     }
 
@@ -701,5 +708,9 @@ mod tests {
         let stats = model.get_stats();
         assert_eq!(stats.batch_count, 1);
         assert_eq!(stats.batched_items, 3);
+        // Each signal of the window counts as computed, as a brain's work
+        let metrics = fabric.metrics();
+        let brain = metrics.neurons.iter().find(|n| n.name == "brain").unwrap();
+        assert_eq!(brain.computed, 3);
     }
 }

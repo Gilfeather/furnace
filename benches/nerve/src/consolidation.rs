@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use furnace::nerve::consolidation::{Consolidation, ConsolidationMetrics, EngramStore};
-use furnace::nerve::effector::{Channel as ChannelEffector, Delivery, Effector};
+use furnace::nerve::effector::{ChannelOut, Delivery, Effector};
 use furnace::nerve::receptor::Lines;
 use furnace::nerve::{
     Cx, Fabric, Feature, Firing, FnNeuron, Mechanisms, Neuron, NeuronKind, Signal, Summation,
@@ -216,7 +216,7 @@ fn run(lines: &[String], consolidate: bool) -> Run {
     b.reflex(logs, shape, 1.0);
     let (sender, deliveries) = mpsc::channel::<(Delivery, Instant)>();
     for action in ACTIONS {
-        let (act, receiver) = ChannelEffector::new(action, 4096);
+        let (act, receiver) = ChannelOut::new(action, 4096);
         let effector = match &engrams {
             Some(engrams) => Effector::new(engrams.watch(act)),
             None => Effector::new(act),
@@ -250,7 +250,7 @@ fn run(lines: &[String], consolidate: bool) -> Run {
             b.deliberative(shape, brain, 1.0, summation);
         }
     }
-    let fabric = b.build();
+    let fabric = b.build().expect("the fabric");
     fabric.start();
 
     let mut stream = (0..200)
