@@ -29,7 +29,9 @@ use furnace::llm::{Message, StepModel};
 use furnace_candle::Gguf;
 use serde::Serialize;
 
-use super::{SERVER, cpu, fail, free_port, memory, percentile, stop_server};
+use furnace_bench_common::{free_port, memory, percentile, write_json};
+
+use super::{SERVER, cpu, fail, stop_server};
 
 /// Longest a whole stream may take
 const TIMEOUT: Duration = Duration::from_secs(600);
@@ -231,39 +233,28 @@ async fn load(
         .to_string()
     };
     let body = Arc::new(body);
-    let barrier = Arc::new(tokio::sync::Barrier::new(clients + 1));
-    let tasks: Vec<_> = (0..clients)
-        .map(|c| {
-            let (url, body, barrier) = (url.clone(), body.clone(), barrier.clone());
-            tokio::spawn(async move {
-                // A new connection per stream: llama-server closes connections after a stream,
-                // and a client reusing one at that moment fails now and then. Connecting costs
-                // well under a millisecond, the same for every server.
-                let client = reqwest::Client::builder()
-                    .pool_max_idle_per_host(0)
-                    .timeout(TIMEOUT)
-                    .build()
-                    .expect("client");
-                // One stream to warm up
-                stream(&client, &url, body(c * 1000)).await;
-                barrier.wait().await;
-                let mut streams = Vec::with_capacity(per_client);
-                for r in 0..per_client {
-                    streams.push(stream(&client, &url, body(c * 1000 + r + 1)).await);
-                }
-                streams
-            })
-        })
-        .collect();
-    barrier.wait().await;
-    let cpu_before = cpu::seconds(pid);
-    let start = Instant::now();
-    let mut streams = Vec::new();
-    for task in tasks {
-        streams.extend(task.await.expect("client task"));
-    }
-    let wall = start.elapsed();
+    // A new connection per stream: llama-server closes connections after a stream, and a
+    // client reusing one at that moment fails now and then. Connecting costs well under a
+    // millisecond, the same for every server.
+    let connect = || {
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .timeout(TIMEOUT)
+            .build()
+            .expect("client")
+    };
+    let call = move |client: reqwest::Client, c: usize, i: usize| {
+        let (url, body) = (url.clone(), body(c * 1000 + i));
+        async move { stream(&client, &url, body).await }
+    };
+    let mut cpu_before = 0.0;
+    // One stream per client to warm up
+    let run = furnace_bench_common::load(clients, 1, per_client, connect, call, || {
+        cpu_before = cpu::seconds(pid);
+    })
+    .await;
     let cpu = cpu::seconds(pid) - cpu_before;
+    let (streams, wall) = (run.results, run.wall);
 
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
     let (mut ttft, mut itl) = (Vec::new(), Vec::new());
@@ -286,7 +277,10 @@ async fn load(
         }
     }
     let served = streams.len() - failed;
-    let percentile = |values: &mut Vec<f64>, p: f64| {
+    for values in [&mut ttft, &mut itl] {
+        values.sort_by(f64::total_cmp);
+    }
+    let percentile = |values: &[f64], p: f64| {
         if values.is_empty() {
             f64::NAN
         } else {
@@ -299,10 +293,10 @@ async fn load(
         failed,
         failure,
         completion_tokens: tokens as f64 / served as f64,
-        ttft_p50_ms: percentile(&mut ttft, 0.5),
-        ttft_p99_ms: percentile(&mut ttft, 0.99),
-        itl_p50_ms: percentile(&mut itl, 0.5),
-        itl_p99_ms: percentile(&mut itl, 0.99),
+        ttft_p50_ms: percentile(&ttft, 0.5),
+        ttft_p99_ms: percentile(&ttft, 0.99),
+        itl_p50_ms: percentile(&itl, 0.5),
+        itl_p99_ms: percentile(&itl, 0.99),
         stream_tokens_per_second: decode_tokens / decode_seconds,
         tokens_per_second: tokens as f64 / wall.as_secs_f64(),
         cpu_ms_per_token: cpu * 1e3 / tokens as f64,
@@ -427,7 +421,7 @@ async fn bench(
         eprintln!("  {kind:>16} {n:>3} clients: {result:?}");
         results.push(result);
     }
-    let peak_private_mb = memory::peak_private_mb(pid);
+    let peak_private_mb = memory::of_process(pid).peak_private_mb;
     stop_server();
     ServerResult {
         server: kind,
@@ -480,8 +474,7 @@ pub async fn run(options: Options) {
     };
     print_report(&report);
     if let Some(path) = &options.json {
-        let json = serde_json::to_string_pretty(&report).expect("report serializes");
-        std::fs::write(path, json).unwrap_or_else(|e| fail(&format!("cannot write {path}: {e}")));
+        write_json(path, &report);
     }
 }
 

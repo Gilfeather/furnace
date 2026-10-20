@@ -23,6 +23,7 @@ wgpu = ["furnace/wgpu"]
 
 [dependencies]
 furnace = { package = "furnace-server", path = "../.." }
+furnace-bench-common = { path = "../common" }
 # No `transformers` feature: ResNet-18 does not need it and it doubles the binary
 tract-onnx = { version = "0.23.8", default-features = false }
 ort = "=2.0.0-rc.14"
@@ -33,10 +34,8 @@ ureq = { version = "3.4", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
-
-# Same settings as furnace's release profile, so binary sizes and speed are comparable
+# Same settings as furnace's release profile (Cargo.toml) and the other harnesses'
+# (benches/burn, llm, nerve), so binary sizes and speed are comparable: keep the five identical
 [profile.release]
 opt-level = 3
 lto = "fat"

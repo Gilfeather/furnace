@@ -14,16 +14,15 @@ license = "MIT"
 
 [dependencies]
 furnace = { package = "furnace-server", path = "../..", default-features = false, features = ["nerve"] }
+furnace-bench-common = { path = "../common", features = ["load"] }
 axum = "0.8"
 tokio = { version = "1.53", features = ["full"] }
 reqwest = { version = "0.13", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
-
-# Same settings as furnace's release profile
+# Same settings as furnace's release profile (Cargo.toml) and the other harnesses'
+# (benches/burn, compare, llm): keep the five identical
 [profile.release]
 opt-level = 3
 lto = "fat"

@@ -57,6 +57,9 @@ use furnace::llm::{
     BoxError, EngineError, Event, FinishReason, GenerateRequest, LlmEngine, Logits, Scheduled,
     SchedulerConfig, StepModel, mock,
 };
+use furnace_bench_common::{
+    free_port, furnace_version, memory, percentile, python, wait_until_healthy, write_json,
+};
 use serde::Serialize;
 use tokio::sync::mpsc;
 
@@ -69,9 +72,8 @@ const WARMUP: usize = 1;
 static SERVER: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
 
 fn fail(message: &str) -> ! {
-    eprintln!("furnace-llm-bench: {message}");
     stop_server();
-    std::process::exit(1)
+    furnace_bench_common::fail(message)
 }
 
 /// The mock answer every server streams
@@ -468,11 +470,6 @@ struct Load {
     cpu_ms_per_1k_tokens: f64,
 }
 
-fn percentile(values: &mut [f64], p: f64) -> f64 {
-    values.sort_by(f64::total_cmp);
-    values[((values.len() - 1) as f64 * p).round() as usize]
-}
-
 async fn load(
     url: Arc<String>,
     body: Arc<String>,
@@ -481,37 +478,24 @@ async fn load(
     per_client: usize,
     pid: u32,
 ) -> Load {
-    let barrier = Arc::new(tokio::sync::Barrier::new(clients + 1));
-    let tasks: Vec<_> = (0..clients)
-        .map(|_| {
-            let (url, body, barrier) = (url.clone(), body.clone(), barrier.clone());
-            tokio::spawn(async move {
-                let client = reqwest::Client::builder()
-                    .pool_max_idle_per_host(1)
-                    .timeout(REQUEST_TIMEOUT)
-                    .build()
-                    .expect("client");
-                for _ in 0..WARMUP {
-                    stream(&client, &url, &body).await;
-                }
-                barrier.wait().await;
-                let mut streams = Vec::with_capacity(per_client);
-                for _ in 0..per_client {
-                    streams.push(stream(&client, &url, &body).await);
-                }
-                streams
-            })
-        })
-        .collect();
-    barrier.wait().await;
-    let cpu_before = cpu::seconds(pid);
-    let start = Instant::now();
-    let mut streams = Vec::new();
-    for task in tasks {
-        streams.extend(task.await.expect("client task"));
-    }
-    let wall = start.elapsed();
+    let connect = || {
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(1)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("client")
+    };
+    let call = move |client: reqwest::Client, _, _| {
+        let (url, body) = (url.clone(), body.clone());
+        async move { stream(&client, &url, &body).await }
+    };
+    let mut cpu_before = 0.0;
+    let run = furnace_bench_common::load(clients, WARMUP, per_client, connect, call, || {
+        cpu_before = cpu::seconds(pid);
+    })
+    .await;
     let cpu = cpu::seconds(pid) - cpu_before;
+    let (streams, wall) = (run.results, run.wall);
 
     let interval = pace.interval().as_secs_f64() * 1e3;
     let (mut ttft, mut lateness, mut itl) = (Vec::new(), Vec::new(), Vec::new());
@@ -535,16 +519,19 @@ async fn load(
             }
         }
     }
+    for values in [&mut ttft, &mut lateness, &mut itl] {
+        values.sort_by(f64::total_cmp);
+    }
     Load {
         clients,
         streams: streams.len(),
         tokens_per_second: tokens as f64 / wall.as_secs_f64(),
-        ttft_p50_ms: percentile(&mut ttft, 0.5),
-        ttft_p99_ms: percentile(&mut ttft, 0.99),
-        lateness_p50_ms: percentile(&mut lateness, 0.5),
-        lateness_p99_ms: percentile(&mut lateness, 0.99),
-        itl_p50_ms: percentile(&mut itl, 0.5),
-        itl_p99_ms: percentile(&mut itl, 0.99),
+        ttft_p50_ms: percentile(&ttft, 0.5),
+        ttft_p99_ms: percentile(&ttft, 0.99),
+        lateness_p50_ms: percentile(&lateness, 0.5),
+        lateness_p99_ms: percentile(&lateness, 0.99),
+        itl_p50_ms: percentile(&itl, 0.5),
+        itl_p99_ms: percentile(&itl, 0.99),
         cpu_ms_per_1k_tokens: cpu * 1e3 / tokens as f64 * 1e3,
     }
 }
@@ -569,15 +556,11 @@ struct Report {
     servers: Vec<ServerResult>,
 }
 
-fn median(mut values: Vec<f64>) -> f64 {
-    values.sort_by(f64::total_cmp);
-    let n = values.len();
-    (values[(n - 1) / 2] + values[n / 2]) / 2.0
-}
-
 /// One server's runs as one result: the median of each figure on its own
 fn median_server(runs: Vec<ServerResult>) -> ServerResult {
-    let of = |f: &dyn Fn(&ServerResult) -> f64| median(runs.iter().map(f).collect());
+    let of = |f: &dyn Fn(&ServerResult) -> f64| {
+        furnace_bench_common::median(runs.iter().map(f).collect())
+    };
     ServerResult {
         server: runs[0].server.clone(),
         peak_private_mb: of(&|s| s.peak_private_mb),
@@ -598,43 +581,12 @@ fn median_server(runs: Vec<ServerResult>) -> ServerResult {
     }
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .map(|a| a.port())
-        .unwrap_or_else(|e| fail(&format!("no free port: {e}")))
-}
-
-/// The Python with FastAPI and uvicorn: `$FURNACE_BENCH_PYTHON`, else the virtual environment
-/// of `benches/compare/fastapi-ort`
-fn python() -> std::path::PathBuf {
-    std::env::var_os("FURNACE_BENCH_PYTHON").map_or_else(
-        || {
-            let venv = concat!(env!("CARGO_MANIFEST_DIR"), "/../compare/fastapi-ort/.venv");
-            if cfg!(windows) {
-                std::path::Path::new(venv).join("Scripts/python.exe")
-            } else {
-                std::path::Path::new(venv).join("bin/python")
-            }
-        },
-        std::path::PathBuf::from,
-    )
-}
-
 /// Stop the server with every process it started (Python's launcher on Windows)
 fn stop_server() {
     let Some(mut child) = SERVER.lock().unwrap_or_else(|e| e.into_inner()).take() else {
         return;
     };
-    if cfg!(windows) {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &child.id().to_string(), "/T", "/F"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-    let _ = child.kill();
-    let _ = child.wait();
+    furnace_bench_common::stop(&mut child);
 }
 
 async fn bench_server(
@@ -660,37 +612,14 @@ async fn bench_server(
         command.args(["serve", kind, &port.to_string()]);
         command
     };
-    let child = command
+    let mut child = command
         .args(pace_args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap_or_else(|e| fail(&format!("cannot start {kind}: {e}")));
-    let launcher = child.id();
+    let pid = wait_until_healthy(kind, &mut child, port, Duration::from_secs(60));
     *SERVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
-    let probe = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .expect("client");
-    let started = Instant::now();
-    // The process to measure: the Python interpreter reports its own pid, since on Windows a
-    // virtual environment's python.exe only launches it
-    let pid = loop {
-        if let Ok(r) = probe
-            .get(format!("http://127.0.0.1:{port}/healthz"))
-            .send()
-            .await
-            && r.status().is_success()
-        {
-            let body: serde_json::Value =
-                serde_json::from_slice(&r.bytes().await.unwrap_or_default()).unwrap_or_default();
-            break body["pid"].as_u64().map_or(launcher, |pid| pid as u32);
-        }
-        if started.elapsed() > Duration::from_secs(60) {
-            fail(&format!("{kind} server did not start"));
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
     let url = Arc::new(format!("http://127.0.0.1:{port}/v1/chat/completions"));
     let body = Arc::new(
         serde_json::json!({
@@ -708,21 +637,13 @@ async fn bench_server(
         eprintln!("  {kind:>12} {n:>4} clients: {result:?}");
         results.push(result);
     }
-    let peak_private_mb = memory::peak_private_mb(pid);
+    let peak_private_mb = memory::of_process(pid).peak_private_mb;
     stop_server();
     ServerResult {
         server: kind.to_string(),
         peak_private_mb,
         load: results,
     }
-}
-
-fn furnace_version() -> &'static str {
-    include_str!("../../../Cargo.toml")
-        .lines()
-        .find_map(|l| l.strip_prefix("version = \""))
-        .and_then(|v| v.strip_suffix('"'))
-        .unwrap_or("?")
 }
 
 fn print_report(report: &Report) {
@@ -868,8 +789,7 @@ async fn main() {
     };
     print_report(&report);
     if let Some(path) = flag("--json") {
-        let json = serde_json::to_string_pretty(&report).expect("report serializes");
-        std::fs::write(&path, json).unwrap_or_else(|e| fail(&format!("cannot write {path}: {e}")));
+        write_json(&path, &report);
     }
 }
 
@@ -924,58 +844,6 @@ mod cpu {
 
     #[cfg(not(any(windows, target_os = "linux")))]
     pub fn seconds(_pid: u32) -> f64 {
-        0.0
-    }
-}
-
-mod memory {
-    /// Peak memory private to a process, in MB (10^6 bytes); 0 where unsupported
-    #[cfg(windows)]
-    pub fn peak_private_mb(pid: u32) -> f64 {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::ProcessStatus::{
-            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
-        };
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
-        };
-        // SAFETY: plain Win32 calls on a handle opened and closed here; the counters struct is
-        // fully initialized by GetProcessMemoryInfo on success.
-        unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid);
-            if handle.is_null() {
-                return 0.0;
-            }
-            let mut counters: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
-            counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
-            let ok = GetProcessMemoryInfo(
-                handle,
-                (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX)
-                    .cast::<PROCESS_MEMORY_COUNTERS>(),
-                counters.cb,
-            );
-            CloseHandle(handle);
-            if ok == 0 {
-                return 0.0;
-            }
-            counters.PeakPagefileUsage as f64 / 1e6
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn peak_private_mb(pid: u32) -> f64 {
-        // No peak private counter on Linux: the current anonymous resident memory
-        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
-        status
-            .lines()
-            .find(|l| l.starts_with("RssAnon:"))
-            .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|v| v.parse::<f64>().ok())
-            .map_or(0.0, |kb| kb * 1024.0 / 1e6)
-    }
-
-    #[cfg(not(any(windows, target_os = "linux")))]
-    pub fn peak_private_mb(_pid: u32) -> f64 {
         0.0
     }
 }

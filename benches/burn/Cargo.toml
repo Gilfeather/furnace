@@ -20,6 +20,7 @@ wgpu = ["furnace/wgpu", "burn/wgpu"]
 
 [dependencies]
 furnace = { package = "furnace-server", path = "../..", default-features = false }
+furnace-bench-common = { path = "../common", features = ["load"] }
 burn = { version = "0.22", default-features = false, features = ["std", "flex", "rayon", "simd"] }
 axum = "0.8"
 tokio = { version = "1.53", features = ["full"] }
@@ -29,10 +30,8 @@ serde_json = "1.0"
 tower = { version = "0.5", features = ["util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
-
-# Same settings as furnace's release profile
+# Same settings as furnace's release profile (Cargo.toml) and the other harnesses'
+# (benches/compare, llm, nerve): keep the five identical
 [profile.release]
 opt-level = 3
 lto = "fat"

@@ -79,8 +79,7 @@ fn stop(kind: &str, mut process: Child) {
             .stderr(Stdio::null())
             .status();
     }
-    let _ = process.kill();
-    let _ = process.wait();
+    furnace_bench_common::stop(&mut process);
 }
 
 /// Milliseconds from launch to listening, ready and the first inference
@@ -125,7 +124,7 @@ pub fn main(args: &[String]) {
     for (i, name) in ["listening", "ready", "first inference"].iter().enumerate() {
         let mut values: Vec<f64> = results.iter().map(|r| r[i]).collect();
         values.sort_by(f64::total_cmp);
-        let median = (values[(RUNS - 1) / 2] + values[RUNS / 2]) / 2.0;
+        let median = furnace_bench_common::median(values.clone());
         println!(
             "{kind:6} {name:16} median {median:7.1} ms   (min {:.1}, max {:.1}, {RUNS} runs)",
             values[0],
