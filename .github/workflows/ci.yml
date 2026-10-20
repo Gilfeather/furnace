@@ -137,7 +137,8 @@ jobs:
       run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
 
   # The benchmark harnesses have their own workspaces, so `cargo fmt --all` and clippy above
-  # never see them. benches/compare links ONNX Runtime and is only type-checked.
+  # never see them. benches/compare links ONNX Runtime and is only type-checked. The helpers
+  # they share (benches/common) are a path dependency, which a harness's clippy does not lint.
   bench-harnesses:
     name: Benchmark harnesses
     runs-on: ubuntu-latest
@@ -159,11 +160,12 @@ jobs:
           benches/llm -> target
           benches/nerve -> target
           benches/compare -> target
+          benches/common -> target
 
     - name: Check formatting
       shell: bash
       run: |
-        for bench in burn llm nerve compare; do
+        for bench in burn llm nerve compare common; do
           cargo fmt --manifest-path "benches/$bench/Cargo.toml" --all -- --check
         done
 
@@ -173,6 +175,10 @@ jobs:
         for bench in burn llm nerve; do
           cargo clippy --locked --manifest-path "benches/$bench/Cargo.toml" --all-targets -- -D warnings
         done
+        cargo clippy --locked --manifest-path benches/common/Cargo.toml --all-targets --all-features -- -D warnings
+
+    - name: Test benches/common
+      run: cargo test --locked --manifest-path benches/common/Cargo.toml --all-features
 
     - name: Type check benches/compare
       run: cargo check --locked --manifest-path benches/compare/Cargo.toml --all-targets
