@@ -56,6 +56,8 @@ pub struct Gguf {
 }
 
 impl Gguf {
+    /// Load the GGUF file at `path`, with the defaults: its own tokenizer and chat template,
+    /// [`DEFAULT_MAX_CONTEXT`] and [`DEFAULT_MAX_SEQUENCES`]
     pub fn new(path: impl AsRef<Path>) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
@@ -181,6 +183,7 @@ pub struct GgufModel {
 }
 
 impl GgufModel {
+    /// The loaded weights: architecture, trained context, vocabulary size
     pub fn weights(&self) -> &Weights {
         &self.weights
     }

@@ -26,8 +26,11 @@ pub struct Histogram {
 /// Estimated percentiles of a histogram, in milliseconds (`None` before the first observation)
 #[derive(Debug, Clone, Copy, Default, Serialize, serde::Deserialize, PartialEq)]
 pub struct Percentiles {
+    /// The median
     pub p50: Option<f64>,
+    /// The 95th percentile
     pub p95: Option<f64>,
+    /// The 99th percentile
     pub p99: Option<f64>,
 }
 
@@ -38,6 +41,7 @@ impl Default for Histogram {
 }
 
 impl Histogram {
+    /// An empty histogram
     pub fn new() -> Self {
         Self {
             counts: (0..=LATENCY_BUCKETS.len())
@@ -47,6 +51,7 @@ impl Histogram {
         }
     }
 
+    /// Count one observation
     pub fn observe(&self, elapsed: Duration) {
         let seconds = elapsed.as_secs_f64();
         let bucket = LATENCY_BUCKETS
@@ -60,6 +65,13 @@ impl Histogram {
         );
     }
 
+    /// The bucket counts and the sum in seconds.
+    ///
+    /// Not atomic across the counters: each is read on its own. An observation touches one
+    /// bucket, and `_count` is the bucket total, so the buckets and `_count` always agree; but
+    /// an observation in flight can be in its bucket before its time is in the sum, so in one
+    /// scrape `_sum` may lag `_count` by the observations being recorded. The next scrape has
+    /// them.
     fn snapshot(&self) -> (Vec<u64>, f64) {
         let counts = self
             .counts
@@ -94,6 +106,8 @@ impl Histogram {
         LATENCY_BUCKETS.last().copied()
     }
 
+    /// The median, 95th and 99th percentiles in milliseconds, as [`quantile`](Self::quantile)
+    /// estimates them
     pub fn percentiles_ms(&self) -> Percentiles {
         let ms = |q| self.quantile(q).map(|s| s * 1000.0);
         Percentiles {
