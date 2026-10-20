@@ -1056,10 +1056,11 @@ types (item 12, nerve side).
 Decided for 0.11. Outside `src/nerve`, done: `Server::router`, `api::router` and
 `router_with_models` return `Result<Router>` (`try_router` is gone); `Model::warm_up ->
 crate::Result`; the dummies behind `test-models` (`src/model/testing.rs`) and the fallback
-only for a path named `sample_model`, with a warning; `max_concurrent_requests` in the JSON
-next to the old name for one release; `#[non_exhaustive]` on `Event` and `SchedulerConfig`
-(with `with_*` setters); `EngineError::Failed(BoxError)`; `tls::Error`; the renames
-`llm::Prompt`, `SchedulerCounters`, `mock::SharedCount`, `access::ClientRateLimit`, each with
-a deprecated alias. `NamedInput` no longer exists (the batching unification removed it). The
-`src/nerve` items follow in a second change. Not done: `Model::new` stays public, the flat
-`predict*` methods stay while `/predict` is served, and a typed `Neuron::metrics` waits.
+only for a path named `sample_model`, with a warning; `max_concurrent_requests` in the JSON;
+`#[non_exhaustive]` on `Event` and `SchedulerConfig` (with `with_*` setters);
+`EngineError::Failed(BoxError)`; `tls::Error`; the renames `llm::Prompt`,
+`SchedulerCounters`, `mock::SharedCount`, `access::ClientRateLimit`, without aliases (no
+compatibility shims before 1.0). `NamedInput` no longer exists (the batching unification
+removed it). The `src/nerve` items follow in a second change. Not done: `Model::new` stays
+public, the flat `predict*` methods stay while `/predict` is served, and a typed
+`Neuron::metrics` waits.

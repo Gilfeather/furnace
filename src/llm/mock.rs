@@ -81,10 +81,6 @@ pub fn byte_pipeline() -> TextPipeline {
 #[derive(Debug, Clone, Default)]
 pub struct SharedCount(Arc<AtomicUsize>);
 
-/// The old name of [`SharedCount`]
-#[deprecated(since = "0.11.0", note = "renamed to `SharedCount`")]
-pub type Live = SharedCount;
-
 impl SharedCount {
     /// The count now
     pub fn get(&self) -> usize {

@@ -126,10 +126,6 @@ pub use stop::StopStrings;
 /// Any error a model returns; furnace reports its message
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// The old name of [`SchedulerCounters`]
-#[deprecated(since = "0.11.0", note = "renamed to `SchedulerCounters`")]
-pub type SchedulerStats = SchedulerCounters;
-
 /// One message of a chat
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Message {
@@ -157,10 +153,6 @@ pub enum Prompt {
     /// Raw text (`/v1/completions`)
     Text(String),
 }
-
-/// The old name of [`Prompt`]
-#[deprecated(since = "0.11.0", note = "renamed to `Prompt`")]
-pub type Input = Prompt;
 
 /// How to pick tokens; `None` means the engine's default
 #[derive(Debug, Clone, Default, PartialEq)]

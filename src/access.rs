@@ -21,10 +21,6 @@ pub struct ClientRateLimit {
     pub burst: u32,
 }
 
-/// The old name of [`ClientRateLimit`]
-#[deprecated(since = "0.11.0", note = "renamed to `ClientRateLimit`")]
-pub type RateLimit = ClientRateLimit;
-
 /// Why a request is turned away
 #[derive(Debug, PartialEq)]
 pub enum Rejection {
