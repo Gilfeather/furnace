@@ -393,7 +393,7 @@ mod tests {
             let afferent = afferent.clone();
             move || afferent.sleep(Duration::from_secs(3600))
         });
-        std::thread::sleep(Duration::from_millis(20));
+        // Raised while the sleeper waits or before it starts: either way it returns false
         stop.raise();
         assert!(!sleeper.join().unwrap());
         assert!(afferent.is_stopped());

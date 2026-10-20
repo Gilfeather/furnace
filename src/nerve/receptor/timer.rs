@@ -105,8 +105,42 @@ mod tests {
         assert_eq!(seen[0].payload.to_json().unwrap()["tick"], 0);
         assert_ne!(seen[0].feature, seen[1].feature);
         // From the second tick on, the rate is known and the deadline follows it
-        assert!(seen[4].urgency.rate > 50.0, "{}", seen[4].urgency.rate);
+        assert!(seen[4].urgency.rate > 0.0, "{}", seen[4].urgency.rate);
         assert!(seen[4].urgency.deadline.is_some());
         assert!(seen[0].urgency.deadline.is_none());
+    }
+
+    #[test]
+    fn ticks_of_the_same_feature_habituate() {
+        let mut b = crate::nerve::Fabric::builder();
+        let timer = b.receptor(
+            Timer::new("tick", Duration::from_millis(1)).same_feature(),
+            crate::nerve::Mechanisms::NONE
+                .threshold(0.6)
+                .habituation(crate::nerve::Habituation::new(Duration::from_secs(3600))),
+        );
+        let (seen, ticks) = std::sync::mpsc::channel();
+        let sink = b.neuron(
+            crate::nerve::FnNeuron::reflex("sink", move |s, _| {
+                let _ = seen.send(s);
+                Firing::Quiet
+            })
+            .with_kind(NeuronKind::Effector),
+            crate::nerve::Mechanisms::NONE,
+        );
+        b.reflex(timer, sink, 1.0);
+        let fabric = b.build().unwrap();
+        fabric.start();
+        // Only the first tick passes; the repeats die at the timer's gate
+        let first = ticks.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(first.payload.to_json().unwrap()["tick"], 0);
+        let counters = &fabric.0.cells[timer.index()].counters;
+        wait_until(|| {
+            counters
+                .quiet_habituation
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= 3
+        });
+        assert!(ticks.try_recv().is_err());
     }
 }

@@ -517,6 +517,32 @@ mod tests {
     }
 
     #[test]
+    fn habituation_recovers_along_exp_minus_dt_over_tau() {
+        let tau = 10 * SECOND;
+        let gate = Gate::new(
+            Mechanisms::NONE.habituation(Habituation::new(Duration::from_nanos(tau)).gain(0.5)),
+        );
+        // Each feature is seen once at 1 s, then again `dt` later: the second arrives at
+        // 1 - 0.5 * exp(-dt / tau)
+        for (i, dt) in [0, tau / 2, tau, 2 * tau, 3 * tau, 6 * tau]
+            .into_iter()
+            .enumerate()
+        {
+            let feature = [i as u8];
+            let mut first = signal(&feature);
+            assert_eq!(gate.admit(&mut first, SECOND), Ok(()));
+            let mut again = signal(&feature);
+            assert_eq!(gate.admit(&mut again, SECOND + dt), Ok(()));
+            let expected = 1.0 - 0.5 * (-(dt as f32) / tau as f32).exp();
+            assert!(
+                (again.intensity - expected).abs() < 1e-4,
+                "dt = {dt}: {} != {expected}",
+                again.intensity
+            );
+        }
+    }
+
+    #[test]
     fn habituation_table_is_bounded() {
         let gate = Gate::new(
             Mechanisms::NONE

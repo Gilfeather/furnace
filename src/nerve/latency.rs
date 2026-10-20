@@ -175,6 +175,30 @@ mod tests {
     }
 
     #[test]
+    fn percentiles_are_stale_between_recomputes() {
+        let l = LatencyEstimate::new();
+        // The first few samples each recompute
+        for _ in 0..4 {
+            l.observe(Duration::from_micros(10));
+        }
+        assert_eq!(l.p99(), Some(Duration::from_micros(10)));
+        // After them, only every EVERY-th sample does: 11 slow ones leave the estimate as it was
+        for _ in 4..EVERY - 1 {
+            l.observe(Duration::from_millis(1));
+        }
+        assert_eq!(l.count(), EVERY - 1);
+        assert_eq!(l.p50(), Some(Duration::from_micros(10)));
+        assert_eq!(l.p99(), Some(Duration::from_micros(10)));
+        // The EVERY-th sees the window: 12 slow of 16
+        l.observe(Duration::from_millis(1));
+        assert_eq!(l.p50(), Some(Duration::from_millis(1)));
+        assert_eq!(l.p99(), Some(Duration::from_millis(1)));
+        // The snapshot reads the histogram, which is never stale
+        assert_eq!(l.snapshot().count, EVERY);
+        assert_eq!(l.snapshot().max, Some(1.0));
+    }
+
+    #[test]
     fn p99_sees_the_slow_tail() {
         let l = LatencyEstimate::new();
         for i in 0..128 {

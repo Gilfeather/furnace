@@ -453,6 +453,7 @@ mod tests {
     use crate::backend::BackendKind;
     use crate::model::BurnModel;
     use crate::tensor::{IoSpec, Values};
+    use futures_util::FutureExt;
     use std::sync::Condvar;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -461,12 +462,11 @@ mod tests {
     const WIDTH: usize = 4;
 
     /// Doubles its input and records every batch size it sees, and the most passes that ran
-    /// at once. It can be slowed down or held, and it panics on an input of -1, so tests can
-    /// check what was summed with what.
+    /// at once. It can be held, and it panics on an input of -1, so tests can check what was
+    /// summed with what.
     #[derive(Debug)]
     struct Doubler {
         batches: Arc<Mutex<Vec<usize>>>,
-        delay: Duration,
         running: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
         holds: Arc<Holds>,
@@ -521,7 +521,6 @@ mod tests {
                 panic!("f32 input");
             };
             self.holds.wait(&values);
-            std::thread::sleep(self.delay);
             self.running.fetch_sub(1, Ordering::SeqCst);
             assert!(!values.contains(&-1.0), "poisoned input");
             Ok(vec![HostTensor {
@@ -560,16 +559,11 @@ mod tests {
         )
     }
 
-    fn setup(max_batch_size: usize, batch_timeout: Duration, delay: Duration) -> Setup {
-        setup_with_workers(1, max_batch_size, batch_timeout, delay)
+    fn setup(max_batch_size: usize, batch_timeout: Duration) -> Setup {
+        setup_with_workers(1, max_batch_size, batch_timeout)
     }
 
-    fn setup_with_workers(
-        workers: usize,
-        max_batch_size: usize,
-        batch_timeout: Duration,
-        delay: Duration,
-    ) -> Setup {
+    fn setup_with_workers(workers: usize, max_batch_size: usize, batch_timeout: Duration) -> Setup {
         let batches = Arc::new(Mutex::new(Vec::new()));
         let running = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
@@ -577,7 +571,6 @@ mod tests {
         let model = Arc::new(Model::new(
             Box::new(Doubler {
                 batches: batches.clone(),
-                delay,
                 running: running.clone(),
                 peak: peak.clone(),
                 holds: holds.clone(),
@@ -639,19 +632,40 @@ mod tests {
         fn batches(&self) -> Vec<usize> {
             self.batches.lock().unwrap().clone()
         }
+
+        /// Requests queued and not yet taken by a worker
+        fn waiting(&self) -> u64 {
+            self.serving.fabric().waiting()
+        }
+
+        fn running(&self) -> usize {
+            self.running.load(Ordering::SeqCst)
+        }
+
+        /// Run a request holding `value` and wait until it occupies the worker
+        async fn occupy(&self, value: f32) -> Answered {
+            self.holds.hold(value);
+            let answer = self.spawn(&[value]);
+            until(|| self.running() == 1).await;
+            answer
+        }
     }
 
-    /// Let the worker pick up what was submitted so far
-    async fn settle() {
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    /// Wait for `done`, letting the requests' tasks run meanwhile; fails the test after
+    /// 10 seconds
+    async fn until(done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "still not true after 10 s");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
     }
 
     #[tokio::test]
     async fn concurrent_requests_get_their_own_outputs_in_order() {
-        let s = setup(8, Duration::ZERO, Duration::from_millis(30));
+        let s = setup(8, Duration::ZERO);
         // The first request occupies the worker while the rest queue up behind it
-        let first = s.spawn(&[100.0]);
-        settle().await;
+        let first = s.occupy(100.0).await;
         let requests: Vec<Vec<f32>> = (0..6)
             .map(|i| {
                 let i = i as f32;
@@ -663,6 +677,8 @@ mod tests {
             })
             .collect();
         let answers: Vec<_> = requests.iter().map(|r| s.spawn(r)).collect();
+        until(|| s.waiting() == 6).await;
+        s.holds.release(100.0);
         assert_eq!(values(first.await.unwrap()), expected(&[100.0]));
         for (request, answer) in requests.iter().zip(answers) {
             assert_eq!(values(answer.await.unwrap()), expected(request));
@@ -677,9 +693,8 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_request_fails_alone() {
-        let s = setup(8, Duration::ZERO, Duration::from_millis(30));
-        let first = s.spawn(&[1.0]);
-        settle().await;
+        let s = setup(8, Duration::ZERO);
+        let first = s.occupy(1.0).await;
         let good = s.spawn(&[2.0]);
         let not_finite = s.spawn(&[f32::NAN]);
         let serving = s.serving.clone();
@@ -691,6 +706,8 @@ mod tests {
             serving.infer("doubler", inputs, None).await
         });
         let also_good = s.spawn(&[3.0]);
+        until(|| s.waiting() == 4).await;
+        s.holds.release(1.0);
 
         assert_eq!(values(first.await.unwrap()), expected(&[1.0]));
         assert_eq!(values(good.await.unwrap()), expected(&[2.0]));
@@ -705,16 +722,20 @@ mod tests {
 
     #[tokio::test]
     async fn batches_respect_max_size_and_keep_order() {
-        let s = setup(4, Duration::ZERO, Duration::from_millis(30));
-        let first = s.spawn(&[0.0]);
-        settle().await;
+        let s = setup(4, Duration::ZERO);
+        let first = s.occupy(100.0).await;
         let sizes = [3, 2, 6, 1, 1];
-        // Polled in order, so they are queued in order
-        let answers = futures_util::future::join_all(sizes.iter().enumerate().map(|(i, &n)| {
-            s.serving
-                .infer("doubler", request(&vec![i as f32; n]), None)
-        }))
-        .await;
+        // Polled in order, so they are queued in order; the worker is let go once all are
+        let (answers, ()) = tokio::join!(
+            futures_util::future::join_all(sizes.iter().enumerate().map(|(i, &n)| {
+                s.serving
+                    .infer("doubler", request(&vec![i as f32; n]), None)
+            })),
+            async {
+                until(|| s.waiting() == 5).await;
+                s.holds.release(100.0);
+            }
+        );
         values(first.await.unwrap());
         for (i, (&n, answer)) in sizes.iter().zip(answers).enumerate() {
             assert_eq!(values(answer), expected(&vec![i as f32; n]));
@@ -725,77 +746,69 @@ mod tests {
 
     #[tokio::test]
     async fn lone_request_does_not_wait_for_the_window() {
-        let s = setup(8, Duration::from_secs(5), Duration::ZERO);
-        let start = Instant::now();
-        assert_eq!(values(s.spawn(&[1.0]).await.unwrap()), expected(&[1.0]));
-        assert!(
-            start.elapsed() < Duration::from_secs(1),
-            "{:?}",
-            start.elapsed()
-        );
+        // Waiting out the window would take an hour
+        let s = setup(8, Duration::from_secs(3600));
+        let answer = tokio::time::timeout(Duration::from_secs(10), s.spawn(&[1.0]))
+            .await
+            .expect("answered without waiting for the window");
+        assert_eq!(values(answer.unwrap()), expected(&[1.0]));
     }
 
     #[tokio::test]
     async fn waits_for_a_request_on_its_way_in() {
-        let s = setup(8, Duration::from_secs(5), Duration::ZERO);
+        let s = setup(8, Duration::from_secs(3600));
         // A second request is still being received while the first is queued
         let arriving = s.serving.announce("doubler");
-        let first = s.spawn(&[1.0]);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut first = Box::pin(s.serving.infer("doubler", request(&[1.0]), None));
+        assert!((&mut first).now_or_never().is_none());
+        // The worker has the first and waits for the second
+        until(|| s.waiting() == 0).await;
         let second = s.serving.infer("doubler", request(&[2.0]), arriving).await;
-        assert_eq!(values(first.await.unwrap()), expected(&[1.0]));
+        assert_eq!(values(first.await), expected(&[1.0]));
         assert_eq!(values(second), expected(&[2.0]));
         assert_eq!(s.batches(), vec![2]);
     }
 
     #[tokio::test]
     async fn abandoned_arrival_ends_the_wait() {
-        let s = setup(8, Duration::from_secs(5), Duration::ZERO);
+        let s = setup(8, Duration::from_secs(3600));
         let arriving = s.serving.announce("doubler");
-        let start = Instant::now();
-        let first = s.spawn(&[1.0]);
-        settle().await;
-        // E.g. its body failed to decode
+        let mut first = Box::pin(s.serving.infer("doubler", request(&[1.0]), None));
+        assert!((&mut first).now_or_never().is_none());
+        until(|| s.waiting() == 0).await;
+        // E.g. its body failed to decode: the worker stops waiting for it, not an hour later
         drop(arriving);
-        assert_eq!(values(first.await.unwrap()), expected(&[1.0]));
-        assert!(
-            start.elapsed() < Duration::from_secs(1),
-            "{:?}",
-            start.elapsed()
-        );
+        let answer = tokio::time::timeout(Duration::from_secs(10), first)
+            .await
+            .expect("the wait ended with the arrival");
+        assert_eq!(values(answer), expected(&[1.0]));
+        assert_eq!(s.batches(), vec![1]);
     }
 
     #[tokio::test]
     async fn wait_is_bounded_by_the_timeout() {
-        let s = setup(8, Duration::from_millis(20), Duration::ZERO);
+        let s = setup(8, Duration::from_millis(20));
         let _never_submitted = s.serving.announce("doubler");
         let start = Instant::now();
-        assert_eq!(values(s.spawn(&[1.0]).await.unwrap()), expected(&[1.0]));
-        let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_millis(20), "{elapsed:?}");
-        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+        let answer = tokio::time::timeout(Duration::from_secs(10), s.spawn(&[1.0]))
+            .await
+            .expect("answered once the window passed");
+        assert_eq!(values(answer.unwrap()), expected(&[1.0]));
+        // It did wait for the request announced, as long as the window and no less
+        assert!(start.elapsed() >= Duration::from_millis(20));
     }
 
     #[tokio::test]
     async fn abandoned_request_is_skipped() {
-        let s = setup(8, Duration::ZERO, Duration::ZERO);
+        let s = setup(8, Duration::ZERO);
         // The first pass is held, so the next two queue behind it
-        s.holds.hold(1.0);
-        let first = s.spawn(&[1.0]);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while s.running.load(Ordering::SeqCst) < 1 {
-            assert!(Instant::now() < deadline, "the first never ran");
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-        // The client times out while queued: its future is dropped with its reply
-        let gave_up = tokio::time::timeout(
-            Duration::from_millis(1),
-            s.serving.infer("doubler", request(&[2.0]), None),
-        )
-        .await;
-        assert!(gave_up.is_err());
+        let first = s.occupy(1.0).await;
+        // The client gives up while queued: its future is dropped with its reply
+        let mut gave_up = Box::pin(s.serving.infer("doubler", request(&[2.0]), None));
+        assert!((&mut gave_up).now_or_never().is_none());
+        drop(gave_up);
         let kept = s.spawn(&[3.0]);
-        settle().await;
+        until(|| s.waiting() == 2).await;
         s.holds.release(1.0);
         values(first.await.unwrap());
         assert_eq!(values(kept.await.unwrap()), expected(&[3.0]));
@@ -804,25 +817,18 @@ mod tests {
 
     #[tokio::test]
     async fn idle_workers_run_requests_side_by_side() {
-        let s = setup_with_workers(2, 8, Duration::from_secs(5), Duration::ZERO);
+        let s = setup_with_workers(2, 8, Duration::from_secs(5));
         // The first two passes are held, so both run until released
         s.holds.hold(1.0);
         s.holds.hold(2.0);
         let first = s.spawn(&[1.0]);
         let second = s.spawn(&[2.0]);
         // Each went to an idle worker: both passes run side by side
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while s.running.load(Ordering::SeqCst) < 2 {
-            assert!(
-                Instant::now() < deadline,
-                "the first two never ran together"
-            );
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
+        until(|| s.running() == 2).await;
         // Both workers are busy, so these two wait in the queue
         let third = s.spawn(&[3.0]);
         let fourth = s.spawn(&[4.0]);
-        settle().await;
+        until(|| s.waiting() == 2).await;
         // The worker that frees up takes both as one batch while the other is still busy.
         // (Freeing both at once could leave two idle workers, which rightly run them apart.)
         s.holds.release(1.0);
@@ -837,15 +843,17 @@ mod tests {
 
     #[tokio::test]
     async fn panicking_batch_fails_only_its_requests() {
-        let s = setup(8, Duration::ZERO, Duration::from_millis(30));
-        let first = s.spawn(&[1.0]);
-        settle().await;
+        let s = setup(8, Duration::ZERO);
+        let first = s.occupy(1.0).await;
         let poisoned = s.spawn(&[-1.0]);
         let neighbour = s.spawn(&[2.0]);
+        until(|| s.waiting() == 2).await;
+        s.holds.release(1.0);
         assert!(first.await.unwrap().is_ok());
         // Both were in the batch that panicked, so neither was answered
         assert_eq!(poisoned.await.unwrap().unwrap_err(), Refused::Lost);
         assert_eq!(neighbour.await.unwrap().unwrap_err(), Refused::Lost);
+        assert_eq!(s.batches(), vec![1, 2]);
         // The worker survives
         assert_eq!(values(s.spawn(&[3.0]).await.unwrap()), expected(&[3.0]));
     }
@@ -897,15 +905,22 @@ mod tests {
 
     #[tokio::test]
     async fn without_batching_every_request_runs_alone_at_once() {
-        let s = setup_with_workers(1, 1, Duration::from_secs(5), Duration::from_millis(30));
+        let s = setup_with_workers(1, 1, Duration::from_secs(5));
         assert!(s.serving.announce("doubler").is_none());
+        for i in 0..4 {
+            s.holds.hold(i as f32);
+        }
         let answers: Vec<_> = (0..4).map(|i| s.spawn(&[i as f32])).collect();
+        // Each on a blocking thread of its own, side by side
+        until(|| s.running() == 4).await;
+        for i in 0..4 {
+            s.holds.release(i as f32);
+        }
         for (i, answer) in answers.into_iter().enumerate() {
             assert_eq!(values(answer.await.unwrap()), expected(&[i as f32]));
         }
         assert_eq!(s.batches(), vec![1, 1, 1, 1]);
-        // Each on a blocking thread of its own, side by side
-        assert!(s.peak.load(Ordering::SeqCst) >= 2);
+        assert_eq!(s.peak.load(Ordering::SeqCst), 4);
     }
 
     #[test]

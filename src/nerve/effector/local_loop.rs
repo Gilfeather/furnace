@@ -227,14 +227,26 @@ pub(super) async fn run(
 mod tests {
     use super::super::{Act, ChannelOut, Effector};
     use super::*;
+    use crate::nerve::fabric::Fabric;
+    use crate::nerve::neuron::{Cx, Firing, Neuron};
     use crate::nerve::testing::{command, fabric_with, wait_until};
     use std::sync::atomic::AtomicUsize;
+
+    const HOUR: Duration = Duration::from_secs(3600);
 
     /// An act that fails a configured number of times, then succeeds
     struct Flaky {
         fail: AtomicUsize,
-        calls: AtomicUsize,
         retryable: bool,
+    }
+
+    impl Flaky {
+        fn new(fail: usize, retryable: bool) -> Self {
+            Self {
+                fail: AtomicUsize::new(fail),
+                retryable,
+            }
+        }
     }
 
     impl Act for Flaky {
@@ -242,7 +254,6 @@ mod tests {
             "flaky"
         }
         fn act(&self, _: &Command, _: &Signal) -> Action {
-            self.calls.fetch_add(1, Ordering::SeqCst);
             let left = self.fail.load(Ordering::SeqCst);
             if left > 0 {
                 self.fail.store(left - 1, Ordering::SeqCst);
@@ -257,14 +268,40 @@ mod tests {
         }
     }
 
+    /// An effector in a fabric, stimulated as the fabric would stimulate it at a given time,
+    /// so the loop's clock is the test's
+    struct Clocked {
+        effector: Effector,
+        fabric: Fabric,
+    }
+
+    impl Clocked {
+        fn new(effector: Effector) -> Self {
+            let (fabric, _) = fabric_with(effector.clone());
+            Self { effector, fabric }
+        }
+
+        fn at(&self, now: Instant, args: serde_json::Value) -> Firing {
+            let name = Neuron::name(&self.effector).to_string();
+            let cx = Cx {
+                now,
+                id: self.fabric.neuron(&name).unwrap(),
+                fabric: &self.fabric,
+            };
+            Neuron::stimulate(&self.effector, command(&name, args), &cx)
+        }
+    }
+
+    fn admitted(admission: Admission) -> Option<Duration> {
+        match admission {
+            Admission::After(delay) => Some(delay),
+            Admission::Refractory | Admission::Open | Admission::RateLimited => None,
+        }
+    }
+
     #[test]
     fn retries_with_backoff_then_succeeds() {
-        let flaky = Flaky {
-            fail: AtomicUsize::new(2),
-            calls: AtomicUsize::new(0),
-            retryable: true,
-        };
-        let effector = Effector::new(flaky).retry(Retry {
+        let effector = Effector::new(Flaky::new(2, true)).retry(Retry {
             attempts: 3,
             backoff: Duration::from_millis(5),
             max_backoff: Duration::from_millis(20),
@@ -279,55 +316,141 @@ mod tests {
 
     #[test]
     fn fatal_errors_are_not_retried_and_open_the_circuit() {
-        let flaky = Flaky {
-            fail: AtomicUsize::new(100),
-            calls: AtomicUsize::new(0),
-            retryable: false,
-        };
-        let effector = Effector::new(flaky).breaker(Breaker {
+        let effector = Effector::new(Flaky::new(100, false)).breaker(Breaker {
             failures: 2,
-            cooldown: Duration::from_millis(50),
+            cooldown: HOUR,
         });
-        let (fabric, r) = fabric_with(effector.clone());
+        let clocked = Clocked::new(effector.clone());
+        let t0 = Instant::now();
         for _ in 0..5 {
-            fabric.stimulate(r, command("flaky", serde_json::Value::Null));
+            clocked.at(t0, serde_json::Value::Null);
         }
         let m = effector.metrics();
         // Two failures open the circuit; the other three are dropped
         assert_eq!((m.failed, m.retries, m.dropped_open), (2, 0, 3));
         assert_eq!(m.breaker, BreakerState::Open);
-        // After the cooldown one trial goes through (and fails again)
-        std::thread::sleep(Duration::from_millis(60));
+        // Still within the cooldown: dropped
+        assert!(
+            clocked
+                .at(t0 + HOUR / 2, serde_json::Value::Null)
+                .is_quiet()
+        );
+        assert_eq!(effector.metrics().dropped_open, 4);
+        // After the cooldown one trial goes through, fails again, and opens the circuit again
+        assert!(
+            !clocked
+                .at(t0 + 2 * HOUR, serde_json::Value::Null)
+                .is_quiet()
+        );
+        let m = effector.metrics();
+        assert_eq!((m.failed, m.dropped_open), (3, 4));
+        assert_eq!(m.breaker, BreakerState::Open);
+    }
+
+    #[test]
+    fn a_successful_trial_closes_the_circuit() {
+        // A zero cooldown: half open as soon as it opened
+        let effector = Effector::new(Flaky::new(2, false)).breaker(Breaker {
+            failures: 2,
+            cooldown: Duration::ZERO,
+        });
+        let clocked = Clocked::new(effector.clone());
+        let t0 = Instant::now();
+        clocked.at(t0, serde_json::Value::Null);
+        clocked.at(t0, serde_json::Value::Null);
         assert_eq!(effector.metrics().breaker, BreakerState::HalfOpen);
-        fabric.stimulate(r, command("flaky", serde_json::Value::Null));
-        assert_eq!(effector.metrics().failed, 3);
-        assert_eq!(effector.metrics().breaker, BreakerState::Open);
+        // The trial succeeds: closed, and the count of failures in a row starts again
+        clocked.at(Instant::now(), serde_json::Value::Null);
+        let m = effector.metrics();
+        assert_eq!((m.acted, m.failed, m.dropped_open), (1, 2, 0));
+        assert_eq!(m.breaker, BreakerState::Closed);
+        let state = effector.inner.state.lock().unwrap();
+        assert_eq!((state.consecutive_failures, state.trial), (0, false));
+    }
+
+    #[test]
+    fn half_open_lets_one_trial_through_at_a_time() {
+        let effector = Effector::new(Flaky::new(0, false)).breaker(Breaker {
+            failures: 1,
+            cooldown: HOUR,
+        });
+        let inner = &effector.inner;
+        let t0 = Instant::now();
+        assert_eq!(admitted(inner.admit(t0)), Some(Duration::ZERO));
+        inner.failed(&ActError::fatal("down"));
+        assert!(matches!(inner.admit(t0), Admission::Open));
+        // The cooldown is over: the first is the trial, the next is dropped while it is out
+        let later = t0 + 2 * HOUR;
+        assert_eq!(admitted(inner.admit(later)), Some(Duration::ZERO));
+        assert!(matches!(inner.admit(later), Admission::Open));
+        inner.succeeded(later);
+        assert_eq!(admitted(inner.admit(later)), Some(Duration::ZERO));
+        assert_eq!(effector.metrics().dropped_open, 2);
+    }
+
+    #[test]
+    fn the_rate_limit_delays_within_max_wait_and_drops_beyond_it() {
+        let effector = Effector::new(Flaky::new(0, false))
+            .rate_limit(ActRateLimit::new(1000.0, 2).max_wait(Duration::from_micros(3500)));
+        let inner = &effector.inner;
+        let t0 = Instant::now();
+        let ms = |n: f64| Duration::from_secs_f64(n / 1e3);
+        // The burst at once, then one token a millisecond: 1, 2 and 3 ms of waiting, and a
+        // fourth would wait longer than allowed
+        let delays: Vec<Option<Duration>> = (0..6).map(|_| admitted(inner.admit(t0))).collect();
+        assert_eq!(
+            delays,
+            [
+                Some(ms(0.0)),
+                Some(ms(0.0)),
+                Some(ms(1.0)),
+                Some(ms(2.0)),
+                Some(ms(3.0)),
+                None
+            ]
+        );
+        assert_eq!(effector.metrics().dropped_rate, 1);
+        // The bucket refills with time: 5 ms later, three tokens are owed and five came back
+        assert_eq!(
+            admitted(inner.admit(t0 + Duration::from_millis(5))),
+            Some(Duration::ZERO)
+        );
     }
 
     #[test]
     fn rate_limit_paces_and_refractory_ignores() {
         let (channel, receiver) = ChannelOut::new("out", 64);
         let effector = Effector::new(channel)
-            .rate_limit(ActRateLimit::new(1000.0, 2).max_wait(Duration::from_millis(3)));
-        let (fabric, r) = fabric_with(effector.clone());
+            .rate_limit(ActRateLimit::new(1000.0, 2).max_wait(Duration::from_micros(3500)));
+        let clocked = Clocked::new(effector.clone());
+        let t0 = Instant::now();
         for i in 0..10 {
-            fabric.stimulate(r, command("out", serde_json::json!(i)));
+            clocked.at(t0, serde_json::json!(i));
         }
-        // 2 at once, a few more within 3 ms of waiting, the rest dropped
-        let m = effector.metrics();
-        assert!(m.dropped_rate >= 4, "{m:?}");
+        // 2 at once, 3 more after 1, 2 and 3 ms of waiting on the motor side, 5 dropped
+        assert_eq!(effector.metrics().dropped_rate, 5);
+        let mut delivered: Vec<i64> = (0..5)
+            .map(|_| receiver.recv_timeout(Duration::from_secs(10)).unwrap())
+            .map(|d| d.command.args.as_i64().unwrap())
+            .collect();
+        assert_eq!(delivered[..2], [0, 1]);
+        delivered[2..].sort_unstable();
+        assert_eq!(delivered[2..], [2, 3, 4]);
         wait_until(|| effector.metrics().inflight == 0);
-        let delivered = receiver.try_iter().count();
-        assert_eq!(delivered as u64, effector.metrics().acted);
-        assert!((2..=6).contains(&delivered), "{delivered}");
+        assert_eq!(effector.metrics().acted, 5);
+        assert!(receiver.try_recv().is_err());
 
         let (channel, receiver) = ChannelOut::new("out", 64);
         let effector = Effector::new(channel).refractory(Duration::from_secs(5));
-        let (fabric, r) = fabric_with(effector.clone());
+        let clocked = Clocked::new(effector.clone());
+        let t0 = Instant::now();
         for i in 0..3 {
-            fabric.stimulate(r, command("out", serde_json::json!(i)));
+            clocked.at(t0 + Duration::from_secs(i), serde_json::json!(i));
         }
         assert_eq!(receiver.try_iter().count(), 1);
         assert_eq!(effector.metrics().quiet_refractory, 2);
+        // The period over, the next one acts
+        clocked.at(t0 + Duration::from_secs(5), serde_json::json!(5));
+        assert_eq!(receiver.try_iter().count(), 1);
     }
 }

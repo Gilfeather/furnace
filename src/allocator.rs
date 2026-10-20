@@ -163,6 +163,47 @@ mod tests {
         unsafe { cache.dealloc(d.as_ptr(), layout) };
     }
 
+    fn cached(cache: &BlockCache) -> (usize, usize) {
+        let cache = cache.cache.lock().unwrap();
+        (cache.blocks.iter().flatten().count(), cache.bytes)
+    }
+
+    #[test]
+    fn a_full_cache_hands_blocks_back_to_the_system() {
+        let cache = BlockCache::new();
+        let layout = Layout::from_size_align(MIN_SIZE, 64).unwrap();
+        // One block more than there are slots: the last goes back to `System`
+        let blocks: Vec<_> = (0..=SLOTS).map(|_| alloc(&cache, layout)).collect();
+        for block in &blocks {
+            unsafe { cache.dealloc(block.as_ptr(), layout) };
+        }
+        assert_eq!(cached(&cache), (SLOTS, SLOTS * MIN_SIZE));
+
+        // Bytes: a block that would take the cache past MAX_CACHED goes back too, though a
+        // slot is free
+        let kept = alloc(&cache, layout);
+        assert_eq!(cached(&cache), (SLOTS - 1, (SLOTS - 1) * MIN_SIZE));
+        let big = Layout::from_size_align(MAX_CACHED - (SLOTS - 1) * MIN_SIZE + 1, 64).unwrap();
+        let block = alloc(&cache, big);
+        unsafe { cache.dealloc(block.as_ptr(), big) };
+        assert_eq!(cached(&cache), (SLOTS - 1, (SLOTS - 1) * MIN_SIZE));
+        // One that fits exactly is kept
+        let exact = Layout::from_size_align(MAX_CACHED - (SLOTS - 1) * MIN_SIZE, 64).unwrap();
+        let block = alloc(&cache, exact);
+        unsafe { cache.dealloc(block.as_ptr(), exact) };
+        assert_eq!(cached(&cache), (SLOTS, MAX_CACHED));
+
+        // Give everything back to `System`
+        unsafe { System.dealloc(kept.as_ptr(), layout) };
+        let block = alloc(&cache, exact);
+        unsafe { System.dealloc(block.as_ptr(), exact) };
+        for _ in 0..SLOTS - 1 {
+            let block = alloc(&cache, layout);
+            unsafe { System.dealloc(block.as_ptr(), layout) };
+        }
+        assert_eq!(cached(&cache), (0, 0));
+    }
+
     #[test]
     fn small_allocations_bypass_the_cache() {
         let cache = BlockCache::new();

@@ -141,4 +141,31 @@ mod tests {
         assert_eq!(json["args"]["k"], 1);
         assert_eq!(effector.metrics().acted, 2);
     }
+
+    #[tokio::test]
+    async fn a_failed_open_is_tried_again_on_the_next_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("not yet");
+        let path = missing.join("journal.log");
+        let journal = FileAppend::new("journal", &path);
+        let write = |line: &str| {
+            let command = Command::new("journal", serde_json::json!({"line": line}));
+            let signal = Signal::new(
+                crate::nerve::signal::Feature::NONE,
+                crate::nerve::signal::Payload::None,
+            );
+            match journal.act(&command, &signal) {
+                Action::Done(result) => Box::pin(std::future::ready(result)),
+                Action::Pending(future) => future,
+            }
+        };
+        // The directory is missing: the open fails, retryably
+        let err = write("lost").await.unwrap_err();
+        assert!(err.retryable(), "{err}");
+        // The writer thread is still there, and opens the file again for the next line
+        std::fs::create_dir(&missing).unwrap();
+        write("first").await.unwrap();
+        write("second").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\nsecond\n");
+    }
 }
