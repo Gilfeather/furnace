@@ -21,7 +21,7 @@ use std::sync::Arc;
 use tracing::error;
 
 use super::effector::{Effector, Respond};
-use super::fabric::{Announced, Fabric, FabricBuilder, Summation};
+use super::fabric::{Announced, Fabric, FabricBuilder, Outcome, Summation};
 use super::latency::LatencyEstimate;
 use super::neuron::{Cx, Firing, Mechanisms, Neuron, NeuronKind};
 use super::signal::{Answer, Feature, NeuronId, PathwayId, Payload, Reply, Signal};
@@ -224,6 +224,12 @@ pub(crate) enum Refused {
     Lost,
 }
 
+/// A request's chain: handed to the fabric already, or running on a blocking thread
+enum Chain {
+    Ran(Outcome),
+    Running(tokio::task::JoinHandle<Outcome>),
+}
+
 /// The server's models wired into its fabric
 pub(crate) struct Serving {
     fabric: Fabric,
@@ -395,23 +401,22 @@ impl Serving {
         };
         let (reply, receiver) = Reply::required();
         let signal = Signal::new(Feature::NONE, Payload::tensors(inputs)).with_reply(reply);
-        let outcome = if route.deliberative {
-            self.fabric
-                .stimulate_announced(route.entrance, signal, announced)
+        let chain = if route.deliberative {
+            Chain::Ran(
+                self.fabric
+                    .stimulate_announced(route.entrance, signal, announced),
+            )
         } else {
             // The forward pass runs on the arc, so off the async runtime's threads
             drop(announced);
             let fabric = self.fabric.clone();
-            match tokio::task::spawn_blocking(move || fabric.stimulate(route.entrance, signal))
-                .await
-            {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    error!("Inference task failed: {e}");
-                    return Err(Refused::Lost);
-                }
-            }
+            Chain::Running(tokio::task::spawn_blocking(move || {
+                fabric.stimulate(route.entrance, signal)
+            }))
         };
+        // The answer, as soon as the effector sends it: the chain's bookkeeping after that
+        // (counters, latencies) is not waited for. Waking on the task's end instead costs a
+        // few microseconds a request, more than the whole chain on the fabric.
         match receiver.await {
             Ok(Answer::Tensors(outputs)) => Ok(Ok(outputs)),
             Ok(Answer::Failed(e)) => Ok(Err(*e)),
@@ -424,8 +429,24 @@ impl Serving {
                 error!("nerve: model '{model}' was answered with an HTTP response");
                 Err(Refused::Lost)
             }
-            Err(_) if outcome.dropped > 0 => Err(Refused::Busy),
-            Err(_) => Err(Refused::Lost),
+            // No answer: the chain ended, so its outcome says why
+            Err(_) => {
+                let outcome = match chain {
+                    Chain::Ran(outcome) => outcome,
+                    Chain::Running(task) => match task.await {
+                        Ok(outcome) => outcome,
+                        Err(e) => {
+                            error!("Inference task failed: {e}");
+                            return Err(Refused::Lost);
+                        }
+                    },
+                };
+                Err(if outcome.dropped > 0 {
+                    Refused::Busy
+                } else {
+                    Refused::Lost
+                })
+            }
         }
     }
 }
