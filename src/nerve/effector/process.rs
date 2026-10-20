@@ -123,7 +123,7 @@ impl Act for Process {
                     String::from_utf8_lossy(&output.stderr).trim()
                 ))),
                 Ok(Err(e)) => Err(ActError::retry(format!("{program}: {e}"))),
-                Err(_) => Err(ActError::retry(format!("{program}: timed out"))),
+                Err(_) => Err(ActError::Timeout(program)),
             }
         })
     }

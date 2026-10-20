@@ -7,6 +7,7 @@ use bytes::Bytes;
 use tracing::debug;
 
 use super::{Act, ActError, Action};
+use crate::nerve::BuildError;
 use crate::nerve::signal::{Command, Payload, Signal};
 use crate::nerve::wire;
 
@@ -28,30 +29,26 @@ pub struct Webhook {
 }
 
 impl Webhook {
-    /// `url` is `http://host[:port]/path`; each call has 5 seconds, the response included
-    ///
-    /// # Panics
-    ///
-    /// If `url` is not of that form (an `https://` URL among them).
-    pub fn new(name: &str, url: &str) -> Self {
+    /// `url` is `http://host[:port]/path`; each call has 5 seconds, the response included. An
+    /// error for any other URL, an `https://` one among them.
+    pub fn new(name: &str, url: &str) -> Result<Self, BuildError> {
         Self::with_timeout(name, url, Duration::from_secs(5))
     }
 
     /// [`Webhook::new`] with another bound on each call, the response included
-    ///
-    /// # Panics
-    ///
-    /// If `url` is not `http://host[:port]/path`.
-    pub fn with_timeout(name: &str, url: &str, timeout: Duration) -> Self {
-        let url = wire::Url::parse(url).unwrap_or_else(|e| panic!("webhook '{name}': {e}"));
-        Self {
+    pub fn with_timeout(name: &str, url: &str, timeout: Duration) -> Result<Self, BuildError> {
+        let url = wire::Url::parse(url).map_err(|e| BuildError::Url {
+            name: format!("webhook '{name}'"),
+            reason: e.to_string(),
+        })?;
+        Ok(Self {
             name: name.to_string(),
             shared: Arc::new(WebhookShared {
                 url,
                 client: wire::Client::new(timeout),
                 headers: Vec::new(),
             }),
-        }
+        })
     }
 
     /// Send this header with every call (an authorization token, say)
@@ -95,10 +92,12 @@ impl Act for Webhook {
                 .await
             {
                 Ok(response) if (200..300).contains(&response.status) => Ok(()),
-                Ok(response) if response.status == 429 || response.status >= 500 => {
-                    Err(ActError::retry(format!("status {}", response.status)))
+                Ok(response) => Err(ActError::Status(response.status)),
+                Err(wire::Error::Timeout(what)) => {
+                    Err(ActError::Timeout(format!("{what} to {}", shared.url.host)))
                 }
-                Ok(response) => Err(ActError::fatal(format!("status {}", response.status))),
+                Err(e @ wire::Error::Io(_)) => Err(ActError::Unreachable(e.to_string())),
+                // An answer the client cannot read: the target may answer better next time
                 Err(e) => Err(ActError::retry(e.to_string())),
             }
         })
@@ -159,7 +158,9 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let effector = Effector::new(
-            Webhook::new("hook", &format!("http://127.0.0.1:{port}/hook")).header("x-token", "t"),
+            Webhook::new("hook", &format!("http://127.0.0.1:{port}/hook"))
+                .unwrap()
+                .header("x-token", "t"),
         )
         .retry(Retry {
             attempts: 3,
@@ -177,5 +178,15 @@ mod tests {
         assert_eq!(effector.metrics().retries, 1);
         assert_eq!(hits.lock().unwrap().as_slice(), [r#"{"level":3}"#]);
         drop(fabric);
+    }
+
+    #[test]
+    fn a_url_the_client_cannot_call_is_an_error() {
+        for url in ["https://example.com/hook", "example.com", "http://:80/"] {
+            assert!(
+                matches!(Webhook::new("hook", url), Err(BuildError::Url { .. })),
+                "{url}"
+            );
+        }
     }
 }

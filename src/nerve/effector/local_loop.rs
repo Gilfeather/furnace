@@ -54,7 +54,7 @@ impl Default for Breaker {
 /// A token bucket: `per_second` commands sustained, `burst` at once; a command that would
 /// have to wait longer than `max_wait` for a token is dropped
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RateLimit {
+pub struct ActRateLimit {
     /// Sustained commands a second
     pub per_second: f64,
     /// Commands at once: the bucket's size
@@ -63,7 +63,7 @@ pub struct RateLimit {
     pub max_wait: Duration,
 }
 
-impl RateLimit {
+impl ActRateLimit {
     /// `per_second` sustained, `burst` at once, waiting at most 1 s for a token
     pub fn new(per_second: f64, burst: u32) -> Self {
         Self {
@@ -164,15 +164,11 @@ impl EffectorInner {
                 "nerve: effector '{}' failed {} times in a row ({}); open for {:?}",
                 self.act.name(),
                 state.consecutive_failures,
-                error.message,
+                error,
                 self.breaker.cooldown
             );
         } else {
-            debug!(
-                "nerve: effector '{}' failed: {}",
-                self.act.name(),
-                error.message
-            );
+            debug!("nerve: effector '{}' failed: {}", self.act.name(), error);
         }
     }
 
@@ -217,7 +213,7 @@ pub(super) async fn run(
             Ok(()) => return inner.succeeded(started),
             Err(error) => {
                 attempt += 1;
-                if !error.retry || attempt >= inner.retry.attempts {
+                if !error.retryable() || attempt >= inner.retry.attempts {
                     return inner.failed(&error);
                 }
                 inner.counters.retries.fetch_add(1, Ordering::Relaxed);
@@ -229,7 +225,7 @@ pub(super) async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Act, Channel, Effector};
+    use super::super::{Act, ChannelOut, Effector};
     use super::*;
     use crate::nerve::testing::{command, fabric_with, wait_until};
     use std::sync::atomic::AtomicUsize;
@@ -310,9 +306,9 @@ mod tests {
 
     #[test]
     fn rate_limit_paces_and_refractory_ignores() {
-        let (channel, receiver) = Channel::new("out", 64);
+        let (channel, receiver) = ChannelOut::new("out", 64);
         let effector = Effector::new(channel)
-            .rate_limit(RateLimit::new(1000.0, 2).max_wait(Duration::from_millis(3)));
+            .rate_limit(ActRateLimit::new(1000.0, 2).max_wait(Duration::from_millis(3)));
         let (fabric, r) = fabric_with(effector.clone());
         for i in 0..10 {
             fabric.stimulate(r, command("out", serde_json::json!(i)));
@@ -325,7 +321,7 @@ mod tests {
         assert_eq!(delivered as u64, effector.metrics().acted);
         assert!((2..=6).contains(&delivered), "{delivered}");
 
-        let (channel, receiver) = Channel::new("out", 64);
+        let (channel, receiver) = ChannelOut::new("out", 64);
         let effector = Effector::new(channel).refractory(Duration::from_secs(5));
         let (fabric, r) = fabric_with(effector.clone());
         for i in 0..3 {

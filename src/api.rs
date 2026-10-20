@@ -549,7 +549,7 @@ impl Server {
         check_contents(&self.contents)?;
         warn_if_limited_by_address(&self.config);
         Ok(router_with_state(
-            server_state(self.contents, &self.config),
+            server_state(self.contents, &self.config)?,
             &self.config,
         ))
     }
@@ -719,7 +719,7 @@ fn warn_if_limited_by_address(config: &ServerConfig) {
 }
 
 /// The shared state of the HTTP and gRPC servers; also starts the models' warm-ups
-fn server_state(contents: Contents, config: &ServerConfig) -> AppState {
+fn server_state(contents: Contents, config: &ServerConfig) -> Result<AppState> {
     let batching = config.batching;
     let inference_slots = Arc::new(Semaphore::new(config.max_concurrent_requests));
     let models = contents
@@ -753,7 +753,8 @@ fn server_state(contents: Contents, config: &ServerConfig) -> AppState {
         &contents.llms,
         batching,
         config.max_concurrent_requests,
-    );
+    )
+    .map_err(|e| ApiError::ServerStartup(format!("the nervous system: {e}")))?;
     let serving = Arc::new(serving);
     #[cfg(feature = "llm")]
     let llm = (!contents.llms.is_empty()).then(|| {
@@ -766,7 +767,7 @@ fn server_state(contents: Contents, config: &ServerConfig) -> AppState {
             config.request_timeout,
         ))
     });
-    Arc::new(ServerState {
+    Ok(Arc::new(ServerState {
         models,
         start_time: SystemTime::now(),
         inference_slots,
@@ -785,7 +786,7 @@ fn server_state(contents: Contents, config: &ServerConfig) -> AppState {
         #[cfg(feature = "llm")]
         llm,
         serving,
-    })
+    }))
 }
 
 /// How a route is made: its handler, given the state its layers need
@@ -1025,7 +1026,7 @@ pub async fn start_server_with_models(
 
 async fn serve(config: ServerConfig, contents: Contents) -> Result<()> {
     check_contents(&contents)?;
-    let state = server_state(contents, &config);
+    let state = server_state(contents, &config)?;
     #[cfg(not(feature = "llm"))]
     let names = state.model_names();
     #[cfg(feature = "llm")]
@@ -2246,6 +2247,7 @@ pub(crate) mod tests {
             vec![ServedModel::from(dummy_model())].into(),
             &ServerConfig::default(),
         )
+        .unwrap()
     }
 
     pub(super) async fn send(
@@ -3295,7 +3297,7 @@ pub(crate) mod tests {
             "dummy",
             0,
         );
-        let state = server_state(vec![ServedModel::from(model)].into(), &config);
+        let state = server_state(vec![ServedModel::from(model)].into(), &config).unwrap();
         GatedServer {
             app: router_with_state(state.clone(), &config),
             state,

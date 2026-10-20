@@ -1061,6 +1061,13 @@ only for a path named `sample_model`, with a warning; `max_concurrent_requests` 
 `EngineError::Failed(BoxError)`; `tls::Error`; the renames `llm::Prompt`,
 `SchedulerCounters`, `mock::SharedCount`, `access::ClientRateLimit`, without aliases (no
 compatibility shims before 1.0). `NamedInput` no longer exists (the batching unification
-removed it). The `src/nerve` items follow in a second change. Not done: `Model::new` stays
+removed it). In `src/nerve`: `wire` is `pub(crate)` (the bench reaches it through a
+`#[doc(hidden)]` re-export) with a `wire::Error`; `FabricBuilder::build` and `Webhook::new`
+return `Result<_, BuildError>`; `Afferent` carries a stop signal raised on drop, which
+`Timer`, `ChannelIn`, `Lines` follow; `ActError` is an enum with `retryable()`; the renames
+`ChannelIn`/`ChannelOut`, `SseIn`/`SseOut`, `ReplyHandle`, `ActRateLimit`;
+`quiet_not_interested`; latencies reported from a `telemetry::Histogram` with fine buckets
+(`latency_ms` in the JSON, histograms in Prometheus); brains fire through `Firing::Compute`;
+`FabricBuilder::efferent(Handle)`. Not done: `Model::new` stays
 public, the flat `predict*` methods stay while `/predict` is served, and a typed
 `Neuron::metrics` waits.

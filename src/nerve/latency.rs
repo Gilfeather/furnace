@@ -1,11 +1,14 @@
 //! Measured latencies: a rolling window of recent samples with cached p50 and p99, cheap to
-//! update on every signal and cheap to read on every pathway selection.
+//! update on every signal and cheap to read on every pathway selection, and a
+//! [`Histogram`] of every sample for the metrics, in the shape the rest of `/metrics` uses.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+
+use crate::telemetry::{FINE_LATENCY_BUCKETS, Histogram, Percentiles};
 
 /// Samples kept; the percentiles are of the most recent ones
 const WINDOW: usize = 128;
@@ -15,9 +18,11 @@ const EVERY: u64 = 16;
 const UNKNOWN: u64 = u64::MAX;
 
 /// A latency estimate, in nanoseconds, from a rolling window of measurements. Never
-/// configured, only measured.
+/// configured, only measured. The window's percentiles steer pathway selection; the
+/// histogram of every measurement is what the metrics report.
 pub struct LatencyEstimate {
     recent: Mutex<Ring>,
+    histogram: Histogram,
     p50: AtomicU64,
     p99: AtomicU64,
     count: AtomicU64,
@@ -31,19 +36,19 @@ struct Ring {
     len: usize,
 }
 
-/// A snapshot for metrics, in microseconds
+/// A snapshot for metrics, in milliseconds as the rest of `/metrics`: the percentiles are
+/// the histogram's estimates over every measurement (see [`Histogram::percentiles_ms`])
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LatencySnapshot {
     /// Measurements so far
     pub count: u64,
-    /// Median of the recent window; `None` before the first measurement
-    pub p50_us: Option<f64>,
-    /// 99th percentile of the recent window; `None` before the first measurement
-    pub p99_us: Option<f64>,
+    /// The median and the 95th and 99th percentiles; `None` before the first measurement
+    #[serde(flatten)]
+    pub percentiles: Percentiles,
     /// Mean of every measurement; `None` before the first
-    pub mean_us: Option<f64>,
+    pub mean: Option<f64>,
     /// Largest measurement so far; `None` before the first
-    pub max_us: Option<f64>,
+    pub max: Option<f64>,
 }
 
 impl Default for LatencyEstimate {
@@ -61,6 +66,7 @@ impl LatencyEstimate {
                 next: 0,
                 len: 0,
             }),
+            histogram: Histogram::with_buckets(FINE_LATENCY_BUCKETS),
             p50: AtomicU64::new(UNKNOWN),
             p99: AtomicU64::new(UNKNOWN),
             count: AtomicU64::new(0),
@@ -71,6 +77,7 @@ impl LatencyEstimate {
 
     /// Record one measurement
     pub fn observe(&self, elapsed: Duration) {
+        self.histogram.observe(elapsed);
         let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
         let count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
         self.sum.fetch_add(nanos, Ordering::Relaxed);
@@ -121,17 +128,19 @@ impl LatencyEstimate {
         self.count.load(Ordering::Relaxed)
     }
 
-    /// Count, percentiles, mean and max, in microseconds
+    /// Every measurement, in [`FINE_LATENCY_BUCKETS`], for the Prometheus histograms
+    pub fn histogram(&self) -> &Histogram {
+        &self.histogram
+    }
+
+    /// Count, percentiles, mean and max, in milliseconds
     pub fn snapshot(&self) -> LatencySnapshot {
         let count = self.count();
-        let us = |d: Option<Duration>| d.map(|d| d.as_secs_f64() * 1e6);
         LatencySnapshot {
             count,
-            p50_us: us(self.p50()),
-            p99_us: us(self.p99()),
-            mean_us: (count > 0)
-                .then(|| self.sum.load(Ordering::Relaxed) as f64 / count as f64 / 1e3),
-            max_us: (count > 0).then(|| self.max.load(Ordering::Relaxed) as f64 / 1e3),
+            percentiles: self.histogram.percentiles_ms(),
+            mean: (count > 0).then(|| self.sum.load(Ordering::Relaxed) as f64 / count as f64 / 1e6),
+            max: (count > 0).then(|| self.max.load(Ordering::Relaxed) as f64 / 1e6),
         }
     }
 }
@@ -151,12 +160,18 @@ mod tests {
             l.observe(Duration::from_micros(5));
         }
         // The 10 µs sample has left the window of 128
+        assert_eq!(l.p99(), Some(Duration::from_micros(5)));
+        // The histogram keeps every sample: 200 at 5 µs, one at 10 µs (its own bucket)
         let snapshot = l.snapshot();
         assert_eq!(snapshot.count, 201);
-        assert_eq!(snapshot.p99_us, Some(5.0));
-        assert_eq!(snapshot.max_us, Some(10.0));
-        let mean = snapshot.mean_us.unwrap();
-        assert!((5.0..5.1).contains(&mean), "{mean}");
+        assert_eq!(l.histogram().count(), 201);
+        let p50 = snapshot.percentiles.p50.unwrap();
+        assert!((0.0025..=0.005).contains(&p50), "{p50}");
+        let p99 = snapshot.percentiles.p99.unwrap();
+        assert!((0.0025..=0.005).contains(&p99), "{p99}");
+        assert_eq!(snapshot.max, Some(0.01));
+        let mean = snapshot.mean.unwrap();
+        assert!((0.005..0.0051).contains(&mean), "{mean}");
     }
 
     #[test]

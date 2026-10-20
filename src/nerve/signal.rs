@@ -479,18 +479,18 @@ struct ReplyInner {
 /// derived from it. The first effector to answer wins; a chain that ends without answering
 /// drops the sender, and the receptor sees that.
 #[derive(Clone)]
-pub struct Reply(Arc<ReplyInner>);
+pub struct ReplyHandle(Arc<ReplyInner>);
 
-impl fmt::Debug for Reply {
+impl fmt::Debug for ReplyHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Reply")
+        f.debug_struct("ReplyHandle")
             .field("open", &self.is_open())
             .field("required", &self.0.required)
             .finish()
     }
 }
 
-impl Reply {
+impl ReplyHandle {
     /// A way back that the chain may use: the chain still runs if nobody waits any more (a
     /// request answered `202 Accepted` before its signal reached the brain)
     pub fn new() -> (Self, oneshot::Receiver<Answer>) {
@@ -564,7 +564,7 @@ pub struct Signal {
     /// The neurons it has passed through
     pub trace: Trace,
     /// The way back to the request that started the chain, if any
-    pub reply: Option<Reply>,
+    pub reply: Option<ReplyHandle>,
 }
 
 impl Signal {
@@ -602,7 +602,7 @@ impl Signal {
     }
 
     /// The same signal carrying a way back to the request
-    pub fn with_reply(mut self, reply: Reply) -> Self {
+    pub fn with_reply(mut self, reply: ReplyHandle) -> Self {
         self.reply = Some(reply);
         self
     }
@@ -667,7 +667,7 @@ mod tests {
 
     #[test]
     fn derived_signals_share_identity_and_reply() {
-        let (reply, mut receiver) = Reply::new();
+        let (reply, mut receiver) = ReplyHandle::new();
         let signal = Signal::new(Feature::sketch(b"x"), Payload::text("x"))
             .with_reply(reply)
             .with_urgency(Urgency::within(Duration::from_secs(1)));
@@ -686,11 +686,11 @@ mod tests {
 
     #[test]
     fn only_a_required_reply_makes_its_signal_unwanted_once_abandoned() {
-        let (optional, receiver) = Reply::new();
+        let (optional, receiver) = ReplyHandle::new();
         drop(receiver);
         assert!(!optional.is_open());
         assert!(optional.wanted());
-        let (required, receiver) = Reply::required();
+        let (required, receiver) = ReplyHandle::required();
         assert!(required.wanted());
         drop(receiver);
         assert!(!required.wanted());

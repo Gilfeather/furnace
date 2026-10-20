@@ -47,9 +47,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use furnace::Server;
-use furnace::nerve::effector::{Channel as ChannelEffector, Effector, Respond, Webhook};
-use furnace::nerve::receptor::{Channel, Http};
-use furnace::nerve::wire;
+use furnace::nerve::bench_wire as wire;
+use furnace::nerve::effector::{ChannelOut, Effector, Respond, Webhook};
+use furnace::nerve::receptor::{ChannelIn, Http};
 use furnace::nerve::{
     Fabric, Feature, Firing, FnNeuron, Habituation, Mechanisms, NeuronKind, Payload, Signal,
     Summation, Urgency, sketch64,
@@ -167,7 +167,7 @@ struct Built {
 impl Demo {
     fn build(self) -> Built {
         Built {
-            fabric: self.builder.build(),
+            fabric: self.builder.build().expect("the demo fabric"),
             brain_hits: self.brain_hits,
         }
     }
@@ -256,7 +256,7 @@ fn bench_hop() -> Hop {
         b.reflex(previous, next, 1.0);
         previous = next;
     }
-    let fabric = b.build();
+    let fabric = b.build().expect("the fabric");
     let signal = || Signal::new(Feature::NONE, Payload::None);
     for _ in 0..1000 {
         fabric.stimulate(first, signal());
@@ -307,8 +307,8 @@ struct Arc_ {
 }
 
 fn bench_arc() -> Arc_ {
-    let (channel, receiver) = ChannelEffector::new("alarm", 4096);
-    let (receptor, sender) = Channel::new("in", 16);
+    let (channel, receiver) = ChannelOut::new("alarm", 4096);
+    let (receptor, sender) = ChannelIn::new("in", 16);
     let demo = demo_fabric(
         |b, mechanisms| b.receptor(receptor, mechanisms),
         Effector::new(channel),
@@ -346,7 +346,7 @@ fn bench_arc() -> Arc_ {
         .arcs
         .into_iter()
         .find(|a| a.to == "alarm")
-        .map(|a| a.latency)
+        .map(|a| a.latency_ms)
         .unwrap_or_default();
 
     // Hand-written: the same work as a function
@@ -371,8 +371,9 @@ fn bench_arc() -> Arc_ {
     Arc_ {
         fabric_p50_us: us(percentile(&times, 0.5)),
         fabric_p99_us: us(percentile(&times, 0.99)),
-        arc_p50_us: arc.p50_us.unwrap_or(0.0),
-        arc_p99_us: arc.p99_us.unwrap_or(0.0),
+        // The fabric's histogram estimates, in ms
+        arc_p50_us: arc.percentiles.p50.unwrap_or(0.0) * 1e3,
+        arc_p99_us: arc.percentiles.p99.unwrap_or(0.0) * 1e3,
         hand_written_p50_us: us(percentile(&hand, 0.5)),
         hand_written_p99_us: us(percentile(&hand, 0.99)),
         acted,
@@ -395,8 +396,8 @@ struct BrainFraction {
 }
 
 fn bench_brain() -> BrainFraction {
-    let (channel, _receiver) = ChannelEffector::new("alarm", 4096);
-    let (receptor, sender) = Channel::new("in", 16);
+    let (channel, _receiver) = ChannelOut::new("alarm", 4096);
+    let (receptor, sender) = ChannelIn::new("in", 16);
     let demo = demo_fabric(
         |b, mechanisms| b.receptor(receptor, mechanisms),
         Effector::new(channel),
@@ -445,8 +446,8 @@ struct Memory {
 
 fn bench_memory() -> Memory {
     let base = memory::of_process(std::process::id()).private_mb;
-    let (channel, receiver) = ChannelEffector::new("alarm", 4096);
-    let (receptor, sender) = Channel::new("in", 16);
+    let (channel, receiver) = ChannelOut::new("alarm", 4096);
+    let (receptor, sender) = ChannelIn::new("in", 16);
     let demo = demo_fabric(
         |b, mechanisms| b.receptor(receptor, mechanisms),
         Effector::new(channel),
@@ -595,13 +596,12 @@ async fn bench_webhook() -> WebhookLatency {
     std::thread::spawn(move || drop(other));
 
     // Through the fabric: channel receptor → triage → webhook effector, one at a time
-    let (receptor, sender) = Channel::new("in", 16);
+    let (receptor, sender) = ChannelIn::new("in", 16);
     let demo = demo_fabric(
         |b, mechanisms| b.receptor(receptor, mechanisms),
-        Effector::new(Webhook::new(
-            "alarm",
-            &format!("http://127.0.0.1:{port}/hook"),
-        ))
+        Effector::new(
+            Webhook::new("alarm", &format!("http://127.0.0.1:{port}/hook")).expect("the hook"),
+        )
         .no_retry(),
         false,
     )
@@ -668,7 +668,7 @@ async fn hand_written_events(State(server): State<Arc<HandWritten>>, body: Bytes
 async fn serve(kind: &str, port: u16) {
     match kind {
         "furnace" => {
-            let (channel, _receiver) = ChannelEffector::new("alarm", 4096);
+            let (channel, _receiver) = ChannelOut::new("alarm", 4096);
             let demo = demo_fabric(
                 |b, mechanisms| b.receptor(Http::new("events", "/events").text(), mechanisms),
                 Effector::new(channel),

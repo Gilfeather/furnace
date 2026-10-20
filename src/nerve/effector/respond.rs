@@ -76,14 +76,14 @@ impl Act for Respond {
 mod tests {
     use super::super::Effector;
     use super::*;
-    use crate::nerve::signal::{Feature, Reply};
+    use crate::nerve::signal::{Feature, ReplyHandle};
     use crate::nerve::testing::{command, fabric_with};
 
     #[test]
     fn respond_answers_the_waiting_request() {
         let effector = Effector::new(Respond::new("respond"));
         let (fabric, r) = fabric_with(effector.clone());
-        let (reply, mut receiver) = Reply::new();
+        let (reply, mut receiver) = ReplyHandle::new();
         let signal = Signal::new(Feature::NONE, Payload::text("payload")).with_reply(reply);
         fabric.stimulate(
             r,
@@ -107,7 +107,7 @@ mod tests {
         fabric.stimulate(r, command("respond", serde_json::Value::Null));
         assert_eq!(effector.metrics().failed, 0);
         // A plain signal answers with its payload
-        let (reply, mut receiver) = Reply::new();
+        let (reply, mut receiver) = ReplyHandle::new();
         fabric.stimulate(
             r,
             Signal::new(Feature::NONE, Payload::text("plain")).with_reply(reply),
@@ -117,7 +117,7 @@ mod tests {
         };
         assert_eq!(body, Bytes::from("plain"));
         // Tensors go back as tensors, for the protocol that asked
-        let (reply, mut receiver) = Reply::new();
+        let (reply, mut receiver) = ReplyHandle::new();
         let tensor = crate::tensor::HostTensor {
             shape: vec![1, 2],
             values: crate::tensor::Values::F32(vec![1.0, 2.0]),

@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use super::{Act, ActError, Action};
 use crate::nerve::signal::{Command, Signal};
 
-/// What a [`Channel`] effector hands to your code
+/// What a [`ChannelOut`] effector hands to your code
 #[derive(Debug, Clone)]
 pub struct Delivery {
     /// What to do
@@ -16,12 +16,12 @@ pub struct Delivery {
 
 /// An in-process channel: commands go to whatever code holds the receiver (a device loop, a
 /// test). A full channel is retried; a dropped receiver is final.
-pub struct Channel {
+pub struct ChannelOut {
     name: String,
     sender: mpsc::SyncSender<Delivery>,
 }
 
-impl Channel {
+impl ChannelOut {
     /// Named `name`, holding up to `capacity` deliveries (at least 1); your code keeps the
     /// receiver
     pub fn new(name: &str, capacity: usize) -> (Self, mpsc::Receiver<Delivery>) {
@@ -36,7 +36,7 @@ impl Channel {
     }
 }
 
-impl Act for Channel {
+impl Act for ChannelOut {
     fn name(&self) -> &str {
         &self.name
     }

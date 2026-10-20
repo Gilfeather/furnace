@@ -12,13 +12,13 @@ use crate::nerve::wire;
 /// An upstream event feed: `GET url` as `text/event-stream`, one signal per event (the
 /// `data` as text, the feature a sketch of it), reconnecting with backoff and
 /// `Last-Event-ID`. Runs on the fabric's afferent runtime.
-pub struct Sse {
+pub struct SseIn {
     source: Source,
     url: String,
     event: Option<String>,
 }
 
-impl Sse {
+impl SseIn {
     /// Follow `url`, a plain `http://host[:port]/path` (no HTTPS); a URL of another form is
     /// logged when the receptor starts, and nothing is read
     pub fn new(name: &str, url: &str) -> Self {
@@ -42,7 +42,7 @@ impl Sse {
     }
 }
 
-impl Neuron for Sse {
+impl Neuron for SseIn {
     fn name(&self) -> &str {
         &self.source.name
     }
@@ -117,7 +117,7 @@ impl SseParser {
     }
 }
 
-impl Receptor for Sse {
+impl Receptor for SseIn {
     fn start(&self, afferent: Afferent) {
         let _ = self.source.afferent.set(afferent.clone());
         let Some(runtime) = afferent.runtime() else {
@@ -258,7 +258,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let (fabric, _r, seen) =
-            fabric_with_receptor(Sse::new("feed", &format!("http://127.0.0.1:{port}/feed")));
+            fabric_with_receptor(SseIn::new("feed", &format!("http://127.0.0.1:{port}/feed")));
         tokio::task::spawn_blocking({
             let seen = seen.clone();
             move || wait_until(|| seen.lock().unwrap().len() >= 3)

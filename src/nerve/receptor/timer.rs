@@ -71,8 +71,8 @@ impl Receptor for Timer {
                 let mut next = Instant::now() + period;
                 for tick in 0u64.. {
                     let now = Instant::now();
-                    if next > now {
-                        std::thread::sleep(next - now);
+                    if next > now && !afferent.sleep(next - now) {
+                        return;
                     }
                     next += period;
                     let now = Instant::now();

@@ -28,7 +28,7 @@ pub(crate) fn fabric_with(neuron: impl Neuron) -> (Fabric, NeuronId) {
     let r = b.neuron(pass("in"), Mechanisms::NONE);
     let n = b.neuron(neuron, Mechanisms::NONE);
     b.reflex(r, n, 1.0);
-    (b.build(), r)
+    (b.build().unwrap(), r)
 }
 
 /// A started fabric with `receptor` and a sink behind it that records what arrives
@@ -50,7 +50,7 @@ pub(crate) fn fabric_with_receptor<R: Receptor>(
         )
     };
     b.reflex(r, sink, 1.0);
-    let fabric = b.build();
+    let fabric = b.build().unwrap();
     fabric.start();
     (fabric, r, seen)
 }

@@ -2,6 +2,9 @@
 //! (webhooks, upstream event feeds): plain `http://` with keep-alive, `Content-Length` and
 //! chunked bodies, nothing else. It keeps the crate free of an HTTP client dependency, and
 //! the hop to a webhook as short as a socket write.
+//!
+//! Crate-internal: the effectors and receptors that call out use it. The nerve bench reaches
+//! it through `furnace::nerve::bench_wire`, which is not part of the API.
 
 use std::collections::HashMap;
 use std::io;
@@ -17,6 +20,35 @@ const MAX_HEAD: usize = 64 * 1024;
 /// Largest response body collected by [`Client::request`]
 const MAX_BODY: usize = 16 << 20;
 
+/// Why a call through the client failed
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// The URL is not `http://host[:port]/path` (an `https://` URL among them)
+    #[error("{url}: {reason}")]
+    Url {
+        /// The URL as given
+        url: String,
+        /// What is wrong with it
+        reason: String,
+    },
+    /// The call did not finish within the client's timeout
+    #[error("{0} timed out")]
+    Timeout(&'static str),
+    /// Connecting, writing or reading failed: refused, reset, closed early
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    /// The server's answer is not HTTP/1.1 the client reads
+    #[error("{0}")]
+    Protocol(String),
+    /// The response body is larger than the client collects
+    #[error("response body too large")]
+    TooLarge,
+}
+
+/// What the client's calls return
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
 /// A parsed `http://host[:port]/path?query` URL
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Url {
@@ -30,10 +62,14 @@ pub struct Url {
 
 impl Url {
     /// The error names the URL and what is wrong with it (an `https://` URL among them)
-    pub fn parse(url: &str) -> Result<Self, String> {
-        let rest = url
-            .strip_prefix("http://")
-            .ok_or_else(|| format!("{url}: only http:// URLs are supported by the nerve client"))?;
+    pub fn parse(url: &str) -> Result<Self> {
+        let invalid = |reason: String| Error::Url {
+            url: url.to_string(),
+            reason,
+        };
+        let rest = url.strip_prefix("http://").ok_or_else(|| {
+            invalid("only http:// URLs are supported by the nerve client".to_string())
+        })?;
         let (authority, path) = match rest.find('/') {
             Some(i) => (&rest[..i], &rest[i..]),
             None => (rest, "/"),
@@ -42,12 +78,12 @@ impl Url {
             Some((host, port)) if !host.contains(']') || host.ends_with(']') => (
                 host,
                 port.parse::<u16>()
-                    .map_err(|_| format!("{url}: bad port '{port}'"))?,
+                    .map_err(|_| invalid(format!("bad port '{port}'")))?,
             ),
             _ => (authority, 80),
         };
         if host.is_empty() {
-            return Err(format!("{url}: no host"));
+            return Err(invalid("no host".to_string()));
         }
         Ok(Self {
             host: host.trim_matches(['[', ']']).to_string(),
@@ -115,7 +151,7 @@ pub struct Streaming {
 
 impl Streaming {
     /// The next piece of the body; `None` at its end
-    pub async fn next(&mut self) -> io::Result<Option<Bytes>> {
+    pub async fn next(&mut self) -> Result<Option<Bytes>> {
         loop {
             if self.done {
                 return Ok(None);
@@ -135,7 +171,7 @@ impl Streaming {
                     let mut buf = vec![0u8; left.min(16 * 1024)];
                     let n = self.stream.read(&mut buf).await?;
                     if n == 0 {
-                        return Err(io::ErrorKind::UnexpectedEof.into());
+                        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
                     }
                     buf.truncate(n);
                     self.framing = Framing::Length(left - n);
@@ -169,13 +205,13 @@ impl Streaming {
     }
 
     /// Part of the current chunk, an empty piece between chunks, or `None` after the last one
-    async fn next_chunk_piece(&mut self) -> io::Result<Option<Bytes>> {
+    async fn next_chunk_piece(&mut self) -> Result<Option<Bytes>> {
         match self.chunk_left {
             None => {
                 let line = self.read_line().await?;
                 let size = line.split(';').next().unwrap_or("").trim();
                 let size = usize::from_str_radix(size, 16)
-                    .map_err(|_| io::Error::other(format!("bad chunk size '{size}'")))?;
+                    .map_err(|_| Error::Protocol(format!("bad chunk size '{size}'")))?;
                 if size == 0 {
                     // Trailers up to the empty line
                     while !self.read_line().await?.is_empty() {}
@@ -195,7 +231,7 @@ impl Streaming {
                     let mut buf = vec![0u8; left.min(16 * 1024)];
                     let n = self.stream.read(&mut buf).await?;
                     if n == 0 {
-                        return Err(io::ErrorKind::UnexpectedEof.into());
+                        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
                     }
                     buf.truncate(n);
                     self.buffered = buf;
@@ -208,7 +244,7 @@ impl Streaming {
         }
     }
 
-    async fn read_line(&mut self) -> io::Result<String> {
+    async fn read_line(&mut self) -> Result<String> {
         loop {
             if let Some(i) = self.buffered.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = self.buffered.drain(..=i).collect();
@@ -216,12 +252,12 @@ impl Streaming {
                 return Ok(line);
             }
             if self.buffered.len() > MAX_HEAD {
-                return Err(io::Error::other("line too long"));
+                return Err(Error::Protocol("line too long".to_string()));
             }
             let mut buf = [0u8; 4096];
             let n = self.stream.read(&mut buf).await?;
             if n == 0 {
-                return Err(io::ErrorKind::UnexpectedEof.into());
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
             }
             self.buffered.extend_from_slice(&buf[..n]);
         }
@@ -259,19 +295,19 @@ impl Client {
     }
 
     /// Open a connection to `url`'s host and keep it for the next request
-    pub async fn warm(&self, url: &Url) -> io::Result<()> {
+    pub async fn warm(&self, url: &Url) -> Result<()> {
         let stream = self.connect(url).await?;
         self.put_back(url, stream);
         Ok(())
     }
 
-    async fn connect(&self, url: &Url) -> io::Result<TcpStream> {
+    async fn connect(&self, url: &Url) -> Result<TcpStream> {
         let stream = tokio::time::timeout(
             self.timeout,
             TcpStream::connect((url.host.as_str(), url.port)),
         )
         .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connect timed out"))??;
+        .map_err(|_| Error::Timeout("connect"))??;
         stream.set_nodelay(true)?;
         Ok(stream)
     }
@@ -293,17 +329,17 @@ impl Client {
     }
 
     /// Send a request and collect the whole response, all within the timeout: a server that
-    /// sends its head and then stalls fails with [`io::ErrorKind::TimedOut`]
+    /// sends its head and then stalls fails with [`Error::Timeout`]
     pub async fn request(
         &self,
         method: &str,
         url: &Url,
         headers: &[(&str, &str)],
         body: &[u8],
-    ) -> io::Result<Response> {
+    ) -> Result<Response> {
         tokio::time::timeout(self.timeout, self.request_inner(method, url, headers, body))
             .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "request timed out"))?
+            .map_err(|_| Error::Timeout("request"))?
     }
 
     async fn request_inner(
@@ -312,13 +348,13 @@ impl Client {
         url: &Url,
         headers: &[(&str, &str)],
         body: &[u8],
-    ) -> io::Result<Response> {
+    ) -> Result<Response> {
         let mut streaming = self.send_inner(method, url, headers, body).await?;
         let mut collected = Vec::new();
         while let Some(piece) = streaming.next().await? {
             collected.extend_from_slice(&piece);
             if collected.len() > MAX_BODY {
-                return Err(io::Error::other("response body too large"));
+                return Err(Error::TooLarge);
             }
         }
         if streaming.keep_alive() {
@@ -339,10 +375,10 @@ impl Client {
         url: &Url,
         headers: &[(&str, &str)],
         body: &[u8],
-    ) -> io::Result<Streaming> {
+    ) -> Result<Streaming> {
         tokio::time::timeout(self.timeout, self.send_inner(method, url, headers, body))
             .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "request timed out"))?
+            .map_err(|_| Error::Timeout("request"))?
     }
 
     async fn send_inner(
@@ -351,7 +387,7 @@ impl Client {
         url: &Url,
         headers: &[(&str, &str)],
         body: &[u8],
-    ) -> io::Result<Streaming> {
+    ) -> Result<Streaming> {
         let mut head = format!(
             "{method} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: furnace-nerve\r\n",
             url.path,
@@ -382,7 +418,7 @@ impl Client {
     }
 }
 
-async fn write_and_read_head(mut stream: TcpStream, request: &[u8]) -> io::Result<Streaming> {
+async fn write_and_read_head(mut stream: TcpStream, request: &[u8]) -> Result<Streaming> {
     stream.write_all(request).await?;
     let mut buffered = Vec::with_capacity(4096);
     let head_end = loop {
@@ -390,12 +426,12 @@ async fn write_and_read_head(mut stream: TcpStream, request: &[u8]) -> io::Resul
             break i;
         }
         if buffered.len() > MAX_HEAD {
-            return Err(io::Error::other("response head too large"));
+            return Err(Error::Protocol("response head too large".to_string()));
         }
         let mut buf = [0u8; 4096];
         let n = stream.read(&mut buf).await?;
         if n == 0 {
-            return Err(io::ErrorKind::UnexpectedEof.into());
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
         }
         buffered.extend_from_slice(&buf[..n]);
     };
@@ -407,7 +443,7 @@ async fn write_and_read_head(mut stream: TcpStream, request: &[u8]) -> io::Resul
         .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse::<u16>().ok())
-        .ok_or_else(|| io::Error::other(format!("bad status line '{status_line}'")))?;
+        .ok_or_else(|| Error::Protocol(format!("bad status line '{status_line}'")))?;
     let headers: Vec<(String, String)> = lines
         .filter_map(|line| {
             let (name, value) = line.split_once(':')?;
@@ -559,7 +595,7 @@ mod tests {
         let client = Client::new(Duration::from_millis(100));
         let started = std::time::Instant::now();
         let err = client.request("POST", &url, &[], b"x").await.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+        assert!(matches!(err, Error::Timeout(_)), "{err}");
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
@@ -581,7 +617,10 @@ mod tests {
             .request("GET", &url, &[], b"")
             .await
             .unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof, "{err}");
+        assert!(
+            matches!(&err, Error::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -596,7 +635,7 @@ mod tests {
             .request("GET", &url, &[], b"")
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("too large"), "{err}");
+        assert!(matches!(err, Error::TooLarge), "{err}");
     }
 
     /// Three SSE events, as a stream of results

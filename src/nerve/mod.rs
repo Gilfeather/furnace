@@ -48,7 +48,7 @@
 //!     Mechanisms::NONE,
 //! );
 //! let alert = fabric.neuron(
-//!     effector::Effector::new(effector::Webhook::new("alert", "http://127.0.0.1:9000/hook")),
+//!     effector::Effector::new(effector::Webhook::new("alert", "http://127.0.0.1:9000/hook")?),
 //!     Mechanisms::NONE.refractory(Duration::from_millis(100)),
 //! );
 //! // The brain: slow, so it sits behind a queue that sums a window of signals into one
@@ -66,8 +66,9 @@
 //! // A command takes the pathway to the effector it names; any other signal the heaviest
 //! // pathway fast enough for its deadline: the brain's, as long as it keeps up
 //! fabric.deliberative(classify, brain, 2.0, Summation::default());
-//! let fabric = fabric.build();
+//! let fabric = fabric.build()?;
 //! # let _ = fabric;
+//! # Ok::<(), furnace::nerve::BuildError>(())
 //! ```
 //!
 //! See [docs/NERVE.md](https://github.com/Gilfeather/furnace/blob/main/docs/NERVE.md) for
@@ -89,10 +90,18 @@ pub(crate) mod serve;
 mod signal;
 #[cfg(test)]
 mod testing;
-pub mod wire;
+pub(crate) mod wire;
+
+/// The nervous system's own HTTP/1.1 client, for the nerve bench's raw baseline. Not part of
+/// the API: it may change in any release.
+#[doc(hidden)]
+pub mod bench_wire {
+    pub use super::wire::{Client, Error, Response, Url};
+}
 
 pub use fabric::{
-    Announced, Fabric, FabricBuilder, MAX_HOPS, Outcome, Pathway, PathwayKind, Summation,
+    Announced, BuildError, Fabric, FabricBuilder, MAX_HOPS, Outcome, Pathway, PathwayKind,
+    Summation,
 };
 pub use http::{OUTCOME_HEADER, SIGNAL_HEADER};
 pub use latency::{LatencyEstimate, LatencySnapshot};
@@ -102,8 +111,8 @@ pub use metrics::{
 pub use neuron::{Cx, Firing, FnNeuron, Habituation, Mechanisms, Neuron, NeuronKind, Quiet};
 pub use receptor::{Afferent, Receptor};
 pub use signal::{
-    Answer, Command, Feature, NeuronId, PathwayId, Payload, Reply, Signal, SignalId, TRACE_HOPS,
-    Trace, Urgency, sketch64,
+    Answer, Command, Feature, NeuronId, PathwayId, Payload, ReplyHandle, Signal, SignalId,
+    TRACE_HOPS, Trace, Urgency, sketch64,
 };
 
 /// Nanoseconds from `epoch` to `now`: 0 if `now` is earlier, `u64::MAX` past 584 years

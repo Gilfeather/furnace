@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 
 use super::latency::LatencyEstimate;
 use super::neuron::{Cx, Firing, Gate, Mechanisms, Neuron, NeuronKind, Quiet};
-use super::receptor::{Afferent, Receptor};
+use super::receptor::{Afferent, Receptor, Stop};
 use super::signal::{NeuronId, PathwayId, Signal};
 use crate::batching::engine::{self, Batching, Engine, Queued};
 
@@ -230,6 +230,8 @@ pub(crate) struct Inner {
     pub loops: AtomicU64,
     /// Commands delivered to their effector without a declared pathway
     pub commands_direct: AtomicU64,
+    /// Raised on drop, for the receptors started with [`Fabric::start`]
+    stop: Arc<Stop>,
     efferent: Mutex<Option<tokio::runtime::Runtime>>,
     efferent_handle: tokio::runtime::Handle,
     afferent: Mutex<Option<tokio::runtime::Runtime>>,
@@ -238,6 +240,8 @@ pub(crate) struct Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
+        // Receptors' threads and tasks end on this
+        self.stop.raise();
         let take = |runtime: &mut Mutex<Option<tokio::runtime::Runtime>>| {
             runtime.get_mut().ok().and_then(Option::take)
         };
@@ -295,12 +299,42 @@ impl Outcome {
 #[derive(Clone)]
 pub struct Fabric(pub(crate) Arc<Inner>);
 
+/// Why a part of the nervous system cannot be built
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum BuildError {
+    /// Two neurons have the same name; effectors are addressed by name
+    #[error("two neurons are named '{0}'")]
+    DuplicateName(String),
+    /// A pathway names a neuron that was not added to this builder
+    #[error("pathway {from} -> {to} names a neuron that was not added")]
+    UnknownNeuron {
+        /// The pathway's source
+        from: NeuronId,
+        /// The pathway's target
+        to: NeuronId,
+    },
+    /// A URL the nervous system's HTTP client cannot call: not `http://host[:port]/path`
+    /// (HTTPS among them)
+    #[error("{name}: {reason}")]
+    Url {
+        /// The effector or receptor
+        name: String,
+        /// What is wrong with the URL
+        reason: String,
+    },
+    /// A runtime of the fabric could not be started
+    #[error("the {0} runtime: {1}")]
+    Runtime(&'static str, #[source] std::io::Error),
+}
+
 /// Builds a [`Fabric`]: add neurons, connect them, build
 pub struct FabricBuilder {
     neurons: Vec<(Arc<dyn Neuron>, Mechanisms)>,
     receptors: Vec<(NeuronId, Arc<dyn Receptor>)>,
     pathways: Vec<(NeuronId, NeuronId, PathwayKind, f32, Option<Summation>)>,
     efferent_threads: usize,
+    efferent: Option<tokio::runtime::Handle>,
 }
 
 impl Default for FabricBuilder {
@@ -317,6 +351,7 @@ impl FabricBuilder {
             receptors: Vec::new(),
             pathways: Vec::new(),
             efferent_threads: 2,
+            efferent: None,
         }
     }
 
@@ -326,28 +361,23 @@ impl FabricBuilder {
         self
     }
 
-    /// Add a neuron with its mechanisms. Names must be unique: effectors are addressed by
-    /// name in commands.
-    ///
-    /// # Panics
-    ///
-    /// If a neuron of the same name was added already.
+    /// Run the motor side (effectors' calls, retries, backoff) on a runtime of your own, the
+    /// server's say, instead of one the fabric starts. The runtime must outlive the fabric;
+    /// [`efferent_threads`](Self::efferent_threads) no longer applies.
+    pub fn efferent(mut self, runtime: tokio::runtime::Handle) -> Self {
+        self.efferent = Some(runtime);
+        self
+    }
+
+    /// Add a neuron with its mechanisms. Names must be unique, since effectors are addressed
+    /// by name in commands: [`build`](Self::build) refuses two of the same name.
     pub fn neuron(&mut self, neuron: impl Neuron, mechanisms: Mechanisms) -> NeuronId {
         self.add(Arc::new(neuron), mechanisms)
     }
 
     /// [`FabricBuilder::neuron`] for a neuron already shared
-    ///
-    /// # Panics
-    ///
-    /// If a neuron of the same name was added already.
     pub fn add(&mut self, neuron: Arc<dyn Neuron>, mechanisms: Mechanisms) -> NeuronId {
         let id = NeuronId(u32::try_from(self.neurons.len()).expect("fewer than 4G neurons"));
-        assert!(
-            !self.neurons.iter().any(|(n, _)| n.name() == neuron.name()),
-            "two neurons are named '{}'",
-            neuron.name()
-        );
         self.neurons.push((neuron, mechanisms));
         id
     }
@@ -387,31 +417,42 @@ impl FabricBuilder {
         self
     }
 
-    /// Wire the fabric and start its runtimes and its deliberative workers
-    ///
-    /// # Panics
-    ///
-    /// If a pathway names a neuron of another builder, or the runtimes cannot be started.
-    pub fn build(self) -> Fabric {
+    /// Wire the fabric and start its runtimes and its deliberative workers. An error for two
+    /// neurons of the same name, a pathway to a neuron of another builder, or a runtime that
+    /// cannot be started.
+    pub fn build(self) -> Result<Fabric, BuildError> {
         let count = self.neurons.len();
-        for &(from, to, ..) in &self.pathways {
-            assert!(
-                from.index() < count && to.index() < count,
-                "pathway {from} -> {to} names a neuron that was not added"
-            );
+        let mut names = std::collections::HashSet::new();
+        for (neuron, _) in &self.neurons {
+            if !names.insert(neuron.name()) {
+                return Err(BuildError::DuplicateName(neuron.name().to_string()));
+            }
         }
-        let efferent = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(self.efferent_threads)
-            .thread_name("furnace-efferent")
-            .enable_all()
-            .build()
-            .expect("the efferent runtime");
+        drop(names);
+        for &(from, to, ..) in &self.pathways {
+            if from.index() >= count || to.index() >= count {
+                return Err(BuildError::UnknownNeuron { from, to });
+            }
+        }
+        let (efferent, efferent_handle) = match self.efferent {
+            Some(handle) => (None, handle),
+            None => {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(self.efferent_threads)
+                    .thread_name("furnace-efferent")
+                    .enable_all()
+                    .build()
+                    .map_err(|e| BuildError::Runtime("efferent", e))?;
+                let handle = runtime.handle().clone();
+                (Some(runtime), handle)
+            }
+        };
         let afferent = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name("furnace-afferent")
             .enable_all()
             .build()
-            .expect("the afferent runtime");
+            .map_err(|e| BuildError::Runtime("afferent", e))?;
         let mut by_name = HashMap::new();
         let mut cells: Vec<Cell> = self
             .neurons
@@ -486,13 +527,14 @@ impl FabricBuilder {
                 no_eligible: AtomicU64::new(0),
                 loops: AtomicU64::new(0),
                 commands_direct: AtomicU64::new(0),
-                efferent_handle: efferent.handle().clone(),
-                efferent: Mutex::new(Some(efferent)),
+                stop: Arc::new(Stop::default()),
+                efferent_handle,
+                efferent: Mutex::new(efferent),
                 afferent_handle: afferent.handle().clone(),
                 afferent: Mutex::new(Some(afferent)),
             }
         });
-        Fabric(inner)
+        Ok(Fabric(inner))
     }
 }
 
@@ -509,7 +551,11 @@ impl Fabric {
             return;
         }
         for (id, receptor) in &self.0.receptors {
-            receptor.start(Afferent::new(Arc::downgrade(&self.0), *id));
+            receptor.start(Afferent::new(
+                Arc::downgrade(&self.0),
+                *id,
+                self.0.stop.clone(),
+            ));
         }
     }
 
@@ -960,7 +1006,7 @@ impl Batching for Summing {
         signal
             .reply
             .as_ref()
-            .is_none_or(super::signal::Reply::wanted)
+            .is_none_or(super::signal::ReplyHandle::wanted)
     }
 
     fn window(&self) -> Duration {
@@ -1054,7 +1100,7 @@ mod tests {
         let effector = Sink::new("act", NeuronKind::Effector);
         let e = b.add(effector.clone(), Mechanisms::NONE);
         b.reflex(r, reflex, 1.0).reflex(reflex, e, 1.0);
-        let fabric = b.build();
+        let fabric = b.build().unwrap();
 
         let outcome = fabric.stimulate(r, signal(b"stimulus"));
         // The effector ran before stimulate returned, on this thread, never queued
@@ -1089,7 +1135,7 @@ mod tests {
         let brain = Sink::new("brain", NeuronKind::Brain);
         let bid = b.add(brain.clone(), Mechanisms::NONE);
         b.deliberative(r, bid, 1.0, Summation::default().window(Duration::ZERO));
-        let fabric = b.build();
+        let fabric = b.build().unwrap();
 
         for _ in 0..10 {
             fabric.stimulate(r, signal(b"same"));
@@ -1115,7 +1161,7 @@ mod tests {
         let s = b.add(slow.clone(), Mechanisms::NONE);
         // The slow path is preferred (heavier) when there is time
         b.reflex(r, f, 0.5).reflex(r, s, 1.0);
-        let fabric = b.build();
+        let fabric = b.build().unwrap();
         fabric.seed_latency(0, Duration::from_micros(10));
         fabric.seed_latency(1, Duration::from_millis(50));
 
@@ -1160,7 +1206,7 @@ mod tests {
         let w = b.add(webhook.clone(), Mechanisms::NONE);
         b.add(journal.clone(), Mechanisms::NONE);
         b.reflex(r, reflex, 1.0).reflex(reflex, w, 1.0);
-        let fabric = b.build();
+        let fabric = b.build().unwrap();
 
         let outcome = fabric.stimulate(r, signal(b"x"));
         assert_eq!((webhook.hits(), journal.hits()), (1, 1));
@@ -1181,7 +1227,7 @@ mod tests {
         let e = Sink::new("act", NeuronKind::Effector);
         let eid = b.add(e.clone(), Mechanisms::NONE);
         b.reflex(r, eid, 1.0);
-        let fabric = b.build();
+        let fabric = b.build().unwrap();
         for i in 0..5u8 {
             fabric.stimulate(r, signal(&[i]));
         }
@@ -1227,7 +1273,7 @@ mod tests {
                 .max_batch(4)
                 .window(Duration::from_millis(50)),
         );
-        let fabric = b.build();
+        let fabric = b.build().unwrap();
         for i in 0..6u8 {
             assert_eq!(fabric.stimulate(r, signal(&[i])).queued, 1);
         }
@@ -1246,7 +1292,7 @@ mod tests {
             Mechanisms::NONE,
         );
         b.reflex(a, c, 1.0).reflex(c, a, 1.0);
-        let fabric = b.build();
+        let fabric = b.build().unwrap();
         let outcome = fabric.stimulate(a, signal(b"round"));
         assert_eq!(outcome.hops, MAX_HOPS);
         assert_eq!(fabric.0.loops.load(Ordering::SeqCst), 1);
@@ -1262,7 +1308,7 @@ mod tests {
         );
         b.deliberative(reflex, brain, 1.0, Summation::none())
             .reflex(brain, reflex, 1.0);
-        let fabric = b.build();
+        let fabric = b.build().unwrap();
         fabric.stimulate(reflex, signal(b"round"));
         // Each pass through the queue restarts the depth; the trace still counts every hop
         wait_until(|| fabric.0.loops.load(Ordering::SeqCst) > 0);
@@ -1292,12 +1338,46 @@ mod tests {
         let r = b.neuron(pass("in"), Mechanisms::NONE);
         let brain = b.add(prep.clone(), Mechanisms::NONE);
         b.deliberative(r, brain, 1.0, Summation::none());
-        let fabric = b.build();
+        let fabric = b.build().unwrap();
         for i in 0..3u8 {
             fabric.stimulate(r, signal(&[i]));
         }
         // Prepared before the first signal was queued; the next two were within the second
         assert_eq!(prep.0.load(Ordering::SeqCst), 1);
         let _ = receptor("unused");
+    }
+
+    #[test]
+    fn a_builder_with_two_neurons_of_one_name_or_a_foreign_pathway_is_an_error() {
+        let mut b = Fabric::builder();
+        b.neuron(pass("in"), Mechanisms::NONE);
+        b.neuron(pass("in"), Mechanisms::NONE);
+        assert!(matches!(b.build(), Err(BuildError::DuplicateName(name)) if name == "in"));
+
+        let mut other = Fabric::builder();
+        let a = other.neuron(pass("a"), Mechanisms::NONE);
+        let b2 = other.neuron(pass("b"), Mechanisms::NONE);
+        let mut b = Fabric::builder();
+        let only = b.neuron(pass("only"), Mechanisms::NONE);
+        b.reflex(only, b2, 1.0);
+        assert!(matches!(
+            b.build(),
+            Err(BuildError::UnknownNeuron { from, to }) if from == only && to == b2
+        ));
+        let _ = a;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_motor_side_can_run_on_a_runtime_of_ones_own() {
+        let mut b = Fabric::builder().efferent(tokio::runtime::Handle::current());
+        b.neuron(pass("in"), Mechanisms::NONE);
+        let fabric = b.build().unwrap();
+        assert_eq!(
+            fabric.efferent().id(),
+            tokio::runtime::Handle::current().id()
+        );
+        // Dropping it on this runtime leaves the runtime alone
+        drop(fabric);
+        tokio::task::yield_now().await;
     }
 }

@@ -52,11 +52,12 @@ pub struct NeuronMetrics {
     pub quiet_by_habituation: u64,
     /// Signals ignored because the neuron fired too recently
     pub quiet_by_refractory: u64,
-    /// Signals that passed the gate but the neuron was not interested in (`Firing::Quiet`):
-    /// the fourth reason next to the `quiet_by_*` ones, not a total of quiet signals
-    /// (`reason="not_interested"` in Prometheus)
-    pub quiet: u64,
-    /// Blocking computations run (`Firing::Compute`)
+    /// Signals that passed the gate but the neuron was not interested in (`Firing::Quiet`),
+    /// the fourth reason next to the `quiet_by_*` ones (`reason="not_interested"` in
+    /// Prometheus)
+    pub quiet_not_interested: u64,
+    /// Firings that came from blocking work (`Firing::Compute`): every firing of a brain
+    /// (`brain::Llm`, `brain::ModelNeuron`), one per signal of a summed window
     pub computed: u64,
     /// Whatever the neuron adds (an effector's local loop, a brain's model)
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
@@ -80,8 +81,8 @@ pub struct PathwayMetrics {
     pub ineligible: u64,
     /// Signals dropped because the queue was full
     pub overflow: u64,
-    /// Signal-in to signal-out on this hop
-    pub latency: LatencySnapshot,
+    /// Signal-in to signal-out on this hop, in milliseconds
+    pub latency_ms: LatencySnapshot,
     /// The summation window a deliberative pathway waits now
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_us: Option<f64>,
@@ -94,8 +95,8 @@ pub struct ArcMetrics {
     pub from: String,
     /// The effector
     pub to: String,
-    /// Stimulus-to-action, from the receptor's stimulus to the effector
-    pub latency: LatencySnapshot,
+    /// Stimulus-to-action, from the receptor's stimulus to the effector, in milliseconds
+    pub latency_ms: LatencySnapshot,
 }
 
 /// `GET /nerve`: the neurons, their mechanisms, the pathways and the measured latencies
@@ -186,7 +187,7 @@ impl Fabric {
             quiet_by_threshold: load(&c.quiet_threshold),
             quiet_by_habituation: load(&c.quiet_habituation),
             quiet_by_refractory: load(&c.quiet_refractory),
-            quiet: load(&c.quiet_not_interested),
+            quiet_not_interested: load(&c.quiet_not_interested),
             computed: load(&c.computed),
             extra: cell.neuron.metrics(),
         }
@@ -204,7 +205,7 @@ impl Fabric {
                 signals: p.signals.load(Ordering::Relaxed),
                 ineligible: p.ineligible.load(Ordering::Relaxed),
                 overflow: p.overflow.load(Ordering::Relaxed),
-                latency: p.latency.snapshot(),
+                latency_ms: p.latency.snapshot(),
                 window_us: p.window().map(|w| w.as_secs_f64() * 1e6),
             })
             .collect()
@@ -218,7 +219,7 @@ impl Fabric {
                     arcs.push(ArcMetrics {
                         from: self.0.cells[origin].neuron.name().to_string(),
                         to: cell.neuron.name().to_string(),
-                        latency: latency.snapshot(),
+                        latency_ms: latency.snapshot(),
                     });
                 }
             }
@@ -230,6 +231,7 @@ impl Fabric {
     pub fn render_prometheus(&self, out: &mut String) {
         let m = self.metrics();
         render_fabric(&m, out);
+        self.render_latencies(out);
         if m.neurons.iter().any(|n| n.kind == NeuronKind::Effector) {
             super::effector::render_prometheus_help(out);
         }
@@ -240,7 +242,40 @@ impl Fabric {
     }
 }
 
-/// The fabric's own families: its counters, the neurons', the pathways' and the arcs'
+impl Fabric {
+    /// The pathways' and the reflex arcs' latencies, as histograms of every measurement
+    fn render_latencies(&self, out: &mut String) {
+        let name = "furnace_nerve_pathway_latency_seconds";
+        render_family(
+            out,
+            name,
+            "histogram",
+            "Measured signal-in to signal-out on the pathway",
+        );
+        for p in &self.0.pathways {
+            let labels = between(self.name(p.from), self.name(p.to));
+            p.latency.histogram().render_series(out, name, &labels);
+        }
+        let name = "furnace_nerve_arc_latency_seconds";
+        render_family(
+            out,
+            name,
+            "histogram",
+            "Stimulus to effector call on each reflex arc",
+        );
+        for cell in &self.0.cells {
+            for (origin, arc) in cell.arcs.iter().enumerate() {
+                if let Some(latency) = arc.get() {
+                    let labels = between(self.0.cells[origin].neuron.name(), cell.neuron.name());
+                    latency.histogram().render_series(out, name, &labels);
+                }
+            }
+        }
+    }
+}
+
+/// The fabric's own families: its counters, the neurons' and the pathways' (the latencies
+/// are [`Fabric::render_latencies`]')
 fn render_fabric(m: &NerveMetrics, out: &mut String) {
     let counter = "counter";
     let gauge = "gauge";
@@ -323,7 +358,7 @@ fn render_fabric(m: &NerveMetrics, out: &mut String) {
             (Quiet::Threshold, n.quiet_by_threshold),
             (Quiet::Habituation, n.quiet_by_habituation),
             (Quiet::Refractory, n.quiet_by_refractory),
-            (Quiet::NotInterested, n.quiet),
+            (Quiet::NotInterested, n.quiet_not_interested),
         ] {
             let labels = format!(
                 "neuron=\"{}\",reason=\"{}\"",
@@ -349,34 +384,6 @@ fn render_fabric(m: &NerveMetrics, out: &mut String) {
             p.signals,
         );
     }
-    render_family(
-        out,
-        "furnace_nerve_pathway_latency_seconds",
-        gauge,
-        "Measured signal-in to signal-out on the pathway",
-    );
-    for p in &m.pathways {
-        render_quantiles(
-            out,
-            "furnace_nerve_pathway_latency_seconds",
-            &between(&p.from, &p.to),
-            &p.latency,
-        );
-    }
-    render_family(
-        out,
-        "furnace_nerve_arc_latency_seconds",
-        gauge,
-        "Stimulus to effector call on each reflex arc",
-    );
-    for a in &m.arcs {
-        render_quantiles(
-            out,
-            "furnace_nerve_arc_latency_seconds",
-            &between(&a.from, &a.to),
-            &a.latency,
-        );
-    }
 }
 
 /// The `from` and `to` labels of a pathway or an arc
@@ -384,23 +391,12 @@ fn between(from: &str, to: &str) -> String {
     format!("from=\"{}\",to=\"{}\"", label(from), label(to))
 }
 
-/// The median and the 99th percentile as `quantile` samples, in seconds (each only once
-/// measured), and the `_count`
-fn render_quantiles(out: &mut String, name: &str, labels: &str, l: &LatencySnapshot) {
-    for (q, value) in [("0.5", l.p50_us), ("0.99", l.p99_us)] {
-        if let Some(us) = value {
-            render_labelled(out, name, &format!("{labels},quantile=\"{q}\""), us / 1e6);
-        }
-    }
-    render_labelled(out, &format!("{name}_count"), labels, l.count);
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::nerve::effector::{Channel, Effector};
+    use crate::nerve::effector::{ChannelOut, Effector};
     use crate::nerve::fabric::Summation;
     use crate::nerve::neuron::{Firing, FnNeuron, Mechanisms};
 
@@ -413,24 +409,20 @@ mod tests {
             quiet_by_threshold: base + 2,
             quiet_by_habituation: base + 3,
             quiet_by_refractory: base + 4,
-            quiet: base + 5,
+            quiet_not_interested: base + 5,
             computed: 0,
             extra: serde_json::Value::Null,
         }
     }
 
-    fn latency(count: u64, p50_us: Option<f64>, p99_us: Option<f64>) -> LatencySnapshot {
+    fn latency(count: u64) -> LatencySnapshot {
         LatencySnapshot {
             count,
-            p50_us,
-            p99_us,
-            mean_us: None,
-            max_us: None,
+            ..LatencySnapshot::default()
         }
     }
 
-    /// Every family the fabric writes, with label values that need escaping and latencies
-    /// with and without quantiles
+    /// Every counter family the fabric writes, with label values that need escaping
     #[test]
     fn the_fabric_families_render_as_before() {
         let metrics = NerveMetrics {
@@ -454,7 +446,7 @@ mod tests {
                     signals: 7,
                     ineligible: 0,
                     overflow: 0,
-                    latency: latency(7, Some(12.5), Some(40.0)),
+                    latency_ms: latency(7),
                     window_us: None,
                 },
                 PathwayMetrics {
@@ -465,14 +457,14 @@ mod tests {
                     signals: 2,
                     ineligible: 1,
                     overflow: 0,
-                    latency: latency(0, None, None),
+                    latency_ms: latency(0),
                     window_us: Some(250.0),
                 },
             ],
             arcs: vec![ArcMetrics {
                 from: "in".into(),
                 to: "brain".into(),
-                latency: latency(3, Some(1500.0), None),
+                latency_ms: latency(3),
             }],
         };
         let mut out = String::new();
@@ -492,7 +484,7 @@ mod tests {
             FnNeuron::reflex("brain", |s, _| Firing::one(s)).with_kind(NeuronKind::Brain),
             Mechanisms::NONE,
         );
-        let (channel, _rx) = Channel::new("out", 1);
+        let (channel, _rx) = ChannelOut::new("out", 1);
         let out = b.neuron(Effector::new(channel), Mechanisms::NONE);
         b.reflex(input, out, 1.0).deliberative(
             input,
@@ -503,10 +495,78 @@ mod tests {
                 ..Summation::default()
             },
         );
-        let fabric = b.build();
+        let fabric = b.build().unwrap();
         let mut text = String::new();
         fabric.render_prometheus(&mut text);
-        assert_eq!(text, WITH_EFFECTOR, "\n{text}");
+        let latencies = [
+            "# HELP furnace_nerve_pathway_latency_seconds Measured signal-in to signal-out on \
+             the pathway\n# TYPE furnace_nerve_pathway_latency_seconds histogram\n"
+                .to_string(),
+            empty_histogram(
+                "furnace_nerve_pathway_latency_seconds",
+                r#"from="in",to="out""#,
+            ),
+            empty_histogram(
+                "furnace_nerve_pathway_latency_seconds",
+                r#"from="in",to="brain""#,
+            ),
+            "# HELP furnace_nerve_arc_latency_seconds Stimulus to effector call on each reflex \
+             arc\n# TYPE furnace_nerve_arc_latency_seconds histogram\n"
+                .to_string(),
+        ]
+        .concat();
+        let expected = WITH_EFFECTOR.replace("LATENCIES\n", &latencies);
+        assert_eq!(text, expected, "\n{text}");
+    }
+
+    /// The series of a histogram with no observations, in the fine buckets
+    fn empty_histogram(name: &str, labels: &str) -> String {
+        let mut out = String::new();
+        for le in crate::telemetry::FINE_LATENCY_BUCKETS
+            .iter()
+            .map(f64::to_string)
+            .chain(["+Inf".to_string()])
+        {
+            out.push_str(&format!("{name}_bucket{{{labels},le=\"{le}\"}} 0\n"));
+        }
+        out.push_str(&format!(
+            "{name}_sum{{{labels}}} 0\n{name}_count{{{labels}}} 0\n"
+        ));
+        out
+    }
+
+    #[test]
+    fn a_measured_pathway_renders_its_histogram() {
+        let mut b = Fabric::builder();
+        let input = b.neuron(
+            FnNeuron::reflex("in", |s, _| Firing::one(s)).with_kind(NeuronKind::Receptor),
+            Mechanisms::NONE,
+        );
+        let sink = b.neuron(
+            FnNeuron::reflex("sink", |_, _| Firing::Quiet),
+            Mechanisms::NONE,
+        );
+        b.reflex(input, sink, 1.0);
+        let fabric = b.build().unwrap();
+        fabric.0.pathways[0]
+            .latency
+            .observe(Duration::from_micros(3));
+        let mut text = String::new();
+        fabric.render_prometheus(&mut text);
+        let name = "furnace_nerve_pathway_latency_seconds";
+        let labels = r#"from="in",to="sink""#;
+        for line in [
+            format!("{name}_bucket{{{labels},le=\"0.0000025\"}} 0"),
+            format!("{name}_bucket{{{labels},le=\"0.000005\"}} 1"),
+            format!("{name}_bucket{{{labels},le=\"+Inf\"}} 1"),
+            format!("{name}_count{{{labels}}} 1"),
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line}\n{text}");
+        }
+        let json = serde_json::to_value(fabric.metrics()).unwrap();
+        let latency = &json["pathways"][0]["latency_ms"];
+        assert_eq!(latency["count"], 1);
+        assert!(latency["p50"].as_f64().unwrap() <= 0.005, "{latency}");
     }
 
     const FABRIC_FAMILIES: &str = r#"# HELP furnace_nerve_signals_received_total Signals that entered through receptors
@@ -555,16 +615,6 @@ furnace_nerve_neuron_quiet_total{neuron="brain",reason="not_interested"} 35
 # TYPE furnace_nerve_pathway_signals_total counter
 furnace_nerve_pathway_signals_total{from="in",to="cl\"assify\\",kind="reflex"} 7
 furnace_nerve_pathway_signals_total{from="cl\"assify\\",to="brain",kind="deliberative"} 2
-# HELP furnace_nerve_pathway_latency_seconds Measured signal-in to signal-out on the pathway
-# TYPE furnace_nerve_pathway_latency_seconds gauge
-furnace_nerve_pathway_latency_seconds{from="in",to="cl\"assify\\",quantile="0.5"} 0.0000125
-furnace_nerve_pathway_latency_seconds{from="in",to="cl\"assify\\",quantile="0.99"} 0.00004
-furnace_nerve_pathway_latency_seconds_count{from="in",to="cl\"assify\\"} 7
-furnace_nerve_pathway_latency_seconds_count{from="cl\"assify\\",to="brain"} 0
-# HELP furnace_nerve_arc_latency_seconds Stimulus to effector call on each reflex arc
-# TYPE furnace_nerve_arc_latency_seconds gauge
-furnace_nerve_arc_latency_seconds{from="in",to="brain",quantile="0.5"} 0.0015
-furnace_nerve_arc_latency_seconds_count{from="in",to="brain"} 3
 "#;
 
     const WITH_EFFECTOR: &str = r#"# HELP furnace_nerve_signals_received_total Signals that entered through receptors
@@ -613,12 +663,7 @@ furnace_nerve_neuron_quiet_total{neuron="out",reason="not_interested"} 0
 # TYPE furnace_nerve_pathway_signals_total counter
 furnace_nerve_pathway_signals_total{from="in",to="out",kind="reflex"} 0
 furnace_nerve_pathway_signals_total{from="in",to="brain",kind="deliberative"} 0
-# HELP furnace_nerve_pathway_latency_seconds Measured signal-in to signal-out on the pathway
-# TYPE furnace_nerve_pathway_latency_seconds gauge
-furnace_nerve_pathway_latency_seconds_count{from="in",to="out"} 0
-furnace_nerve_pathway_latency_seconds_count{from="in",to="brain"} 0
-# HELP furnace_nerve_arc_latency_seconds Stimulus to effector call on each reflex arc
-# TYPE furnace_nerve_arc_latency_seconds gauge
+LATENCIES
 # HELP furnace_nerve_effector_acted_total Commands the effector carried out
 # TYPE furnace_nerve_effector_acted_total counter
 # HELP furnace_nerve_effector_failed_total Commands that failed after their retries

@@ -53,8 +53,46 @@ aliases before 1.0. Renames are listed as old name -> new name.
 - TLS (feature `tls`): `TlsConfigs::load` and `reload_if_changed` return `tls::Error` (was
   `String`), an enum that says which file is wrong and how (`Certificate`, `NoCertificate`,
   `PrivateKey`, `ClientCa`, `CertificateAndKey`, `Setup`); its message is the one 0.10 gave.
+- Nervous system (`furnace::nerve`):
+  - `FabricBuilder::build()` returns `Result<Fabric, BuildError>`: two neurons of one name, a
+    pathway to a neuron of another builder, or a runtime that cannot start is an error (0.10
+    panicked; `add` and `neuron` no longer check names themselves). Add `?` or `.expect(..)`.
+  - `effector::Webhook::new` and `with_timeout` return `Result<Webhook, BuildError>`
+    (`BuildError::Url` for an `https://` or malformed URL; 0.10 panicked):
+    `Effector::new(Webhook::new("alarm", url)?)`.
+  - `furnace::nerve::wire` is no longer public; it was the outbound client's internals.
+  - `effector::ActError` is an enum: `Status(u16)`, `Timeout(String)`, `Unreachable(String)`,
+    `Transient(String)`, `Fatal(String)`. `ActError::retry(msg)` and `ActError::fatal(msg)`
+    still build the last two; read `error.retryable()` for `error.retry` and `error.to_string()`
+    for `error.message`. `Webhook` reports the status, a timeout or an unreachable target, so
+    a 429 and a refused connection can be told apart.
+  - `Receptor::start` gets a stop signal: the `Afferent` it receives has `is_stopped()`,
+    `sleep(duration) -> bool` and `stopped().await`, raised when the fabric is dropped. A
+    receptor of your own should sleep with `afferent.sleep(..)` (it returns `false` once
+    stopped) or select on `afferent.stopped()`. The built-in `Timer`, `ChannelIn`, `SseIn` and
+    `Lines` (its listener closes its port, reconnecting stops) end with the fabric.
+  - Renames, old -> new: `receptor::Channel` -> `receptor::ChannelIn`,
+    `effector::Channel` -> `effector::ChannelOut`, `receptor::Sse` -> `receptor::SseIn`,
+    `effector::Sse` -> `effector::SseOut`, `nerve::Reply` -> `nerve::ReplyHandle`,
+    `effector::RateLimit` -> `effector::ActRateLimit`.
+  - Metrics JSON (`/metrics` `nerve`, `GET /nerve`): a neuron's `quiet` -> `quiet_not_interested`
+    (the not-interested reason, next to `quiet_by_threshold` and the others, not a total);
+    pathways', arcs' and effectors' `latency` -> `latency_ms`, an LLM brain's `generation` ->
+    `generation_latency_ms`, a model neuron's `forward` -> `forward_latency_ms`. A latency is
+    `{"count", "p50", "p95", "p99", "mean", "max"}` in milliseconds (was `p50_us`, `p99_us`,
+    `mean_us`, `max_us` in microseconds), the percentiles estimated from a histogram of every
+    measurement (`telemetry::Histogram` with the new `FINE_LATENCY_BUCKETS`, 1 µs to 10 s)
+    instead of the last 128. `LatencySnapshot` has `count`, `percentiles`, `mean`, `max`.
+  - Prometheus: `furnace_nerve_pathway_latency_seconds` and `furnace_nerve_arc_latency_seconds`
+    are histograms (`_bucket`, `_sum`, `_count`) instead of `quantile` gauges; query
+    `histogram_quantile(0.99, rate(furnace_nerve_pathway_latency_seconds_bucket[5m]))`.
+  - `NeuronMetrics::computed` counts a brain's firings too (`brain::Llm`,
+    `brain::ModelNeuron`): they fire through `Firing::Compute`. It stayed at 0 for them.
 
 ### Added
+- `FabricBuilder::efferent(Handle)`: run the motor side on a Tokio runtime of your own
+  instead of one the fabric starts.
+- `telemetry::Histogram::with_buckets`, `Histogram::count` and `FINE_LATENCY_BUCKETS`.
 - `tls::MAX_HANDSHAKES` (1024): TLS handshakes in flight per listener. Past it the listener
   stops accepting until one ends, so clients that connect and never send a ClientHello cannot
   hold an unbounded number of tasks and sockets.

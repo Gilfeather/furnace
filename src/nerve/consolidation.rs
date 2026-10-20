@@ -54,7 +54,7 @@
 //!         .forget_after(Duration::from_secs(3600)),
 //! );
 //! let mut b = Fabric::builder();
-//! let (ticket, _deliveries) = effector::Channel::new("ticket", 64);
+//! let (ticket, _deliveries) = effector::ChannelOut::new("ticket", 64);
 //! // Watched: the effector's failures reach the engrams it acts for
 //! b.neuron(effector::Effector::new(engrams.watch(ticket)), Mechanisms::NONE);
 //! let brain = FnNeuron::reflex("brain", |s, _| Firing::one(s.command("ticket", serde_json::json!({}))))
@@ -1671,7 +1671,7 @@ mod tests {
             Effector::new(engrams.watch(flaky)).no_retry(),
             Mechanisms::NONE,
         );
-        let (page_act, page) = effector::Channel::new("page", 64);
+        let (page_act, page) = effector::ChannelOut::new("page", 64);
         b.neuron(Effector::new(engrams.watch(page_act)), Mechanisms::NONE);
         let calls = Arc::new(AtomicUsize::new(0));
         let answer = Arc::new(Mutex::new("ticket"));
@@ -1688,7 +1688,7 @@ mod tests {
         b.reflex(input, recall, 1.0);
         let changes = b.neuron(Inhibit::new("changes", &engrams), Mechanisms::NONE);
         Rig {
-            fabric: b.build(),
+            fabric: b.build().unwrap(),
             input,
             changes,
             engrams,
