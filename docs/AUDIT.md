@@ -7,9 +7,35 @@ checked against the tree with `grep -n` or `sed -n`. Nothing was built or run, s
 runtime behaviour come from reading the code, not from observing it; the few places where a run
 would settle a question say so.
 
-The second half of this document is a plan: ten pull-request-sized waves, in order, that do not
+The second half of this document is a plan: pull-request-sized waves, in order, that do not
 touch each other's files and stay out of the batching unification that is in progress in
 `src/batching.rs` and the summation worker of `src/nerve/fabric.rs`.
+
+## Scope: what survives and what is replaced
+
+The hand-written serving routes are technical debt and will be rebuilt on the nerve fabric as
+receptor → pathway → neuron → effector, after which the handlers are retired. That work runs on
+its own branch. The plan in section 12 therefore has **no wave that splits, renames or polishes
+these handlers**:
+
+- `src/api.rs`: `/predict` and its decoders, the middleware, admin reload, the metrics routes;
+- `src/api/v2.rs` and `src/api/grpc.rs`: the Open Inference Protocol over HTTP and gRPC;
+- `src/llm/http.rs` and the HTTP-side tracking in `src/llm/metrics.rs`: the OpenAI routes;
+- the glue that serves them: `src/main.rs`'s config plumbing, `src/config.rs`, `docs/API.md`,
+  `docs/openapi.json`.
+
+Findings in that code stay in the document, marked **(replaced by the fabric)**: the structural
+ones describe what the rebuild should not reproduce, and the correctness ones (wrong status
+codes, missing timeouts, the rate limit that needs `ConnectInfo`, untested paths) are
+requirements for the receptors and effectors that take over. Section 12.1 collects them as a
+checklist for the rebuild.
+
+What survives, and what the waves cover: `src/nerve/*`, `src/batching/*` (after the
+unification), `src/model.rs`, `src/tensor.rs`, `src/weights.rs`, `src/allocator.rs`,
+`src/error.rs`, the LLM engine side (`src/llm/{mod,scheduler,pipeline,sampling,stop,mock}.rs`,
+which the brain neuron keeps using), `src/access.rs`, `src/telemetry.rs`, `src/tls`, `build.rs`
+and `build/`, `furnace-candle`, the tests of all of these, CI, the bench harnesses and the docs
+that describe surviving code.
 
 Severity: **high** can bite a user or blocks maintenance; **medium** costs time or hides bugs;
 **low** is cosmetic. Effort: **S** under an hour, **M** a few hours, **L** a day or more.
@@ -20,7 +46,7 @@ a pure refactor.
 
 | Area | Lines | Main debt |
 |---|---|---|
-| Server (`src/api.rs`, `api/v2.rs`, `api/grpc.rs`, `access`, `telemetry`, `config`, `main`) | 7,000 | one 3,609-line file; the error-to-status mapping written four times; permit, timing and stats repeated per transport |
+| Server (`src/api.rs`, `api/v2.rs`, `api/grpc.rs`, `access`, `telemetry`, `config`, `main`), the handlers to be replaced by the fabric | 7,000 | one 3,609-line file; the error-to-status mapping written four times; permit, timing and stats repeated per transport; a rate limit that silently degrades without `ConnectInfo`; no timeout on the OpenAI routes |
 | Model core (`model.rs`, `tensor.rs`, `burn_model.rs`, `models/`, `build/`) | 3,500 | two parallel request pipelines inside `Model`; nine `#[allow]`s; five never-constructed error variants; a `/predict` validation error that comes back as a 500 |
 | LLM (`src/llm`, `furnace-candle`) | 3,800 | sound layering; template rendering and tokenization on the Tokio runtime; `catch_unwind` that cannot run under `panic = "abort"`; four real-model tests that never run |
 | Nerve (`src/nerve`) | 6,800 | two 1,200-line files bundling five or six independent kinds; the hand-written HTTP client is public API; a `Respond` failure mode that opens the breaker for live requests; body reads without a timeout |
@@ -41,7 +67,7 @@ configuration.
 
 ## 1. Structure
 
-### 1.1 `src/api.rs` is 3,609 lines and holds eight unrelated clusters
+### 1.1 `src/api.rs` is 3,609 lines and holds eight unrelated clusters (replaced by the fabric)
 - Where: `src/api.rs:1-3609`
 - Severity: high. Effort: L.
 - Finding: one file carries the public builder and config, the request/response DTOs, all
@@ -50,7 +76,9 @@ configuration.
   is reachable as `furnace::api::*` through `pub mod api` (`src/lib.rs:177`), so sub-modules can
   `pub use` their items back into `api` with no public API change; `pub use
   crate::batching::BatchConfig` at `src/api.rs:35` already does this.
-- Proposal: split into `src/api/` with these clusters (line ranges in today's file):
+- Proposal: none for this code: it is replaced by the fabric, not split. The clusters below
+  (line ranges in today's file) are kept as a map for the rebuild, which needs a home for each
+  concern (configuration, served state, routing, middleware, decode, admin, metrics, errors):
   1. `config.rs`: `ServerConfig` 276-300, `TlsSettings` 302-311, `ClientAddr` and its
      `Connected` impls 313-334, `Default for ServerConfig` 336-353, `Reloader`/`ServedModel`
      357-374, `Server` and `Contents` 376-519.
@@ -139,9 +167,9 @@ configuration.
 |---|---|---|---|
 | `src/nerve/fabric.rs:852-900` | low | S | `FnNeuron` (852-893) belongs in `neuron.rs`, `impl Payload` (895-900) in `signal.rs` next to the other `Payload` methods (281-377). **After the batching unification merges**, since it edits this file. |
 | `src/types.rs:1-10`, `src/lib.rs:197,205` | low | S | A 10-line module for one struct; move `TensorSpec` to `src/tensor.rs` and keep `pub mod types { pub use crate::tensor::TensorSpec; }` plus the root re-export. No public API change. |
-| `src/api.rs:504-507, 510-516, 669` | medium | S | `Server::serve` returns `ApiError::ServerStartup("no model to serve")` for an empty server, but `Server::router` reaches `assert!(!contents.is_empty())` in `server_state` and panics in library code. Either `router() -> Result<Router>` (public API change) or a `# Panics` section (docs only). |
-| `src/api.rs:657-665, 906-925`, `src/lib.rs:200` | low | S | `router`, `router_with_models`, `start_server`, `start_server_with_config` are one-line wrappers over the builder; only `start_server_with_models` has a caller (`src/main.rs:713`). Implement them through `Server::with_config(..).model(..)` so there is one construction path. |
-| `src/main.rs:18-41, 682-698` | low | S | `CliArgs` mirrors `ServerConfig` field by field. Let `parse_args` return a `ServerConfig` directly. |
+| `src/api.rs:504-507, 510-516, 669` | medium | S | **(Replaced by the fabric.)** `Server::serve` returns `ApiError::ServerStartup("no model to serve")` for an empty server, but `Server::router` reaches `assert!(!contents.is_empty())` in `server_state` and panics in library code. Either `router() -> Result<Router>` (public API change) or a `# Panics` section (docs only). |
+| `src/api.rs:657-665, 906-925`, `src/lib.rs:200` | low | S | **(Replaced by the fabric.)** `router`, `router_with_models`, `start_server`, `start_server_with_config` are one-line wrappers over the builder; only `start_server_with_models` has a caller (`src/main.rs:713`). Implement them through `Server::with_config(..).model(..)` so there is one construction path. |
+| `src/main.rs:18-41, 682-698` | low | S | **(Replaced by the fabric.)** `CliArgs` mirrors `ServerConfig` field by field. Let `parse_args` return a `ServerConfig` directly. |
 | `src/llm/scheduler.rs:149-150, 170-171, 222-228` | low | S | `Scheduled` copies `name` and `max_context` from the model although `self.shared.model` is at hand. Delegate. |
 | `src/llm/scheduler.rs:383-391, 408-416` | low | S | `Slot { running: Arc<dyn Fn()> }` wraps a `Weak<Shared<M>>` only because `Running<S>` is generic over the sequence; make `Running` generic over `M` and hold the `Weak` directly. Private types. |
 | `src/nerve/http.rs:35-36`, `src/api.rs:752-756` | low | S | `routes(fabric)` calls `fabric.start()` as a side effect of building a `Router`. Document on `Server::nerve`, or move `start()` to `serve()` (behaviour change for `router()` callers). |
@@ -152,7 +180,7 @@ configuration.
 
 ## 2. Duplicated or near-duplicated code
 
-### 2.1 The `FurnaceError` to status/code mapping is written four times, plus a dead fifth
+### 2.1 The `FurnaceError` to status/code mapping is written four times, plus a dead fifth (replaced by the fabric)
 - Where: `src/api.rs:1308-1319`, `src/api/v2.rs:579-587`, `src/api/v2.rs:746-754`,
   `src/api/grpc.rs:312-321`; `src/error.rs:125-247` (unused `impl IntoResponse for FurnaceError`).
 - Severity: medium. Effort: S.
@@ -168,7 +196,7 @@ configuration.
   user) and the `axum` import in `src/error.rs:1-5`. Keeping the api.rs mapping means no wire
   change.
 
-### 2.2 Semaphore acquisition, timing and `observe_inference` repeated in every transport
+### 2.2 Semaphore acquisition, timing and `observe_inference` repeated in every transport (replaced by the fabric)
 - Where: `src/api.rs:1248-1257`, `src/api/v2.rs:568-575`, `src/api/v2.rs:735-742`,
   `src/api/grpc.rs:275-280`, `src/api/grpc.rs:412-417`; the matching `observe_inference` at
   `api.rs:1266-1267`, `v2.rs:591`, `v2.rs:758`, `grpc.rs:285`, `grpc.rs:422`.
@@ -181,7 +209,7 @@ configuration.
   Done(Result<..>)` that each transport maps to its wire format. Only the `Arrival` plumbing
   touches the batcher's API; the batcher itself is not changed.
 
-### 2.3 Named-tensor request decoding is implemented twice
+### 2.3 Named-tensor request decoding is implemented twice (replaced by the fabric)
 - Where: `src/api/v2.rs:473-541` (`decode_named_inputs`), `src/api/grpc.rs:342-404`.
 - Severity: medium. Effort: M.
 - Finding: same algorithm (`vec![None; inputs.len()]`, `match_input`, "given twice",
@@ -230,13 +258,13 @@ configuration.
 
 | Where | Sev | Eff | Finding and proposal |
 |---|---|---|---|
-| `src/api.rs:268-274, 2292-2306` and `src/error.rs:104-122` | medium | S | `ErrorResponse` and its constructor exist twice, identically. Keep `error::ErrorResponse`, `pub use` it from `api`. The two paths keep resolving. |
-| `src/api/v2.rs:138-157`, `src/api/grpc.rs:172-191` | low | S | Model metadata assembled twice; `From<&ModelInfo> for v2::ModelMetadata`, build the protobuf from it. |
-| `src/api.rs:1607-1608, 1693-1696`, `src/api/v2.rs:344-379, 856-861`, `src/api/grpc.rs:252-256, 291-294` | low | S | Raw f32 codec written five ways; `decode_raw`/`encode_raw` exist, use them. |
-| `src/api.rs:1161-1171`, `src/api/v2.rs:119-124` | low | S | "Unknown model" message built twice. |
-| `src/api/v2.rs:825-826` | low | S | `check_batch_len` returns `Result<(), Box<Response>>`; v2 builds a JSON body plus `Utc::now()` only to drop it. Return a reason, build the response in `/predict`. |
-| `src/api.rs:1998-2021` | low | S | `json_metrics` locks each slot's stats twice; compute totals from the first loop. |
-| `src/config.rs:64` and `src/llm/http.rs:144` | low | S | Two `OneOrMany` enums (generic and `String`-only). Reuse the generic one. |
+| `src/api.rs:268-274, 2292-2306` and `src/error.rs:104-122` | medium | S | **(Replaced by the fabric.)** `ErrorResponse` and its constructor exist twice, identically. Keep `error::ErrorResponse`, `pub use` it from `api`. The two paths keep resolving. |
+| `src/api/v2.rs:138-157`, `src/api/grpc.rs:172-191` | low | S | **(Replaced by the fabric.)** Model metadata assembled twice; `From<&ModelInfo> for v2::ModelMetadata`, build the protobuf from it. |
+| `src/api.rs:1607-1608, 1693-1696`, `src/api/v2.rs:344-379, 856-861`, `src/api/grpc.rs:252-256, 291-294` | low | S | **(Replaced by the fabric.)** Raw f32 codec written five ways; `decode_raw`/`encode_raw` exist, use them. |
+| `src/api.rs:1161-1171`, `src/api/v2.rs:119-124` | low | S | **(Replaced by the fabric.)** "Unknown model" message built twice. |
+| `src/api/v2.rs:825-826` | low | S | **(Replaced by the fabric.)** `check_batch_len` returns `Result<(), Box<Response>>`; v2 builds a JSON body plus `Utc::now()` only to drop it. Return a reason, build the response in `/predict`. |
+| `src/api.rs:1998-2021` | low | S | **(Replaced by the fabric.)** `json_metrics` locks each slot's stats twice; compute totals from the first loop. |
+| `src/config.rs:64` and `src/llm/http.rs:144` | low | S | **(Replaced by the fabric.)** Two `OneOrMany` enums (generic and `String`-only). Reuse the generic one. |
 | `src/models/mod.rs:302-307`, `build/registry.rs:84-89` | low | S | `normalize_name` exists in the crate and the build script, kept in sync by a test (`models/mod.rs:509-514`). Move to `src/models/name.rs`, `#[path]`-include from the build script, delete the drift test. |
 | `src/model.rs:689-697`, `src/tensor.rs:207-215, 256-268` | low | S | Integer range scanned twice per request (`check_inputs`, then `into_int`); `int_range` builds a probe tensor on every call. Check once; cache per device in a `OnceLock`. |
 | `src/nerve/fabric.rs:512-514`, `effector.rs:322-324`, `receptor.rs:188-190` | low | S | "nanos since epoch" written three times with three epochs; one `pub(crate) fn nanos_since`. |
@@ -284,13 +312,13 @@ renames would be public API changes; the ones worth doing now are marked.
 | `src/llm/pipeline.rs:18` | low | S | `templates: Option<Environment>` holds exactly one template. Rename `chat_template`; private. |
 | `src/tensor.rs:15-19, 116-119` | low | S | `DataType::Int32` inputs travel as `Values::I64`; document that INT32 is a wire label stored widened. `build/registry.rs:11` has `Elem { F32, I64, I32 }` for the same idea; rename to match. |
 | `src/nerve/receptor.rs:269` vs `nerve/http.rs:24-26` | low | S | `DEADLINE_HEADER: &str` next to two `HeaderName` consts, and only the latter re-exported. Public API change (type of a const). |
-| `src/api.rs:1452-1456, 1204` | low | S | `SUPPORTED_REQUEST_TYPES` is a fragment that only reads right inside one `format!`. |
+| `src/api.rs:1452-1456, 1204` | low | S | **(Replaced by the fabric.)** `SUPPORTED_REQUEST_TYPES` is a fragment that only reads right inside one `format!`. |
 
 ---
 
 ## 4. Public API surface
 
-### 4.1 Rate limiting without `ConnectInfo<ClientAddr>` puts every client in one bucket
+### 4.1 Rate limiting without `ConnectInfo<ClientAddr>` puts every client in one bucket (replaced by the fabric)
 - Where: `src/api.rs:787-791`, `src/access.rs:70-74`, `src/api.rs:1041`, `src/lib.rs:51-92`.
 - Severity: high. Effort: S.
 - Finding: `guard` reads the peer address from the `ConnectInfo<ClientAddr>` extension, which
@@ -343,7 +371,7 @@ renames would be public API changes; the ones worth doing now are marked.
 
 | Where | Sev | Eff | Finding and proposal |
 |---|---|---|---|
-| `src/api.rs:32`, `src/api/v2.rs:26-33, 60, 67, 75, 274, 283, 297` | low | S | Ten `pub` items in the private `mod v2` are unreachable; `pub(super)` (honest) or `pub mod v2` (API addition useful to Rust v2 clients). |
+| `src/api.rs:32`, `src/api/v2.rs:26-33, 60, 67, 75, 274, 283, 297` | low | S | **(Replaced by the fabric.)** Ten `pub` items in the private `mod v2` are unreachable; `pub(super)` (honest) or `pub mod v2` (API addition useful to Rust v2 clients). |
 | `src/model.rs:512, 1069-1071` | low | S | `Model::new(Box<dyn BurnModel>, &'static str, u64)` is a third public constructor; `model_type()` has no caller. `pub(crate)` and removal are public API changes. |
 | `src/model.rs:278-425, 1102-1112` | medium | M | `DummyModel`, `DummyTensorsModel` (with a test-only run counter) and the `"sample"` fallback ship in the release library; used by tests in seven files and `benches/inference_benchmark.rs`. A `test-models` feature or `pub mod testing` is a public API change. |
 | `src/model.rs:1102-1112` | medium | S | `load_model` serves a freshly initialised random MLP for any path whose stem *contains* `"sample"` with an `info!` line, contradicting `DummyModel`'s "never a silent fallback" (280). Match the exact stem and `warn!`. Behaviour change (narrows what is accepted). |
@@ -413,22 +441,22 @@ renames would be public API changes; the ones worth doing now are marked.
 
 | Where | Sev | Eff | Finding and proposal |
 |---|---|---|---|
-| `src/api.rs:1503, 1531, 1559-1563, 1618, 1637-1642, 1715-1762, 1336, 1371` | low | M | Decoders use `Box<Response>` as the error type, so `run_inference` returns `Result<Result<Vec<f32>>, Box<Response>>` and grpc.rs:323-330 reverse-engineers a status from a `Response`. A small `enum PredictError` with `IntoResponse` and `From<&PredictError> for tonic::Status`. No wire change. |
-| `src/api/grpc.rs:57`, `src/api.rs:1012-1017, 1067`, `src/config.rs:87-95`, `src/api/v2.rs:114-131, 391-470, 473-541, 792-878` | low | M | Stringly errors at the server boundary; the gRPC task's failure is `ApiError::ServerStartup(e)` where `e` is already formatted. Keep v2's `String` messages (they are the wire `error` field) behind a `ValidationError(String)` newtype. |
+| `src/api.rs:1503, 1531, 1559-1563, 1618, 1637-1642, 1715-1762, 1336, 1371` | low | M | **(Replaced by the fabric.)** Decoders use `Box<Response>` as the error type, so `run_inference` returns `Result<Result<Vec<f32>>, Box<Response>>` and grpc.rs:323-330 reverse-engineers a status from a `Response`. A small `enum PredictError` with `IntoResponse` and `From<&PredictError> for tonic::Status`. No wire change. |
+| `src/api/grpc.rs:57`, `src/api.rs:1012-1017, 1067`, `src/config.rs:87-95`, `src/api/v2.rs:114-131, 391-470, 473-541, 792-878` | low | M | **(Replaced by the fabric.)** Stringly errors at the server boundary; the gRPC task's failure is `ApiError::ServerStartup(e)` where `e` is already formatted. Keep v2's `String` messages (they are the wire `error` field) behind a `ValidationError(String)` newtype. |
 | `src/error.rs:25-29, 32, 38, 48, 52`; `src/burn_model.rs:103-106, 110-114, 128` | low | M | Five of eight `ModelError` variants carry prose; `burn_model.rs:110/128` format a `serde_json::Error` into `InvalidFormat(String)` and `:103` uses `LoadFailed` for a *save* failure. Payload changes are public API changes. |
 | `src/model.rs:640-646, 907-913` | low | S | When a shared forward pass fails, every request in the batch gets `InferenceFailed(e.to_string())`, losing the variant. Make `FurnaceError` `Clone` (`LoadFailed.source` as `Arc<dyn Error>`) and clone the error. |
 | `src/weights.rs:22-31, 43` | low | S | A missing file takes the mmap fallback path and logs "Could not memory-map ...; reading it into memory instead" before failing with the real error. Open the file once outside `map_file`. |
 | `build.rs:154, 163` | low | S | `input.to_str().unwrap()` inside `catch_unwind` reports a non-UTF-8 model path as "unsupported operator?". Convert before `catch_unwind`, as `out` is (148-151). |
 | `build/registry.rs:93-98` | low | S | The keyword list omits the reserved keywords (`final`, `override`, ...), so `final.onnx` generates `pub mod final`, which does not compile. Complete the list or always prefix the module. |
-| `src/api.rs:1076-1098, 996-999` | low | S | `expect` on signal-handler installation panics in a spawned task; the server keeps running but cannot be stopped gracefully, and the panic is only logged by tokio. Warn and fall back to `pending()`. |
-| `src/api.rs:1774-1776, 161` | low | S | `count_requests` treats any 503 on the predict routes as `rejected_busy`; correct today, fragile. |
-| `src/llm/http.rs:379-387` | low | S | `{"type": "text"}` without `text` is reported as "Content of type 'text' is not supported". A separate arm. Message-only change. |
+| `src/api.rs:1076-1098, 996-999` | low | S | **(Replaced by the fabric.)** `expect` on signal-handler installation panics in a spawned task; the server keeps running but cannot be stopped gracefully, and the panic is only logged by tokio. Warn and fall back to `pending()`. |
+| `src/api.rs:1774-1776, 161` | low | S | **(Replaced by the fabric.)** `count_requests` treats any 503 on the predict routes as `rejected_busy`; correct today, fragile. |
+| `src/llm/http.rs:379-387` | low | S | **(Replaced by the fabric.)** `{"type": "text"}` without `text` is reported as "Content of type 'text' is not supported". A separate arm. Message-only change. |
 | `src/llm/mod.rs:279-285`, `scheduler.rs:119, 398-404`, `furnace-candle/src/lib.rs:110-145`, `src/nerve/brain.rs:270-273` | low | M | `EngineError::{Busy,Invalid,Failed}(String)`, `Step::Failed(String)`, `guarded -> Result<T, String>`; the HTTP layer maps them correctly, but a model error loses its type at the first boundary. `Failed(BoxError)` is a public API change; low priority. |
 | `src/nerve/effector.rs:36-39`, `wire.rs:30`, `brain.rs:269, 291, 296`, `effector.rs:746` | medium | M | `ActError { message: String, retry: bool }`, `Url::parse -> Result<Url, String>`, the brain's `Result<_, String>`; nothing downstream can tell a 429 from a connection refused. A `wire::Error` and an `ActError` enum with `retryable()` is a public API change. |
 | `src/nerve/effector.rs:741-746` | low | S | `Webhook` treats 3xx as final (five of them open the breaker); say "no redirects, no HTTPS" on `Webhook` and in `docs/NERVE.md`. |
 | `src/tls/provider.rs:521, 712-717, 680-684` | low | S | Any unsupported PKCS#8 curve is reported as "(RSA?)"; `signature_alg_id` has a `_ =>` arm that only agrees with `verify_signature` because the four statics are the only constructors. A two-variant hash enum makes both matches exhaustive. |
 | `src/tls/provider.rs:143, 245, 252, 278, 339-352` | low | S | The `expect`s on key length rely on a hand-written `KEY_LEN`; derive it from `KeySizeUser` in the existing const block so they are backed by compile-time checks. |
-| `src/main.rs:263` | low | S | The `--tls-cert` help string contains a run of 21 spaces that `--help` prints. |
+| `src/main.rs:263` | low | S | **(Replaced by the fabric.)** The `--tls-cert` help string contains a run of 21 spaces that `--help` prints. |
 
 ---
 
@@ -557,10 +585,10 @@ one. `build/registry.rs:97` contains `"unsafe"` only as an entry in the keyword 
 
 | Where | Sev | Eff | Finding and proposal |
 |---|---|---|---|
-| `src/api.rs:1343-1349, 1379-1388, 1654-1657`, `src/threads.rs:24` | medium | M | With batching off (default) every forward pass is a `spawn_blocking` task that then enters the rayon pool; batcher workers are dedicated threads. Two thread models for one job. Routing the unbatched case through the batcher with `max_batch_size = 1` overlaps the batching unification; excluded from the plan. |
+| `src/api.rs:1343-1349, 1379-1388, 1654-1657`, `src/threads.rs:24` | medium | M | **(Replaced by the fabric.)** With batching off (default) every forward pass is a `spawn_blocking` task that then enters the rayon pool; batcher workers are dedicated threads. Two thread models for one job. Routing the unbatched case through the batcher with `max_batch_size = 1` overlaps the batching unification; excluded from the plan. |
 | `src/model.rs:81, 612, 877` | low | S | `record_success` calls `Utc::now()` under the stats lock; for a batch of N the same `elapsed_ms` is recorded N times (documented at 842-843). Take the time before the lock; document that timing fields are per forward pass. |
 | `src/telemetry.rs:63-71` | low | S | `Histogram::snapshot` is not atomic across buckets, so `_count` may briefly exceed the bucket sum in a scrape. Note it in the doc. |
-| `src/api/grpc.rs:198-209` vs `src/api.rs:727-762` | low | S | 401/429 rejections are counted in neither transport's `total_requests`; `docs/API.md:64-65` implies otherwise. Docs fix. |
+| `src/api/grpc.rs:198-209` vs `src/api.rs:727-762` | low | S | **(Replaced by the fabric.)** 401/429 rejections are counted in neither transport's `total_requests`; `docs/API.md:64-65` implies otherwise. Docs fix. |
 | `src/nerve/neuron.rs:326, 350-378` | low | M | The habituation table is a `Mutex` on the hot path; `admit` reads `last_fired` and `fired` stores it on separate calls, so two concurrent signals can both pass the refractory check. `compare_exchange` in `admit` when a period is set. |
 | `src/nerve/effector.rs:862-865` | low | S | `Process` writes stdin before the timed section; a child that never reads leaves the task stuck. Include the write in the timeout. Also say in the doc that `args` from a brain reach the program as-is (argv, no shell, so no injection). |
 | `src/nerve/fabric.rs:347-358, 205-217` | low | M | Each `Fabric` builds two Tokio runtimes plus a thread per deliberative pathway; tests build dozens. `FabricBuilder::efferent(Handle)` to reuse the server's runtime (API addition). After the unification. |
@@ -584,7 +612,7 @@ asserts at :644-648, :674-678, :688-689); `Holds` (:378-400) shows the determini
 
 ## 8. Tests
 
-### 8.1 Paths with no test at all
+### 8.1 Paths with no test at all (replaced by the fabric)
 - Where: `src/api.rs:1401-1418, 1352-1360, 1391-1398` (504 `INFERENCE_TIMEOUT` and the panic
   500; `ServerConfig::request_timeout` is never set in a test; the gRPC `deadline_exceeded`
   mapping at `grpc.rs:323-330` likewise); `src/api/v2.rs:44-48, 160-166, 40, 95-101`
@@ -628,7 +656,7 @@ asserts at :644-648, :674-678, :688-689); `Holds` (:378-400) shows the determini
   `tests/nerve.rs` have the brain signal completion through the `Channel` effector instead of
   polling the journal file and `/metrics`.
 
-### 8.4 Timing-dependent integration tests
+### 8.4 Timing-dependent integration tests (replaced by the fabric)
 - Where: `tests/integration_tests.rs:261-292` (`test_backpressure_returns_503` needs at least one
   503 and one 200 from 6 concurrent requests on one slot), `304-456` (`(1..8).contains(&batches)`
   depends on 4 workers being saturated by 9 requests), `570-577, 625-634` (bounded 60 s polls,
@@ -643,8 +671,8 @@ asserts at :644-648, :674-678, :688-689); `Holds` (:378-400) shows the determini
 |---|---|---|---|
 | `src/json_fast.rs:166, 183-219, 258-294` | medium | S | Edge cases reviewed and right (`-0`, nesting, trailing garbage, leading `+`/`.5`/`01`), but `1e400`/`1e39` are untested: `fast_float2` returns `inf` where serde_json rejects, so the fast path may accept what serde rejects, which `agree` (243) forbids. Both end as HTTP 400 today with different messages. Add the cases; reject non-finite in `parse_list` if confirmed. |
 | `benches/inference_benchmark.rs:56-82`, `src/api.rs:1506-1508` | medium | S | `request_decode/json` benchmarks `serde_json::from_slice`, the fallback, not `json_fast::parse` the server runs first; the module is private (`lib.rs:183`). A `#[doc(hidden)] pub` re-export for the bench. |
-| `tests/integration_tests.rs:3, 22-28, 548, 674` | low | S | Needs `resnet18` and `mnist` compiled in or the whole file panics; `test_cli_lists_available_models` hard-codes the exact set. Gate with `#![cfg(all(model_resnet18, model_mnist))]` and relax to `contains`. |
-| `src/api.rs:2565-2595` | low | S | The openapi test checks a hard-coded path list, not the router; `MetricsResponse`'s `llm`/`nerve` fields are not in the spec. Derive the expected paths from one `const ROUTES`. |
+| `tests/integration_tests.rs:3, 22-28, 548, 674` | low | S | **(Replaced by the fabric.)** Needs `resnet18` and `mnist` compiled in or the whole file panics; `test_cli_lists_available_models` hard-codes the exact set. Gate with `#![cfg(all(model_resnet18, model_mnist))]` and relax to `contains`. |
+| `src/api.rs:2565-2595` | low | S | **(Replaced by the fabric.)** The openapi test checks a hard-coded path list, not the router; `MetricsResponse`'s `llm`/`nerve` fields are not in the spec. Derive the expected paths from one `const ROUTES`. |
 | `tests/graph_optimize.rs:87-185`, `build/optimize.rs:154-216` | low | M | Untested branches: a BN parameter shared by two nodes, a Conv output that is a graph output, training outputs, default epsilon, pruning, a weight whose size is not a multiple of channels. One table-driven test. |
 | `src/tls/mod.rs:423, 434-441, 528-529` | low | S | `peer_certificates().unwrap()[0]` only; `key_formats` asserts the RSA error contains "ECDSA"; no P-384 or Ed25519 client certificate for mutual TLS. Add one per key type to `generate.sh`. |
 | `src/allocator.rs:77-82` | low | S | The full-cache path is untested (6.2). |
@@ -669,9 +697,9 @@ asserts at :644-648, :674-678, :688-689); `Holds` (:378-400) shows the determini
 |---|---|---|---|
 | `README.md:47, 132` | medium | S | `furnace-server = { version = "0.9" }` resolves to `>=0.9, <0.10`, which has no `llm` or `nerve` feature although README.md:105-112 advertises them. `"0.10"`. |
 | `README.md:353-360`, `Dockerfile:3` | medium | S | The Docker quick start builds without `models/`, so `--model-name resnet18` fails at run time; the release workflow downloads the files first (`release.yml:263-267`). Add the two `curl` lines. |
-| `docs/API.md:58` vs `src/api.rs:1818-1824, 1916-1922` | medium | S | Documents `furnace_build_info{version, model, backend}`; the code emits `furnace_build_info{version}` and `furnace_model_info{model, backend}` per model. |
-| `docs/API.md:348-355, 451-467` | medium | S | Error tables miss `409 NOT_RELOADABLE`, `500 RELOAD_FAILED`, `400 NAMED_TENSORS_REQUIRED`, `500 INTERNAL_ERROR`, the panic `500 INFERENCE_FAILED`, `404 MODEL_NOT_FOUND` on `/predict` for an LLM-only server; `docs/openapi.json:1468` lists none of the auth, reload or nerve codes. |
-| `docs/openapi.json:16-1069`, `docs/API.md:16-17` | low | M | The `/v1/*` and `/nerve*` routes and `MetricsResponse`'s `llm`/`nerve` fields are absent from the spec (every documented path does exist in code). |
+| `docs/API.md:58` vs `src/api.rs:1818-1824, 1916-1922` | medium | S | **(Replaced by the fabric.)** Documents `furnace_build_info{version, model, backend}`; the code emits `furnace_build_info{version}` and `furnace_model_info{model, backend}` per model. |
+| `docs/API.md:348-355, 451-467` | medium | S | **(Replaced by the fabric.)** Error tables miss `409 NOT_RELOADABLE`, `500 RELOAD_FAILED`, `400 NAMED_TENSORS_REQUIRED`, `500 INTERNAL_ERROR`, the panic `500 INFERENCE_FAILED`, `404 MODEL_NOT_FOUND` on `/predict` for an LLM-only server; `docs/openapi.json:1468` lists none of the auth, reload or nerve codes. |
+| `docs/openapi.json:16-1069`, `docs/API.md:16-17` | low | M | **(Replaced by the fabric.)** The `/v1/*` and `/nerve*` routes and `MetricsResponse`'s `llm`/`nerve` fields are absent from the spec (every documented path does exist in code). |
 | `docs/NERVE.md:12, 15-16` | medium | S | `version = "0.9"`; "a 300-line HTTP/1.1 client" (wire.rs is 423 production lines). |
 | `docs/LLM.md:181` | low | S | "furnace 0.9.0 plus the LLM layer" at v0.10.0. Everything else in LLM.md matches the code. |
 | `src/nerve/brain.rs:511-516` | medium | S | "A brain returns Compute, so the fabric counts it" precedes `Firing::Fire(..)`; `NeuronMetrics::computed` never moves for `ModelNeuron` or `Llm`. Fix the comment or return `Compute` (behaviour change). |
@@ -682,7 +710,7 @@ asserts at :644-648, :674-678, :688-689); `Holds` (:378-400) shows the determini
 | `src/llm/scheduler.rs:8-9` | low | S | A broken line in the module doc. |
 | `src/llm/http.rs:620, 643` | low | S | `Streamed::completion_tokens` is write-only (a write counts as a use for rustc). Remove. |
 | `src/api.rs:153` | low | S | The `MetricsResponse` doc cites a pull-request number; the house rule says not to carry those. |
-| `docs/API.md:38-50` | low | S | The `/metrics` JSON example omits `rejected_unauthorized`, `rejected_rate_limited`, `models`. |
+| `docs/API.md:38-50` | low | S | **(Replaced by the fabric.)** The `/metrics` JSON example omits `rejected_unauthorized`, `rejected_rate_limited`, `models`. |
 | `README.md:276-284` | low | S | `/health`, `/models/{model}`, the `/v1/*` and `/nerve*` routes are absent from the route table. |
 | `docs/SERVERLESS.md:5` vs 14; `CHANGELOG.md:10` (`2026-10-21`, a day after the release commit); `DEVELOPMENT.md:84` (`cargo audit` vs `cargo deny`); `src/tls/provider.rs:178` ("the AEAD limits draft" for RFC 8446 §5.5's figure); `Cargo.toml:258` (`[profile.dist]` for a cargo-dist that is not configured) | low | S | Five one-line drifts. |
 | `deploy/helm/furnace/Chart.yaml:7`, `deploy/kserve/*.yaml:25,19`, `docs/SERVERLESS.md:15,31,59-62,71`, `benches/burn/src/cold_start.rs:6`, `benches/compare/src/lib.rs:21` | medium | S | `0.10.0` hand-written in eight places; `benches/compare` hard-codes `"furnace 0.10.0, Burn 0.22"` while the other harnesses read Cargo.toml. A CI grep against `Cargo.toml`'s version in the existing `kubernetes` job. |
@@ -787,174 +815,234 @@ asserts at :644-648, :674-678, :688-689); `Holds` (:378-400) shows the determini
 
 ---
 
-## 12. The plan: ten waves
+## 12. The plan
 
-Each wave is one pull request, in this order. Waves are file-disjoint from each other except
-where "after wave N" says a later wave edits a file an earlier one created or moved; those are
-sequential, not parallel. No wave touches `src/batching.rs` or `src/nerve/fabric.rs` until the
-batching unification has merged; the three items that need `fabric.rs` are listed in wave 6
-and gated on that.
+Waves are pull-request-sized and land one at a time, in order. They cover only code that
+survives the fabric rebuild (see "Scope" at the top); nothing here splits, renames or polishes
+the handlers in `src/api.rs`, `src/api/v2.rs`, `src/api/grpc.rs` or `src/llm/http.rs`. Waves are
+file-disjoint from each other except where "after wave N" says otherwise. Two gates apply:
+
+- **Batching gate.** No wave touches `src/batching*` or `src/nerve/fabric.rs` until the batching
+  unification (branch `claude/busy-murdock-c6b7da`) has merged.
+- **Fabric-rebuild gate.** Waves 6 to 8 edit `src/nerve/*`, which the rebuild of the serving
+  routes is also changing. Before each of them starts, the rebuild branch's owner decides one of:
+  the wave lands first and the rebuild rebases onto it, or the rebuild absorbs the wave's
+  findings and the wave is dropped. Waves 1 to 5 do not touch `src/nerve/` and need no such
+  decision.
 
 Every wave must pass: `cargo fmt --all -- --check`; `cargo clippy --all-targets -- -D warnings`
 for default, `--features nerve` and `--features "image grpc tls llm nerve"`; `cargo test
---features "grpc tls llm nerve"`; `cargo deny check`; and keep `benches/burn` `overhead echo`
-and `benches/nerve`'s arc numbers within noise (run only when no `furnace-*-bench` process is
-running). Waves marked "no public API change" additionally diff the public item list
-(`cargo doc` or `cargo public-api`, before and after) and show it empty. Behaviour and API
-changes are stated per wave and go in CHANGELOG under Unreleased.
+--features "grpc tls llm nerve"`; `cargo deny check`; and keep `benches/burn` `overhead echo` and
+`benches/nerve`'s arc numbers within noise (run only when no `furnace-*-bench` process is
+running). Waves marked "no public API change" also diff the public item list before and after
+(`cargo doc` or `cargo public-api`) and show it empty. Behaviour and API changes are stated per
+wave and go in CHANGELOG under Unreleased.
 
 ### Wave 1: House rules, dead code, dependency hygiene
 - Files: `src/error.rs`, `src/backend.rs`, `src/models/mod.rs`, `src/models/name.rs` (new),
   `build.rs`, `build/registry.rs` → `build/render.rs` + `build/spec.rs`, `build/optimize.rs`,
   `Cargo.toml`, `deny.toml`.
-- Does: removes all nine `#[allow]`s by fixing their causes (10.1), including the registry
-  split and `GraphIndex`; measures the lints on the generated module and narrows that one
-  attribute with an upstream reference; silences the build-time warnings for documented
-  configurations and fixes `rerun-if-changed`; shares `normalize_name` (2.6); deletes the five
-  dead error variants and the dead `IntoResponse` impl (4.2, 2.1); drops `tower` from
-  `[dependencies]`, moves `tokio-stream` to `grpc`, turns off `reqwest`'s default features in
-  dev, drops `html_reports`, fixes both `exclude` lists, adds a `skip` list for Burn's
-  duplicates (10.3).
+- Does: removes all nine `#[allow]`s by fixing their causes (10.1), including the registry split
+  and `GraphIndex`; measures the lints on the generated module and narrows that one attribute
+  with an upstream reference; silences the build-time warnings for documented configurations and
+  fixes `rerun-if-changed`; shares `normalize_name` (2.6); deletes the five dead error variants
+  and the dead `IntoResponse` impl (4.2, 2.1; nothing in the handlers uses either); drops `tower`
+  from `[dependencies]`, moves `tokio-stream` to `grpc`, turns off `reqwest`'s default features
+  in dev, drops `html_reports`, fixes both `exclude` lists, adds a `skip` list for Burn's
+  duplicates (10.3); the build-script parsing and `KNOWN_MODEL_CFGS` items (10.3) and the
+  keyword list (5.5).
 - Says: **public API change** (`ApiError`/`CliError` lose variants; `FurnaceError` no longer
-  implements `IntoResponse`); build-output change. CHANGELOG entry.
-- Accepts: zero `#[allow` in `src/`, `build/` except the one narrowed attribute with its
+  implements `IntoResponse`); build-output change.
+- Accepts: zero `#[allow` in `src/` and `build/` except the one narrowed attribute with its
   comment; `cargo build --no-default-features` prints no warning; `cargo tree -e
-  normal,build,dev -i aws-lc-sys` either finds nothing or the path is documented; the
-  `name_normalization_matches_build_script` test is gone because there is one function.
+  normal,build,dev -i aws-lc-sys` finds nothing, or the remaining path is documented; one
+  `normalize_name` and no drift test.
 
-### Wave 2: Split `src/api.rs`
-- Files: `src/api.rs` → `src/api/{mod,config,state,routes,middleware,predict,admin,metrics,
-  errors,tests}.rs`; `src/api/v2.rs` and `src/api/grpc.rs` only where they name moved items.
-- Does: the move in 1.1 with every current `pub` item re-exported from `api`; merges the two
-  `ErrorResponse`s (2.6); one `inference_error()` mapping used by predict, v2 and grpc (2.1,
-  keeping api.rs's codes); renames `Contents` to `ServerContents`; drops the pull-request
-  reference at `api.rs:153`; `#[doc(hidden)] pub` re-export of `json_fast::parse` for the bench
-  (8.5). Nothing else changes.
-- Says: no public API change; no behaviour change.
-- Accepts: the public item list is identical; every file under `src/api/` is under 800 lines;
-  `git diff --stat` shows moves, not rewrites (`git log --follow` works on the new files).
-
-### Wave 3: One request pipeline in `Model`
-- Files: `src/model.rs`, `src/tensor.rs`, `src/types.rs`, `src/lib.rs` (re-export line),
-  `src/weights.rs`, the model tests in `tests/serve_burn_model.rs`.
+### Wave 2: One request pipeline in `Model`
+- Files: `src/model.rs`, `src/tensor.rs`, `src/types.rs`, `src/lib.rs` (re-export line only),
+  `src/weights.rs`.
 - Does: 1.2 (flat methods as adapters over the named path, with the simple-aware error mapping
-  so `/predict` codes and messages stay), 1.3 (`take_inputs`, `into_float_flat`), 5.2 (delete
-  the simple warm-up branch), 5.3 (rank check), integer range checked once and `int_range`
-  cached (2.6), `TensorSpec` into `tensor.rs` with `pub mod types` kept (1.5), `Utc::now()`
-  before the stats lock (7.8), the mmap-fallback message (5.5), `//!` headers (9.2).
-- Says: **behaviour changes**, all bug fixes: a fixed-batch mismatch on `/predict` is 400 not
+  so `/predict` codes and messages stay while it exists), 1.3 (`take_inputs`,
+  `into_float_flat`), 5.2 (delete the simple warm-up branch), 5.3 (rank check), the integer
+  range checked once and `int_range` cached (2.6), `TensorSpec` into `tensor.rs` with
+  `pub mod types` kept (1.5), `Utc::now()` before the stats lock (7.8), the mmap-fallback
+  message (5.5), clone the error instead of its text for a failed shared pass (5.5), `//!`
+  headers and the missing docs on `Model`, `HostTensor`, `ModelStats` (9.2). `ModelNeuron` uses
+  the named door only, so the brain is unaffected.
+- Says: **behaviour changes**, all bug fixes: a fixed-batch mismatch on `/predict` is 400, not
   500 (5.1); warm-up honours `fixed_batch`; a rank-0 tensor is rejected instead of panicking.
-  No public API change (every method keeps its signature).
-- Accepts: a test per behaviour change; the `/predict` error-code tests in `api/tests.rs` pass
-  unchanged; `model.rs` loses at least 150 lines; `benches/burn` `overhead echo` within noise.
+  No public API change. Once `/predict` is retired, the flat `predict*` methods can be removed
+  in a later public API change.
+- Accepts: a test per behaviour change; the existing `/predict` error-code tests pass unchanged
+  (they are not edited); `model.rs` loses at least 150 lines.
 
-### Wave 4: Nerve and LLM correctness
-- Files: `src/nerve/effector.rs`, `src/nerve/wire.rs`, `src/nerve/brain.rs`, `src/nerve/http.rs`,
-  `src/nerve/neuron.rs`, `src/llm/scheduler.rs`, `src/llm/http.rs`, `src/llm/mod.rs`,
-  `src/llm/pipeline.rs`, `tests/nerve.rs`, `tests/llm.rs`.
+### Wave 3: LLM engine side, TLS, access and telemetry
+- Files: `src/llm/{mod,scheduler,pipeline,mock}.rs`, `src/tls/mod.rs`, `src/tls/provider.rs`,
+  `tests/fixtures/tls/generate.sh` and its fixtures, `src/access.rs`, `src/telemetry.rs`,
+  `furnace-candle/src/*` (docs only), `docs/LLM.md`.
+- Does: `Scheduled` delegates `name`/`max_context` and `Running` becomes generic over `M` (1.5);
+  lazy `retain` of closed jobs (7.8); documents the contracts on `guarded` (no effect under
+  `panic = "abort"`, 7.4), `Scheduled` (what drop does, slow readers, 7.7),
+  `LlmEngine::generate` (callers inside a runtime, implementations may spawn, 7.7) and
+  `scheduler_stats` (4.5); the `scheduler.rs` module-doc line and the `templates` rename (9.1,
+  3.2); the BOS explanation onto `TextPipeline::encode` and the other missing docs in `src/llm`
+  and `furnace-candle` (9.2); the `docs/LLM.md` version and the panic caveat. TLS: `pub(super)`
+  on the provider's items (1.5), `reload_if_changed` under one lock (7.8), `KEY_LEN` from
+  `KeySizeUser`, a two-variant hash enum and the PKCS#8 message (5.5), `Zeroizing` for secret
+  bytes (10.3), missing docs, client certificates per key type in the mutual-TLS test (8.5).
+  `access.rs`/`telemetry.rs`: missing docs and the `Histogram::snapshot` tolerance note (7.8).
+  Engine-level tests for the `decode_batch` length mismatch, the `max_prefill_tokens` budget and
+  `workers > 1`, written against `Scheduled` directly, not through the OpenAI routes (8.2).
+- Says: the PKCS#8 error message changes; nothing else. No public API change.
+- Accepts: the three new scheduler tests count steps rather than sleep; the mutual-TLS test runs
+  once per key type.
+
+### Wave 4: CI
+- Files: `.github/workflows/ci.yml`, `security.yml`, `release.yml`, `bench.yml`,
+  `kserve-e2e.yml`, `Dockerfile`.
+- Does: a `features` job type-checking `--no-default-features`, `tls`, `grpc`, `nerve`, `llm`,
+  `image`, `embed-weights`, and `metal` on macOS (10.2); `cargo test --doc` (8.6); fmt and clippy
+  for `benches/burn`, `benches/llm`, `benches/nerve` and `cargo check` for `benches/compare`; the
+  pure-Rust scan over `grpc,tls` and `image`; `--locked` for release builds; coverage with the
+  feature list; the push-to-main criterion job becomes `--no-run`; the toolchain action pinned;
+  a version grep against `Cargo.toml` in the `kubernetes` job; dependency caching in the
+  Dockerfile (section 11).
+- Says: no library change. If the `features` job finds a combination that does not build, the
+  fix goes in this wave and is named in the PR.
+- Accepts: every new job is green on the PR; the doc-tests compile the three `lib.rs` examples.
+
+### Wave 5: Surviving docs and `benches/common`
+- Files: `README.md` (version, Docker quick start), `CHANGELOG.md` (the 0.10.0 date),
+  `DEVELOPMENT.md`, `docs/SERVERLESS.md`, `docs/MODELS.md`, `docs/PERFORMANCE.md`,
+  `deploy/README.md`, `benches/common/` (new) and the four harnesses' `Cargo.toml` and
+  `src/main.rs` (and `benches/compare/src/lib.rs`), `examples/serve_burn_model/models.rs`
+  (comment only).
+- Does: the surviving rows of 9.1; `benches/common` with the memory probe, one documented
+  percentile, `median`, `wait_until_healthy`, `free_port`, `load`, `stop` (with `TERM` first
+  everywhere), `fail` and JSON writing (2.5); the version read from Cargo.toml in
+  `benches/compare`; the duplicated `DigitNet`/`TextModel` pointed at each other (2.6). Leaves
+  `docs/API.md`, `docs/openapi.json` and the README route table to the rebuild, and
+  `docs/NERVE.md` to wave 8.
+- Says: **behaviour change** in the harnesses only where a percentile definition changes,
+  documented in `docs/PERFORMANCE.md`. No library change.
+- Accepts: `cargo publish --dry-run --locked` lists no `benches/*/` file but
+  `inference_benchmark.rs`; the four harnesses produce the same numbers within noise before and
+  after; one `unsafe` block for the memory probe instead of four.
+
+### Wave 6: Nerve correctness (fabric-rebuild gate)
+- Files: `src/nerve/effector.rs`, `src/nerve/wire.rs`, `src/nerve/brain.rs`,
+  `src/nerve/http.rs`, `src/nerve/neuron.rs`, `tests/nerve.rs`.
 - Does: 5.4 (`Respond` with nobody waiting is not a failure), 7.1 (whole-request timeout in
-  `wire`), 7.8 (`Process` stdin write inside the timeout; refractory `compare_exchange`), 5.5
-  (`Webhook` doc: no HTTPS, no redirects; the `text` part message), 7.4 and 7.7 (doc fixes on
-  `guarded`, `Scheduled`, `LlmEngine::generate`), 1.5 (`Scheduled` delegates `name`/
-  `max_context`; `Running` generic over `M`), 9.1 (`brain.rs` comment, unreachable
-  `quiet:not_interested` arm, `completion_tokens`, scheduler doc line, `templates` rename,
-  `Process` args doc), 7.8 lazy `retain`. Tests for 5.4, 7.1 and the two untested LLM branches
-  (8.2).
-- Says: **behaviour changes**: late `Respond` no longer counts as `failed`; a stalled webhook
-  body now times out and retries; the `text`-part error message. No public API change.
-- Accepts: a deliberative pathway ending in `Respond` with `respond_within(ZERO)` keeps
-  answering after six queued requests; a fixture server that stalls after the head makes the
-  webhook fail with `TimedOut` within the configured timeout; `benches/nerve` arc numbers within
-  noise.
+  `wire`), 7.8 (`Process` stdin write inside the timeout and its `args` doc; refractory
+  `compare_exchange`), 5.5 (`Webhook` doc: no HTTPS, no redirects), 9.1 (the `brain.rs` comment,
+  the unreachable `quiet:not_interested` arm, the `Habituation::capacity` doc), `# Panics`
+  sections on `Webhook::new`, `Effector::retry/breaker/rate_limit/refractory`, `Webhook::header`
+  and `FabricBuilder::add/build` (4.4). Tests for 5.4 and 7.1, and `wire` fixtures for
+  `Framing::Close`, the retry-once path, the size limits and a truncated head (8.3).
+- Says: **behaviour changes**: a late `Respond` no longer counts as `failed`; a stalled webhook
+  body now times out and retries. No public API change.
+- Accepts: a deliberative pathway ending in `Respond` with `respond_within(ZERO)` keeps answering
+  after six queued requests; a fixture server that stalls after the head makes the webhook fail
+  with `TimedOut` within its timeout; `benches/nerve` arc numbers within noise.
 
-### Wave 5: Split `effector.rs` and `receptor.rs`
+### Wave 7: Split `effector.rs` and `receptor.rs` (fabric-rebuild gate; after wave 6)
 - Files: `src/nerve/effector.rs` → `src/nerve/effector/{mod,respond,webhook,process,
-  file_append,channel,sse}.rs`; `src/nerve/receptor.rs` → `src/nerve/receptor/{mod,http,channel,
-  timer,lines,sse}.rs`; `src/nerve/mod.rs` (a `#[cfg(test)] mod testing`).
-- Does: 1.4; renames the private `Inner`/`Counters` of the effector (3.1); shares `wait_until`
-  and `fabric_with` (2.6); `Backoff` and `nanos_since` helpers (2.6). After wave 4.
+  file_append,channel,sse}.rs`; `src/nerve/receptor.rs` → `src/nerve/receptor/{mod,http,
+  channel,timer,lines,sse}.rs`; `src/nerve/mod.rs` (a `#[cfg(test)] mod testing`).
+- Does: 1.4; renames the effector's private `Inner`/`Counters` (3.1); one `wait_until` and
+  `fabric_with` for the unit tests (2.6); `Backoff` and `nanos_since` helpers (2.6). This is the
+  wave most likely to conflict with the rebuild, which adds receptors and effectors; if the
+  rebuild lands first, its new kinds go straight into the per-kind files.
 - Says: no public API change; no behaviour change.
-- Accepts: identical public item list; no file over 500 lines; `git log --follow` works.
+- Accepts: identical public item list; no file over 500 lines; `git log --follow` works on the
+  moved files.
 
-### Wave 6: After the batching unification merges (`fabric.rs`)
-- Files: `src/nerve/fabric.rs`, `src/nerve/neuron.rs`, `src/nerve/signal.rs`, `docs/NERVE.md`.
-- Does: 7.2 (`route` also drops at `trace.len() >= MAX_HOPS`), 1.5 (`FnNeuron` to `neuron.rs`,
-  `impl Payload` to `signal.rs`), 3.2 (`PathwayKind::as_str()`), the nerve-side doc fixes that
-  the unification's own `docs/NERVE.md` edits did not cover (9.1: version, client size, brain
-  Prometheus sentence, `Habituation::capacity`, the `mod.rs` example).
+### Wave 8: Fabric and nerve metrics (batching gate and fabric-rebuild gate)
+- Files: `src/nerve/fabric.rs`, `src/nerve/neuron.rs`, `src/nerve/signal.rs`,
+  `src/nerve/metrics.rs`, `src/nerve/effector/mod.rs`, `src/telemetry.rs`, `src/nerve/mod.rs`,
+  `docs/NERVE.md`. After waves 3 and 7.
+- Does: 7.2 (`route` also drops at `trace.len() >= MAX_HOPS`); `FnNeuron` to `neuron.rs`,
+  `impl Payload` to `signal.rs` (1.5); `PathwayKind::as_str()` (3.2); `telemetry::render_family`
+  and `render_labelled`, used by `nerve/metrics.rs` and the effector (2.4; `llm/metrics.rs` is
+  left to the rebuild, which replaces its HTTP-side half); the `mod.rs` example showing a real
+  deliberative pathway, and the `docs/NERVE.md` items the unification did not already fix
+  (version, client size, the brain Prometheus sentence) (9.1); the missing docs in `src/nerve`
+  (9.2).
 - Says: **behaviour changes**: a signal looping through a queue is dropped and counted in
   `loops`; the Prometheus `kind` label becomes lowercase. No public API change.
-- Accepts: a test with a reflex → brain → reflex cycle terminates with `loops == 1`; the
-  unification's tests still pass.
+- Accepts: a reflex → brain → reflex cycle terminates with `loops == 1`; a snapshot of the
+  `furnace_nerve_*` Prometheus text is byte-identical before and after except the `kind` label;
+  the unification's tests still pass.
 
-### Wave 7: Transport deduplication (v2, gRPC, predict)
-- Files: `src/api/predict.rs`, `src/api/v2.rs`, `src/api/grpc.rs`, `src/api/errors.rs`. After
-  wave 2.
-- Does: 2.2 (permit, timing and `observe_inference` inside `run_inference`/`run_general` with a
-  typed outcome), 2.3 (`assemble_inputs`), 2.6 (metadata `From`, raw codec reuse, unknown-model
-  message, `check_batch_len` reason, `json_metrics` single pass), 5.5 (`PredictError` replacing
-  `Box<Response>`), 3.1 (`v2::TensorMetadata` as `TensorInfo`), 4.5 (`pub(super)` on v2's
-  unreachable items), 4.1 (startup warning and `Server::router` doc), `start_server*` through
-  the builder (1.5), 3.2 `SUPPORTED_REQUEST_TYPES`.
-- Says: **behaviour change**: the two named-tensor size messages become one (say which). No
-  public API change (optionally `pub mod v2`, which is an addition; decide in review).
-- Accepts: v2 and gRPC tests pass unchanged except the harmonised message; `benches/burn`
-  `overhead echo` within noise.
+### Wave 9: Tests for surviving code
+- Files: the test modules of `src/nerve/effector/*.rs`, `src/nerve/receptor/*.rs`,
+  `src/nerve/neuron.rs`, `src/nerve/fabric.rs`, `src/nerve/latency.rs`, `src/allocator.rs`,
+  `src/batching*` (coordinated with the unification's owner), `tests/nerve.rs`,
+  `tests/graph_optimize.rs`. After waves 7 and 8.
+- Does: clock injection instead of sleeps in the nerve loop and gate tests, and the untested
+  mechanisms of 8.3 (habituation curve, breaker closing, delayed admission, `respond_within`,
+  `Timer::same_feature`, `Process::stdin_payload`, `FileAppend` reopen, `Firing::Compute`, the
+  `fits()` boundary, `LatencyEstimate` staleness); `tests/nerve.rs` waits on a `Channel` effector
+  instead of polling a file and `/metrics`; the batching tests' `settle()` replaced by holds
+  (7.9); the allocator's full-cache path (6.2); the optimizer table test (8.5).
+- Says: no library change.
+- Accepts: no `sleep` in a test that asserts a count or a state (bounded polls waiting for a
+  signal are fine); `cargo test` passes three times in a row while a bench loads the machine.
 
-### Wave 8: Metrics rendering
-- Files: `src/telemetry.rs`, `src/api/metrics.rs`, `src/llm/metrics.rs`, `src/nerve/metrics.rs`,
-  `src/nerve/effector/mod.rs`. After waves 2 and 5.
-- Does: 2.4 (`render_family`, `render_labelled`; one quantile helper); one `request_id()`
-  helper for the two seed-plus-counter idioms (3.1); the `Histogram::snapshot` note (7.8).
-- Says: no public API change; no behaviour change.
-- Accepts: a snapshot test captures `/metrics` (Prometheus text) for a server with a model, an
-  LLM mock and a fabric before the change and asserts byte equality after.
+### 12.1 Checklist for the fabric rebuild
+Findings in the replaced handlers that are requirements for the receptors and effectors that take
+over. Each points at the section with the anchors.
 
-### Wave 9: Tests
-- Files: `tests/integration_tests.rs`, `tests/llm.rs`, `tests/nerve.rs`, `src/api/tests.rs`,
-  the test modules of `src/json_fast.rs`, `src/nerve/wire.rs`, `src/nerve/effector/*.rs`,
-  `src/nerve/neuron.rs`, `src/tls/mod.rs`, `tests/fixtures/tls/generate.sh`,
-  `tests/graph_optimize.rs`, `src/allocator.rs`. After waves 5 and 7. May be split in two
-  (server+core, llm+nerve) if the diff is large.
-- Does: 8.1 (504, panic 500, v2 and gRPC readiness, 409), 8.2 and 8.3 (the listed branches;
-  clock injection instead of sleeps; wire fixtures), 8.4 (deterministic saturation), 8.5
-  (`json_fast` exponent cases, model-cfg gate, `ROUTES` const, optimizer table test, TLS
-  client-key types, allocator full-cache test).
-- Says: no behaviour change in library code except where a `json_fast` case shows the fast
-  path accepting `1e400`; then `parse_list` rejects non-finite values (message-only change).
-- Accepts: no `sleep` in a test that asserts a count or a state (bounded polls that wait for a
-  signal are fine); `cargo test` three times in a row on a loaded machine (a bench running)
-  passes.
+1. **One error mapping.** Status and `code` from a typed error in one place, keeping today's
+   codes (`INPUT_VALIDATION_FAILED`, `INVALID_INPUT_VALUE`, `INFERENCE_FAILED`,
+   `INTERNAL_ERROR`, `INFERENCE_TIMEOUT`, ...), not four copies (2.1, 5.5). v2 picks its `code`
+   from the status alone today (`src/api/v2.rs:171-175`).
+2. **Rate limits need the peer address.** The limiter must get the client IP however the router
+   is mounted, or warn when it cannot (4.1).
+3. **Timeouts everywhere.** `request_timeout` must cover the LLM routes too (today only tensor
+   inference, `src/api.rs:1352, 1391`; `src/llm/http.rs:461, 722-738` waits forever), with an
+   idle timeout between stream events, so a stalled engine cannot hold a concurrency slot.
+4. **Encode before committing to 200.** Template rendering and tokenization off the runtime, and
+   the HTTP status decided after the first engine event, so `TooLong` is a 400 and not an error
+   after a 200 (7.3).
+5. **Admission once.** Concurrency permit, timing and stats recorded by one path whatever the
+   protocol (2.2); 401/429 counted consistently with the docs (7.8).
+6. **One decoder per format.** Named tensors decoded once for v2 JSON and gRPC (2.3), one raw
+   f32 codec (2.6); `json_fast` either reused with non-finite numbers rejected, or dropped (8.5).
+7. **Per-request overhead to avoid.** In today's layer: an INFO `request` span formatting three
+   fields per request (`src/api.rs:873-879`), a full `HeaderMap` clone to read one header
+   (`src/api.rs:1216`), `Utc::now().to_rfc3339()` and `"success".to_string()` per response
+   (`src/api.rs:1298-1300, 2302`), a `Vec<Vec<f32>>` copy of every batch output
+   (`src/api.rs:1286-1292`), `inputs.concat()` after parsing (`src/api.rs:1524`),
+   `OCTET_STREAM.to_string()` per binary response (`src/api.rs:1705`). The nerve hand-over
+   attributes the 11% throughput gap at 16 clients to this layer; a profile should confirm which
+   of these dominates.
+8. **One thread model.** Unbatched inference is a `spawn_blocking` task entering the rayon pool
+   while batched inference runs on dedicated threads (7.8); the fabric's pathways decide this
+   once.
+9. **Tests the old handlers never had.** 504 on timeout, 500 on a panicking model, v2 and gRPC
+   readiness and metadata, 409 `NOT_RELOADABLE`, deterministic saturation instead of racing
+   requests (8.1, 8.4); an error event mid-stream and `[DONE]` on the OpenAI routes (8.2).
+10. **Library entry points do not panic.** An empty server is an error from `router()` as it is
+    from `serve()` (1.5); a failed signal-handler install is logged, not a panic in a task (5.5).
+11. **Docs generated from one route list.** `docs/API.md` and `docs/openapi.json` drifted
+    (`furnace_build_info` labels, missing error codes, missing `/v1` and `/nerve` routes and
+    fields, 9.1); a `ROUTES` constant shared by the router and the spec test prevents it (8.5).
+12. **Names on the wire.** One name for the concurrency limit across config, JSON and Prometheus
+    (3.1); `quiet` vs `quiet_by_*` in the nerve JSON (3.2); not three unrelated `Reply` types
+    (3.1).
+13. **TLS accept is bounded.** In-flight handshakes need a limit (7.6), whatever listener the new
+    server uses.
 
-### Wave 10: CI, docs, benches/common
-- Files: `.github/workflows/*.yml`, `README.md`, `CHANGELOG.md`, `DEVELOPMENT.md`, `Dockerfile`,
-  `docs/API.md`, `docs/openapi.json`, `docs/LLM.md`, `docs/SERVERLESS.md`, `docs/MODELS.md`,
-  `deploy/README.md`, `src/main.rs:263`, and `benches/common/` (new) with the four harness
-  `Cargo.toml`s and `src/main.rs` files, `benches/compare/src/lib.rs`.
-- Does: 10.2 (`features` job), 11 (doc-tests, bench workspaces linted, pure-Rust scan feature
-  sets, `--locked`, coverage features, drop the push-to-main bench, pin the action, version grep
-  in the `kubernetes` job), 9.1 (every row), 9.2 (`Server::router`, `Scheduled`, `Webhook`,
-  `Process` docs are in earlier waves; here the README route table, `/metrics` example,
-  error tables, openapi fields), 2.5 (`benches/common`). May be split into "CI and docs" and
-  "benches/common" if the diff is large.
-- Says: **behaviour change** in the harnesses only where a percentile definition changes;
-  documented in `docs/PERFORMANCE.md`. No library change.
-- Accepts: the `features` job is green; `cargo test --doc` compiles the three lib.rs examples;
-  `cargo publish --dry-run --locked` lists no `benches/*/` file but `inference_benchmark.rs`;
-  the four harnesses produce the same numbers within noise before and after.
-
-### Deferred: public API changes for 0.11
-Not in the waves because each changes the public surface and deserves its own decision:
-`pub(crate) mod wire` (4.3); `Webhook::new`, `FabricBuilder::build`, `Server::router` returning
-`Result` (4.4, 1.5); a stop signal on `Receptor::start` (4.4); `#[non_exhaustive]` on `Event`
-and `SchedulerConfig` (4.5); `Model::warm_up -> crate::Result` and `Model::new` as `pub(crate)`
-(4.5); `DummyModel` behind a `test-models` feature and the `"sample"` fallback narrowed (4.5);
+### 12.2 Deferred: public API changes for 0.11
+Not in the waves because each changes the public surface and deserves its own decision, and
+several will be shaped by the rebuild: `pub(crate) mod wire` (4.3); `Webhook::new` and
+`FabricBuilder::build` returning `Result`, and a stop signal on `Receptor::start` (4.4);
+`#[non_exhaustive]` on `Event` and `SchedulerConfig` (4.5); `Model::warm_up -> crate::Result`,
+`Model::new` as `pub(crate)`, and the flat `predict*` methods once `/predict` is gone (4.5,
+wave 2); `DummyModel` behind a `test-models` feature and the `"sample"` fallback narrowed (4.5);
 renaming `receptor::Channel`/`effector::Channel`, `Sse`, `nerve::Reply`, `access::RateLimit`/
-`effector::RateLimit`, `NamedInput`, `llm::Input`, `SchedulerStats`, `Live` (3.1, 3.2); typed
-`Neuron::metrics` (4.5); `ActError`, `wire::Error`, `tls::Error` enums (5.5, 4.5); `EngineError::
-Failed(BoxError)` (5.5); the request timeout on LLM routes (5.5 in the LLM note: `ServerConfig::
-request_timeout` is applied per tensor inference only, `api.rs:1352, 1391`, so `/v1/*` has no
-timeout and a stalled engine holds a concurrency slot); encoding on the scheduler worker (7.3);
-the TLS handshake semaphore (7.6); nerve latency on `telemetry::Histogram` (2.4); `Firing::Compute`
-for brains (9.1). Also the "unbatched inference through the batcher" idea (7.8), which belongs
-to the batching unification's follow-up.
+`effector::RateLimit`, `NamedInput`, `llm::Input`, `SchedulerStats`, `Live` (3.1, 3.2); a typed
+`Neuron::metrics` (4.5); `ActError`, `wire::Error`, `tls::Error` enums and
+`EngineError::Failed(BoxError)` (5.5, 4.5); nerve latency on `telemetry::Histogram` (2.4);
+`Firing::Compute` for brains (9.1); `FabricBuilder::efferent(Handle)` (7.8).
