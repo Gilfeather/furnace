@@ -34,6 +34,16 @@ pub enum PathwayKind {
     Deliberative,
 }
 
+impl PathwayKind {
+    /// The name in JSON and in the Prometheus `kind` label
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reflex => "reflex",
+            Self::Deliberative => "deliberative",
+        }
+    }
+}
+
 /// Temporal summation on a deliberative pathway
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Summation {

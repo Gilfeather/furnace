@@ -37,6 +37,7 @@ use serde::Serialize;
 use super::latency::LatencyEstimate;
 use super::neuron::{Cx, Firing, Neuron, NeuronKind};
 use super::signal::{Command, Signal};
+use crate::telemetry::{render_family, render_labelled};
 
 pub use channel::{Channel, Delivery};
 pub use file_append::FileAppend;
@@ -379,7 +380,6 @@ impl Neuron for Effector {
     }
 
     fn render_prometheus(&self, out: &mut String, labels: &str) {
-        use std::fmt::Write as _;
         let m = Effector::metrics(self);
         for (name, value) in [
             ("acted", m.acted),
@@ -389,27 +389,25 @@ impl Neuron for Effector {
             ("dropped_rate", m.dropped_rate),
             ("quiet_refractory", m.quiet_refractory),
         ] {
-            let _ = writeln!(
+            render_labelled(
                 out,
-                "furnace_nerve_effector_{name}_total{{{labels}}} {value}"
+                &format!("furnace_nerve_effector_{name}_total"),
+                labels,
+                value,
             );
         }
-        let _ = writeln!(
+        render_labelled(out, "furnace_nerve_effector_inflight", labels, m.inflight);
+        render_labelled(
             out,
-            "furnace_nerve_effector_inflight{{{labels}}} {}",
-            m.inflight
-        );
-        let _ = writeln!(
-            out,
-            "furnace_nerve_effector_circuit_open{{{labels}}} {}",
-            u8::from(m.breaker != BreakerState::Closed)
+            "furnace_nerve_effector_circuit_open",
+            labels,
+            u8::from(m.breaker != BreakerState::Closed),
         );
     }
 }
 
 /// The names of the Prometheus families effectors write, for `/metrics`' HELP lines
 pub(crate) fn render_prometheus_help(out: &mut String) {
-    use std::fmt::Write as _;
     for (name, help) in [
         ("acted_total", "Commands the effector carried out"),
         ("failed_total", "Commands that failed after their retries"),
@@ -424,14 +422,23 @@ pub(crate) fn render_prometheus_help(out: &mut String) {
             "Commands ignored in the refractory period",
         ),
     ] {
-        let _ = writeln!(
+        render_family(
             out,
-            "# HELP furnace_nerve_effector_{name} {help}\n# TYPE furnace_nerve_effector_{name} counter"
+            &format!("furnace_nerve_effector_{name}"),
+            "counter",
+            help,
         );
     }
-    let _ = writeln!(
+    render_family(
         out,
-        "# HELP furnace_nerve_effector_inflight Commands in progress\n# TYPE furnace_nerve_effector_inflight gauge\n\
-         # HELP furnace_nerve_effector_circuit_open 1 while the effector's circuit breaker is open or half open\n# TYPE furnace_nerve_effector_circuit_open gauge"
+        "furnace_nerve_effector_inflight",
+        "gauge",
+        "Commands in progress",
+    );
+    render_family(
+        out,
+        "furnace_nerve_effector_circuit_open",
+        "gauge",
+        "1 while the effector's circuit breaker is open or half open",
     );
 }

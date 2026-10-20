@@ -2,16 +2,15 @@
 //! `brain_fraction`, stimulus-to-action per reflex arc. Rendered as JSON for `/metrics` and
 //! `/nerve`, and in the Prometheus text format.
 
-use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
 
 use super::fabric::{Fabric, PathwayKind};
 use super::latency::LatencySnapshot;
-use super::neuron::NeuronKind;
+use super::neuron::{NeuronKind, Quiet};
 use super::signal::NeuronId;
-use crate::telemetry::{label, render_value};
+use crate::telemetry::{label, render_family, render_labelled, render_value};
 
 /// The fabric's metrics (the `nerve` part of `GET /metrics`)
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -251,118 +250,112 @@ fn render_fabric(m: &NerveMetrics, out: &mut String) {
         m.waiting,
     );
 
-    let _ = writeln!(
+    let neuron =
+        |n: &NeuronMetrics| format!("neuron=\"{}\",kind=\"{}\"", label(&n.name), n.kind.as_str());
+    render_family(
         out,
-        "# HELP furnace_nerve_neuron_received_total Signals that reached the neuron's gate\n\
-             # TYPE furnace_nerve_neuron_received_total counter"
+        "furnace_nerve_neuron_received_total",
+        counter,
+        "Signals that reached the neuron's gate",
     );
     for n in &m.neurons {
-        let _ = writeln!(
+        render_labelled(
             out,
-            "furnace_nerve_neuron_received_total{{neuron=\"{}\",kind=\"{}\"}} {}",
-            label(&n.name),
-            n.kind.as_str(),
-            n.received
+            "furnace_nerve_neuron_received_total",
+            &neuron(n),
+            n.received,
         );
     }
-    let _ = writeln!(
+    render_family(
         out,
-        "# HELP furnace_nerve_neuron_fired_total Times the neuron fired\n\
-             # TYPE furnace_nerve_neuron_fired_total counter"
+        "furnace_nerve_neuron_fired_total",
+        counter,
+        "Times the neuron fired",
     );
     for n in &m.neurons {
-        let _ = writeln!(
-            out,
-            "furnace_nerve_neuron_fired_total{{neuron=\"{}\",kind=\"{}\"}} {}",
-            label(&n.name),
-            n.kind.as_str(),
-            n.fired
-        );
+        render_labelled(out, "furnace_nerve_neuron_fired_total", &neuron(n), n.fired);
     }
-    let _ = writeln!(
+    render_family(
         out,
-        "# HELP furnace_nerve_neuron_quiet_total Signals that died at the neuron, by reason\n\
-             # TYPE furnace_nerve_neuron_quiet_total counter"
+        "furnace_nerve_neuron_quiet_total",
+        counter,
+        "Signals that died at the neuron, by reason",
     );
     for n in &m.neurons {
         for (reason, value) in [
-            ("threshold", n.quiet_by_threshold),
-            ("habituation", n.quiet_by_habituation),
-            ("refractory", n.quiet_by_refractory),
-            ("not_interested", n.quiet),
+            (Quiet::Threshold, n.quiet_by_threshold),
+            (Quiet::Habituation, n.quiet_by_habituation),
+            (Quiet::Refractory, n.quiet_by_refractory),
+            (Quiet::NotInterested, n.quiet),
         ] {
-            let _ = writeln!(
-                out,
-                "furnace_nerve_neuron_quiet_total{{neuron=\"{}\",reason=\"{reason}\"}} {value}",
-                label(&n.name)
+            let labels = format!(
+                "neuron=\"{}\",reason=\"{}\"",
+                label(&n.name),
+                reason.as_str()
             );
+            render_labelled(out, "furnace_nerve_neuron_quiet_total", &labels, value);
         }
     }
 
-    let _ = writeln!(
+    render_family(
         out,
-        "# HELP furnace_nerve_pathway_signals_total Signals that took the pathway\n\
-             # TYPE furnace_nerve_pathway_signals_total counter"
+        "furnace_nerve_pathway_signals_total",
+        counter,
+        "Signals that took the pathway",
     );
     for p in &m.pathways {
-        let _ = writeln!(
+        let labels = format!("{},kind=\"{}\"", between(&p.from, &p.to), p.kind.as_str());
+        render_labelled(
             out,
-            "furnace_nerve_pathway_signals_total{{from=\"{}\",to=\"{}\",kind=\"{:?}\"}} {}",
-            label(&p.from),
-            label(&p.to),
-            p.kind,
-            p.signals
+            "furnace_nerve_pathway_signals_total",
+            &labels,
+            p.signals,
         );
     }
-    let _ = writeln!(
+    render_family(
         out,
-        "# HELP furnace_nerve_pathway_latency_seconds Measured signal-in to signal-out on the pathway\n\
-             # TYPE furnace_nerve_pathway_latency_seconds gauge"
+        "furnace_nerve_pathway_latency_seconds",
+        gauge,
+        "Measured signal-in to signal-out on the pathway",
     );
     for p in &m.pathways {
         render_quantiles(
             out,
             "furnace_nerve_pathway_latency_seconds",
-            &p.from,
-            &p.to,
+            &between(&p.from, &p.to),
             &p.latency,
         );
     }
-    let _ = writeln!(
+    render_family(
         out,
-        "# HELP furnace_nerve_arc_latency_seconds Stimulus to effector call on each reflex arc\n\
-             # TYPE furnace_nerve_arc_latency_seconds gauge"
+        "furnace_nerve_arc_latency_seconds",
+        gauge,
+        "Stimulus to effector call on each reflex arc",
     );
     for a in &m.arcs {
         render_quantiles(
             out,
             "furnace_nerve_arc_latency_seconds",
-            &a.from,
-            &a.to,
+            &between(&a.from, &a.to),
             &a.latency,
         );
     }
 }
 
-fn render_quantiles(out: &mut String, name: &str, from: &str, to: &str, l: &LatencySnapshot) {
+/// The `from` and `to` labels of a pathway or an arc
+fn between(from: &str, to: &str) -> String {
+    format!("from=\"{}\",to=\"{}\"", label(from), label(to))
+}
+
+/// The median and the 99th percentile as `quantile` samples, in seconds (each only once
+/// measured), and the `_count`
+fn render_quantiles(out: &mut String, name: &str, labels: &str, l: &LatencySnapshot) {
     for (q, value) in [("0.5", l.p50_us), ("0.99", l.p99_us)] {
         if let Some(us) = value {
-            let _ = writeln!(
-                out,
-                "{name}{{from=\"{}\",to=\"{}\",quantile=\"{q}\"}} {}",
-                label(from),
-                label(to),
-                us / 1e6
-            );
+            render_labelled(out, name, &format!("{labels},quantile=\"{q}\""), us / 1e6);
         }
     }
-    let _ = writeln!(
-        out,
-        "{name}_count{{from=\"{}\",to=\"{}\"}} {}",
-        label(from),
-        label(to),
-        l.count
-    );
+    render_labelled(out, &format!("{name}_count"), labels, l.count);
 }
 
 #[cfg(test)]
@@ -523,8 +516,8 @@ furnace_nerve_neuron_quiet_total{neuron="brain",reason="refractory"} 34
 furnace_nerve_neuron_quiet_total{neuron="brain",reason="not_interested"} 35
 # HELP furnace_nerve_pathway_signals_total Signals that took the pathway
 # TYPE furnace_nerve_pathway_signals_total counter
-furnace_nerve_pathway_signals_total{from="in",to="cl\"assify\\",kind="Reflex"} 7
-furnace_nerve_pathway_signals_total{from="cl\"assify\\",to="brain",kind="Deliberative"} 2
+furnace_nerve_pathway_signals_total{from="in",to="cl\"assify\\",kind="reflex"} 7
+furnace_nerve_pathway_signals_total{from="cl\"assify\\",to="brain",kind="deliberative"} 2
 # HELP furnace_nerve_pathway_latency_seconds Measured signal-in to signal-out on the pathway
 # TYPE furnace_nerve_pathway_latency_seconds gauge
 furnace_nerve_pathway_latency_seconds{from="in",to="cl\"assify\\",quantile="0.5"} 0.0000125
@@ -581,8 +574,8 @@ furnace_nerve_neuron_quiet_total{neuron="out",reason="refractory"} 0
 furnace_nerve_neuron_quiet_total{neuron="out",reason="not_interested"} 0
 # HELP furnace_nerve_pathway_signals_total Signals that took the pathway
 # TYPE furnace_nerve_pathway_signals_total counter
-furnace_nerve_pathway_signals_total{from="in",to="out",kind="Reflex"} 0
-furnace_nerve_pathway_signals_total{from="in",to="brain",kind="Deliberative"} 0
+furnace_nerve_pathway_signals_total{from="in",to="out",kind="reflex"} 0
+furnace_nerve_pathway_signals_total{from="in",to="brain",kind="deliberative"} 0
 # HELP furnace_nerve_pathway_latency_seconds Measured signal-in to signal-out on the pathway
 # TYPE furnace_nerve_pathway_latency_seconds gauge
 furnace_nerve_pathway_latency_seconds_count{from="in",to="out"} 0
