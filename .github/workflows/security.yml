@@ -1,13 +1,25 @@
 name: Security Audit
 
+# When the dependencies change, and weekly for new advisories against unchanged ones
 on:
   schedule:
-    # Run security audit daily at 00:00 UTC
-    - cron: '0 0 * * *'
+    # Mondays, 00:00 UTC
+    - cron: '0 0 * * 1'
   push:
     branches: [ main ]
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'deny.toml'
+      - '.github/workflows/security.yml'
   pull_request:
     branches: [ main ]
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'deny.toml'
+      - '.github/workflows/security.yml'
+  workflow_dispatch:
 
 
 # A newer push to the same branch or pull request makes an older run of this workflow redundant
@@ -73,7 +85,7 @@ jobs:
       uses: actions/checkout@v5
 
     # Pull requests skip the vendored Burn backend (about 40k lines, mostly upstream code), which
-    # takes the analysis from about 16 minutes to a few. Pushes to main and the daily run still
+    # takes the analysis from about 16 minutes to a few. Pushes to main and the weekly run still
     # scan everything, vendor included.
     - name: Initialize CodeQL (pull request)
       if: github.event_name == 'pull_request'

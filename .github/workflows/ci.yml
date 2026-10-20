@@ -1,10 +1,26 @@
 name: CI
 
+# Pull requests run the few jobs that catch almost everything: tests and lints on Linux, and
+# every feature combination type-checked in one job. The rest (other platforms, toolchains,
+# the GPU and Metal backends, the vendored kernels, the bench harnesses, furnace-candle,
+# coverage) runs on main after a merge and weekly. Changes to docs alone run nothing.
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE*'
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE*'
+  schedule:
+    # Mondays, 03:17 UTC
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,17 +42,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Linux on pull requests; Windows and macOS too on main
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "windows-latest", "macos-latest"]') }}
         rust: [stable]
-        include:
-          # Beta and the MSRV only need to compile: a type check, no tests
-          - os: ubuntu-latest
-            rust: beta
-            check-only: true
-          # MSRV (keep in sync with rust-version in Cargo.toml)
-          - os: ubuntu-latest
-            rust: "1.95"
-            check-only: true
 
     steps:
     - name: Checkout code
@@ -65,52 +73,30 @@ jobs:
         [ -f models/mnist.onnx ] || curl -fsSL "$MNIST_URL" -o models/mnist.onnx
 
     - name: Check formatting
-      if: matrix.rust == 'stable'
       run: cargo fmt --all -- --check
 
     - name: Run clippy
-      if: matrix.rust == 'stable'
       run: |
         cargo clippy --all-targets -- -D warnings
         cargo clippy --all-targets --features "image grpc tls llm nerve" -- -D warnings
 
-    - name: Type check
-      if: matrix.check-only
-      run: cargo check --all-targets --features "image grpc tls llm nerve"
-
     # With the optional image input; the default build's only extra test is its 415. Examples and
     # benches are left to clippy above, which type-checks them without an optimized build.
     - name: Run tests
-      if: ${{ !matrix.check-only }}
       run: cargo test --profile ci --lib --bins --tests --features "image grpc tls llm nerve"
 
     # The examples in the API docs (the crate's front page among them) compile against the
     # current API; once, they don't depend on the platform
     - name: Run doc-tests
-      if: ${{ !matrix.check-only && matrix.os == 'ubuntu-latest' }}
+      if: matrix.os == 'ubuntu-latest'
       run: cargo test --profile ci --doc --features "image grpc tls llm nerve"
 
   # Each optional feature on its own, so a `cfg(feature)` path that only one of them reaches is
-  # compiled somewhere. Clippy without codegen: a type check that also fails on the unused-import
-  # warnings an odd combination produces.
+  # compiled somewhere, one after another in one job sharing one cache. Clippy without codegen:
+  # a type check that also fails on the unused-import warnings an odd combination produces.
   features:
-    name: Features (${{ matrix.features }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-        features:
-          - --no-default-features
-          - --no-default-features --features tls
-          - --no-default-features --features grpc
-          - --no-default-features --features nerve
-          - --no-default-features --features llm
-          - --no-default-features --features image
-          - --features embed-weights
-        include:
-          - os: macos-latest
-            features: --no-default-features --features metal
+    name: Features and pure-Rust tree
+    runs-on: ubuntu-latest
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
@@ -123,8 +109,6 @@ jobs:
 
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2
-      with:
-        key: ${{ matrix.features }}
 
     # One small built-in model, so the ONNX code generation and `embed-weights` have something
     # to compile
@@ -133,13 +117,122 @@ jobs:
         mkdir -p models
         curl -fsSL "$MNIST_URL" -o models/mnist.onnx
 
+    - name: Clippy per feature
+      shell: bash
+      run: |
+        set -euo pipefail
+        for features in "--no-default-features" \
+                        "--no-default-features --features tls" \
+                        "--no-default-features --features grpc" \
+                        "--no-default-features --features nerve" \
+                        "--no-default-features --features llm" \
+                        "--no-default-features --features image" \
+                        "--features embed-weights"; do
+          echo "::group::clippy $features"
+          cargo clippy --all-targets $features -- -D warnings
+          echo "::endgroup::"
+        done
+        echo "::group::clippy --no-default-features --features wgpu"
+        cargo clippy --no-default-features --features wgpu -- -D warnings
+        echo "::endgroup::"
+
+    # No C or C++: none of these crates may be built for furnace with `llm`, with the release
+    # features (`grpc tls`, whose crypto is RustCrypto and must not pull ring back in) or with
+    # `image`, or for furnace-candle, on any of the release targets. Dev-dependencies don't ship
+    # and are not checked.
+    - name: No C or C++ crates
+      shell: bash
+      run: |
+        set -euo pipefail
+        targets=(--target x86_64-unknown-linux-gnu --target x86_64-unknown-linux-musl
+                 --target aarch64-unknown-linux-gnu --target x86_64-apple-darwin
+                 --target aarch64-apple-darwin --target x86_64-pc-windows-msvc)
+        # cc and cmake build C/C++ (Oniguruma, esaxx's C++, ring's assembly); the others are C
+        # libraries or bindings to them, or GPU kernels compiled by nvcc
+        banned='^(cc|cmake|bindgen|pkg-config|ring|aws-lc-rs|aws-lc-sys|openssl|openssl-sys|onig|onig_sys|cudarc|intel-mkl-src|accelerate-src|candle-kernels|candle-flash-attn|candle-metal-kernels|zstd-sys|libz-sys|bzip2-sys|lzma-sys)$'
+        failed=0
+        for package in "-p furnace-server --features llm,nerve" "-p furnace-server --no-default-features --features llm,nerve" \
+                       "-p furnace-server --features grpc,tls" "-p furnace-server --features image" "-p furnace-candle"; do
+          crates=$(cargo tree $package -e normal,build "${targets[@]}" --prefix none -f '{p}' | awk '{print $1}' | sort -u)
+          found=$(grep -E "$banned" <<<"$crates" || true)
+          if [ -n "$found" ]; then
+            echo "::error::C or C++ crates in $package: $found"
+            for crate in $found; do cargo tree $package -e normal,build "${targets[@]}" -i "$crate"; done
+            failed=1
+          else
+            echo "$package: $(wc -l <<<"$crates") crates, no C or C++"
+          fi
+        done
+        # esaxx-rs is pure Rust only without its default `cpp` feature
+        if cargo tree -p furnace-candle -e features "${targets[@]}" -i esaxx-rs | grep -q 'esaxx-rs feature "cpp"'; then
+          echo "::error::esaxx-rs is built with its C++ implementation"
+          failed=1
+        fi
+        exit $failed
+
+  # Beta and the MSRV only need to compile: a type check, no tests
+  toolchains:
+    name: Type check (${{ matrix.rust }})
+    # On main and weekly only: pull requests run the checks above
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # MSRV: keep in sync with rust-version in Cargo.toml
+        rust: [beta, "1.95"]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: ${{ matrix.rust }}
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+
+    - name: Download the MNIST model
+      run: |
+        mkdir -p models
+        curl -fsSL "$MNIST_URL" -o models/mnist.onnx
+
+    - name: Type check
+      run: cargo check --all-targets --features "image grpc tls llm nerve"
+
+  metal:
+    name: Features (metal, macOS)
+    # On main and weekly only: pull requests run the checks above
+    if: github.event_name != 'pull_request'
+    runs-on: macos-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: stable
+        components: clippy
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+
+    - name: Download the MNIST model
+      run: |
+        mkdir -p models
+        curl -fsSL "$MNIST_URL" -o models/mnist.onnx
+
     - name: Clippy
-      run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
+      run: cargo clippy --all-targets --no-default-features --features metal -- -D warnings
 
   # The benchmark harnesses have their own workspaces, so `cargo fmt --all` and clippy above
   # never see them. benches/compare links ONNX Runtime and is only type-checked.
   bench-harnesses:
     name: Benchmark harnesses
+    # On main and weekly only: pull requests run the checks above
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -179,6 +272,8 @@ jobs:
 
   llm-candle:
     name: furnace-candle (GGUF LLMs through candle)
+    # On main and weekly only: pull requests run the checks above
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -200,73 +295,10 @@ jobs:
         cargo clippy -p furnace-candle --all-targets -- -D warnings
         cargo test -p furnace-candle --profile ci
 
-  # No C or C++: none of these crates may be built for furnace with `llm`, with the release
-  # features (`grpc tls`, whose crypto is RustCrypto and must not pull ring back in) or with
-  # `image`, or for furnace-candle, on any of the release targets. Dev-dependencies don't ship
-  # and are not checked.
-  pure-rust:
-    name: Pure-Rust dependency tree
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v5
-
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
-      with:
-        toolchain: stable
-
-    - name: No C or C++ crates
-      shell: bash
-      run: |
-        set -euo pipefail
-        targets=(--target x86_64-unknown-linux-gnu --target x86_64-unknown-linux-musl
-                 --target aarch64-unknown-linux-gnu --target x86_64-apple-darwin
-                 --target aarch64-apple-darwin --target x86_64-pc-windows-msvc)
-        # cc and cmake build C/C++ (Oniguruma, esaxx's C++, ring's assembly); the others are C
-        # libraries or bindings to them, or GPU kernels compiled by nvcc
-        banned='^(cc|cmake|bindgen|pkg-config|ring|aws-lc-rs|aws-lc-sys|openssl|openssl-sys|onig|onig_sys|cudarc|intel-mkl-src|accelerate-src|candle-kernels|candle-flash-attn|candle-metal-kernels|zstd-sys|libz-sys|bzip2-sys|lzma-sys)$'
-        failed=0
-        for package in "-p furnace-server --features llm,nerve" "-p furnace-server --no-default-features --features llm,nerve" \
-                       "-p furnace-server --features grpc,tls" "-p furnace-server --features image" "-p furnace-candle"; do
-          crates=$(cargo tree $package -e normal,build "${targets[@]}" --prefix none -f '{p}' | awk '{print $1}' | sort -u)
-          found=$(grep -E "$banned" <<<"$crates" || true)
-          if [ -n "$found" ]; then
-            echo "::error::C or C++ crates in $package: $found"
-            for crate in $found; do cargo tree $package -e normal,build "${targets[@]}" -i "$crate"; done
-            failed=1
-          else
-            echo "$package: $(wc -l <<<"$crates") crates, no C or C++"
-          fi
-        done
-        # esaxx-rs is pure Rust only without its default `cpp` feature
-        if cargo tree -p furnace-candle -e features "${targets[@]}" -i esaxx-rs | grep -q 'esaxx-rs feature "cpp"'; then
-          echo "::error::esaxx-rs is built with its C++ implementation"
-          failed=1
-        fi
-        exit $failed
-
-  gpu-features:
-    name: Check GPU backend features
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v5
-
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
-      with:
-        toolchain: stable
-        components: clippy
-
-    - name: Cache cargo
-      uses: Swatinem/rust-cache@v2
-
-    - name: Clippy with wgpu backend
-      run: cargo clippy --no-default-features --features wgpu -- -D warnings
-
   kubernetes:
     name: Kubernetes manifests
+    # On main and weekly only: pull requests run the checks above
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
@@ -303,6 +335,8 @@ jobs:
 
   vendored-kernels:
     name: Vendored CPU kernels (${{ matrix.os }})
+    # On main and weekly only: pull requests run the checks above
+    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -340,7 +374,7 @@ jobs:
     name: Code Coverage
     runs-on: ubuntu-latest
     # Ten minutes of instrumented build; on main only, not on every pull request
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request'
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
@@ -383,7 +417,7 @@ jobs:
   benchmarks:
     name: Benchmarks
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request'
     steps:
     - name: Checkout code
       uses: actions/checkout@v5

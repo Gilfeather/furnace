@@ -18,7 +18,7 @@ older minor versions before 1.0.
 - **Pure Rust**, including TLS: no C or C++ in the server, so no memory-safety bugs from them.
   The TLS crypto is RustCrypto behind rustls; RSA is refused because the pure-Rust RSA crate has
   an unfixed timing side channel (RUSTSEC-2023-0071).
-- **Dependencies are audited on every change and daily** with `cargo deny` against the RustSec
+- **Dependencies are audited whenever they change and weekly** with `cargo deny` against the RustSec
   advisory database; no advisory is ignored.
 - **Requests are bounded**: body size, batch size, concurrency (`503` beyond it), timeouts, and
   every input is checked against the model before it reaches it.
