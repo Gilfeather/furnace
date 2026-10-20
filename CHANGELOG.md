@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-21
+
+Furnace becomes the layer between sensors, models and actuators, not only a server that
+answers requests: a nervous system (`nerve`) built from a neuron's mechanisms, an LLM layer
+with the OpenAI API, and its own case measured as a server against a hand-written axum
+server and FastAPI, on this laptop and on GitHub's runners.
+
 ### Added
 - The nervous system (feature `nerve`): `furnace::nerve`, the layer between sensors, small
   fast models, an LLM (the brain) and actuators. One `Signal` type (a 64-bit feature, an
