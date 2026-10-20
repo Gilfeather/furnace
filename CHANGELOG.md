@@ -42,6 +42,11 @@ The server runs on the nervous system: every model is a neuron, every route a re
   absorb, at least as specific as the surprise answered, allowed effectors only, budgets of
   rules and writes, optional operator approval), counters and the rules in `GET /nerve`.
   Checked on a synthetic stream with a scripted brain ([NERVE.md](docs/NERVE.md#expectations-the-brain-programs-the-periphery)).
+- The LLM adapter for expectations (`furnace::nerve::expect::llm`, feature `llm`): `brain(name,
+  engine)` is an `Llm` brain whose system prompt teaches the expectation language and whose user
+  message renders each surprise with its context and the expectations installed for its template,
+  asking for the verdict a shadow check or a false alarm needs. `SYSTEM_PROMPT` and
+  `surprise_prompt` are public.
 
 ### Changed
 - `/predict`, v2 over HTTP and v2 over gRPC share one inference path: the concurrency slot,
