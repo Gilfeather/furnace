@@ -120,11 +120,15 @@ pub(crate) use http::{LlmState, routes};
 pub use metrics::{FinishedCounts, LlmMetrics};
 pub use pipeline::{TextPipeline, Tokenizer};
 pub use sampling::Sampler;
-pub use scheduler::{Logits, Scheduled, SchedulerConfig, SchedulerStats, StepModel};
+pub use scheduler::{Logits, Scheduled, SchedulerConfig, SchedulerCounters, StepModel};
 pub use stop::StopStrings;
 
 /// Any error a model returns; furnace reports its message
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The old name of [`SchedulerCounters`]
+#[deprecated(since = "0.11.0", note = "renamed to `SchedulerCounters`")]
+pub type SchedulerStats = SchedulerCounters;
 
 /// One message of a chat
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -147,12 +151,16 @@ impl Message {
 
 /// What to generate from
 #[derive(Debug, Clone, PartialEq)]
-pub enum Input {
+pub enum Prompt {
     /// A chat (`/v1/chat/completions`), to go through the model's chat template
     Chat(Vec<Message>),
     /// Raw text (`/v1/completions`)
     Text(String),
 }
+
+/// The old name of [`Prompt`]
+#[deprecated(since = "0.11.0", note = "renamed to `Prompt`")]
+pub type Input = Prompt;
 
 /// How to pick tokens; `None` means the engine's default
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -179,7 +187,7 @@ pub struct SamplingParams {
 #[non_exhaustive]
 pub struct GenerateRequest {
     /// The chat or the text to continue
-    pub input: Input,
+    pub input: Prompt,
     /// How to pick the tokens
     pub params: SamplingParams,
     /// Generation stops before any of these; they are not part of the output
@@ -190,7 +198,7 @@ impl GenerateRequest {
     /// A chat request with the engine's default sampling
     pub fn chat(messages: Vec<Message>) -> Self {
         Self {
-            input: Input::Chat(messages),
+            input: Prompt::Chat(messages),
             params: SamplingParams::default(),
             stop: Vec::new(),
         }
@@ -199,7 +207,7 @@ impl GenerateRequest {
     /// A completion of raw text with the engine's default sampling
     pub fn text(prompt: &str) -> Self {
         Self {
-            input: Input::Text(prompt.to_string()),
+            input: Prompt::Text(prompt.to_string()),
             params: SamplingParams::default(),
             stop: Vec::new(),
         }
@@ -255,8 +263,9 @@ impl FinishReason {
 }
 
 /// What an engine sends back, in order: `Started` once, `Text` any number of times, then
-/// `Finished` or `Error`
-#[derive(Debug, Clone, PartialEq)]
+/// `Finished` or `Error`. New kinds of event may be added, so a `match` needs a `_` arm.
+#[derive(Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Event {
     /// The request left the queue and the engine started on it
     Started {
@@ -278,8 +287,11 @@ pub enum Event {
     Error(EngineError),
 }
 
-/// Why an engine refused or failed a request
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+/// Why an engine refused or failed a request.
+///
+/// Two errors are equal when they are the same variant with the same fields; for `Failed`,
+/// when their messages are.
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EngineError {
     /// The prompt does not fit the context (400)
@@ -296,9 +308,37 @@ pub enum EngineError {
     /// The request cannot be served as asked (400)
     #[error("{0}")]
     Invalid(String),
-    /// The model failed (500)
+    /// The model failed (500). The model's own error, so a caller can downcast it; a message
+    /// becomes one with `.into()`.
     #[error("{0}")]
-    Failed(String),
+    Failed(BoxError),
+}
+
+impl EngineError {
+    /// [`Failed`](Self::Failed) with only a message
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self::Failed(message.into().into())
+    }
+}
+
+impl PartialEq for EngineError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::TooLong {
+                    prompt_tokens: a,
+                    max_context: b,
+                },
+                Self::TooLong {
+                    prompt_tokens: c,
+                    max_context: d,
+                },
+            ) => a == c && b == d,
+            (Self::Busy(a), Self::Busy(b)) | (Self::Invalid(a), Self::Invalid(b)) => a == b,
+            (Self::Failed(a), Self::Failed(b)) => a.to_string() == b.to_string(),
+            _ => false,
+        }
+    }
 }
 
 /// An LLM furnace can serve.
@@ -329,9 +369,9 @@ pub trait LlmEngine: Send + Sync + fmt::Debug + 'static {
     /// Model time per step, for engines furnace schedules ([`Scheduled`]).
     ///
     /// An extension point for the server's metrics rather than part of serving: an engine that
-    /// keeps its own [`SchedulerStats`] returns them here and they appear under `/metrics` with
+    /// keeps its own [`SchedulerCounters`] returns them here and they appear under `/metrics` with
     /// [`Scheduled`]'s; an engine with nothing to report keeps the default, `None`.
-    fn scheduler_stats(&self) -> Option<&SchedulerStats> {
+    fn scheduler_stats(&self) -> Option<&SchedulerCounters> {
         None
     }
 }

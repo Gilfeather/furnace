@@ -278,7 +278,7 @@ body in process takes 27 µs as binary and 4 ms as JSON. Sending a JPEG
 (`--features image`, 1546 × 1213) adds about 30 ms of decoding and resizing.
 
 ```bash
-cargo bench --bench inference_benchmark                              # in-process criterion benches
+cargo bench --bench inference_benchmark --features test-models       # in-process criterion benches
 cargo run --release --example http_bench -- 3000 json1 json4 bin1 bin4   # against a running server
 ```
 

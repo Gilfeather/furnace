@@ -91,7 +91,8 @@ async fn burn_models_on_wgpu_match_the_cpu() {
             device: gpu,
             seq_len: 8,
         }))
-        .router();
+        .router()
+        .unwrap();
 
     // One float tensor, through /predict and its batching
     let images: Vec<f32> = (0..3 * 784).map(|i| (i % 255) as f32 / 255.0).collect();

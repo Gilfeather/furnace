@@ -340,11 +340,7 @@ impl Serving {
     {
         tokio::task::spawn_blocking(move || self.generate(&name, request))
             .await
-            .unwrap_or_else(|_| {
-                Err(crate::llm::EngineError::Failed(
-                    "the engine panicked".to_string(),
-                ))
-            })
+            .unwrap_or_else(|_| Err(crate::llm::EngineError::failed("the engine panicked")))
     }
 
     /// Ask the LLM `name` to generate, through its pathway: the engine's stream of events, or
@@ -357,7 +353,7 @@ impl Serving {
     ) -> std::result::Result<tokio::sync::mpsc::Receiver<crate::llm::Event>, crate::llm::EngineError>
     {
         let lost = || {
-            crate::llm::EngineError::Failed(format!("the generation for '{name}' got no answer"))
+            crate::llm::EngineError::failed(format!("the generation for '{name}' got no answer"))
         };
         let Some(&entrance) = self.llms.get(name) else {
             return Err(lost());

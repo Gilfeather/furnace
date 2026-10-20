@@ -9,9 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 The server runs on the nervous system: every model is a neuron, every route a receptor.
 
+### Migrating from 0.10
+The public API changes below break code written for 0.10. Renamed types keep their old name as
+a deprecated alias for one release, so such code still builds, with a warning that names the
+new one.
+
+- `Server::router()`, `api::router()` and `api::router_with_models()` return
+  `Result<Router>`: an error for a server with nothing to serve, as `serve()` gives (0.10
+  panicked). Add `?` or `.expect(..)`:
+  `Router::new().merge(Server::new().model(model).router()?)`.
+- `Model::warm_up()` returns `furnace::Result<Option<Duration>>` (was a `String` error): the
+  model's own error, as `infer` gives.
+- `model::DummyModel` and `model::DummyTensorsModel` need the new `test-models` feature. They
+  answer constants and are for testing the server; serve a model of your own with
+  `Model::from_fn` or `Model::custom`. In tests,
+  `furnace-server = { version = "0.11", features = ["test-models"] }` under
+  `[dev-dependencies]`.
+- `load_model` replaces a missing model with a sample MLP of random weights only for a path
+  named exactly `sample_model`, with a warning (0.10: any name containing `sample`, logged at
+  `info`). Any other missing path is `ModelError::FileNotFound`; write real files with
+  `cargo run --bin create_sample_model`.
+- `GET /metrics` JSON: `max_concurrent_requests`, the name the flag, the configuration and
+  Prometheus use. `max_concurrent_inferences` carries the same value until 0.12; read the new
+  field.
+- `access::RateLimit` is `access::ClientRateLimit` (`ServerConfig::rate_limit`), so it is not
+  confused with the nervous system's `effector::RateLimit`.
+- LLM layer (feature `llm`):
+  - `llm::Input` is `llm::Prompt`: `Prompt::Chat`, `Prompt::Text`. `GenerateRequest::input`
+    keeps its name.
+  - `llm::SchedulerStats` is `llm::SchedulerCounters` (live values; `LlmEngine::scheduler_stats`
+    keeps its name).
+  - `llm::mock::Live` is `llm::mock::SharedCount`: it counts decode calls too, which are not
+    alive.
+  - `Event` is `#[non_exhaustive]`: a `match` on it needs a `_` arm. It is no longer `Clone`,
+    since an `Error` holds the model's error.
+  - `SchedulerConfig` is `#[non_exhaustive]`: build it from `SchedulerConfig::default()` with
+    the new `with_workers`, `with_max_waiting` and `with_max_prefill_tokens`, e.g.
+    `SchedulerConfig::default().with_max_waiting(64)` for
+    `SchedulerConfig { max_waiting: 64, ..Default::default() }`.
+  - `EngineError::Failed` holds a `BoxError` (was `String`): the error a `StepModel` returned
+    reaches the caller unchanged and can be downcast. Construct it with
+    `EngineError::failed("message")` or `EngineError::Failed(error.into())`; match it with
+    `EngineError::Failed(e)` and `e.to_string()` for the message. `EngineError` is no longer
+    `Clone`; it is `PartialEq` as before (`Failed` compares messages).
+- TLS (feature `tls`): `TlsConfigs::load` and `reload_if_changed` return `tls::Error` (was
+  `String`), an enum that says which file is wrong and how (`Certificate`, `NoCertificate`,
+  `PrivateKey`, `ClientCa`, `CertificateAndKey`, `Setup`); its message is the one 0.10 gave.
+
 ### Added
-- `Server::try_router()`: the router, or an error for a server with nothing to serve, as
-  `serve()` gives.
 - `tls::MAX_HANDSHAKES` (1024): TLS handshakes in flight per listener. Past it the listener
   stops accepting until one ends, so clients that connect and never send a ClientHello cannot
   hold an unbounded number of tasks and sockets.
@@ -68,9 +113,7 @@ The server runs on the nervous system: every model is a neuron, every route a re
   that refuses only once it has looked at the request (`Event::Error` in place of `Started`,
   e.g. a prompt too long for the context) gets its 400 instead of an error payload after a
   200; a stream whose first event does not come within `--request-timeout-ms` is a `504`.
-- `Server::router()` on a server with nothing to serve logs an error and serves no model
-  (`404 MODEL_NOT_FOUND`) instead of panicking; `router_with_models` with no model likewise,
-  and `start_server_with_models` with none returns an error.
+- `start_server_with_models` with no model returns an error instead of panicking.
 - The fast JSON parser of `/predict` leaves numbers past `f32`'s range to serde_json, so it
   never accepts what the fallback would answer differently; both end as a 400.
 - A Ctrl-C or SIGTERM handler that cannot be installed is logged, and the server keeps

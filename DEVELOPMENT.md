@@ -129,8 +129,8 @@ cargo test --release
 # Integration tests
 cargo test --release --test integration_tests
 
-# Benchmarks
-cargo bench
+# Benchmarks (the criterion bench uses the constant models of `test-models`)
+cargo bench --features test-models
 ```
 
 ## Release Process

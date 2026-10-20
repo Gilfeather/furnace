@@ -14,12 +14,16 @@ use std::time::{Duration, Instant};
 
 /// `--rate-limit` and `--rate-limit-burst`
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RateLimit {
+pub struct ClientRateLimit {
     /// Requests a second per client, on average
     pub per_second: f64,
     /// Requests a client may send at once
     pub burst: u32,
 }
+
+/// The old name of [`ClientRateLimit`]
+#[deprecated(since = "0.11.0", note = "renamed to `ClientRateLimit`")]
+pub type RateLimit = ClientRateLimit;
 
 /// Why a request is turned away
 #[derive(Debug, PartialEq)]
@@ -39,7 +43,7 @@ pub struct Access {
 impl Access {
     /// Admit requests presenting one of `api_keys` (any request when empty), each client
     /// within `rate_limit` if one is set
-    pub fn new(api_keys: &[String], rate_limit: Option<RateLimit>) -> Self {
+    pub fn new(api_keys: &[String], rate_limit: Option<ClientRateLimit>) -> Self {
         Self {
             api_keys: api_keys.iter().map(|k| k.as_bytes().to_vec()).collect(),
             limiter: rate_limit.map(RateLimiter::new),
@@ -127,7 +131,7 @@ struct RateLimiter {
 }
 
 impl RateLimiter {
-    fn new(limit: RateLimit) -> Self {
+    fn new(limit: ClientRateLimit) -> Self {
         let interval = (1e9 / limit.per_second).round().max(1.0) as u64;
         Self {
             interval,
@@ -197,7 +201,7 @@ mod tests {
 
     #[test]
     fn bursts_then_the_average_rate() {
-        let limiter = RateLimiter::new(RateLimit {
+        let limiter = RateLimiter::new(ClientRateLimit {
             per_second: 10.0,
             burst: 3,
         });
@@ -231,7 +235,7 @@ mod tests {
         let keys = ["key-a".to_string(), "key-b".to_string()];
         let access = Access::new(
             &keys,
-            Some(RateLimit {
+            Some(ClientRateLimit {
                 per_second: 1.0,
                 burst: 1,
             }),
@@ -243,7 +247,7 @@ mod tests {
 
         let open = Access::new(
             &[],
-            Some(RateLimit {
+            Some(ClientRateLimit {
                 per_second: 1.0,
                 burst: 1,
             }),
@@ -257,7 +261,7 @@ mod tests {
 
     #[test]
     fn many_clients_stay_bounded() {
-        let limiter = RateLimiter::new(RateLimit {
+        let limiter = RateLimiter::new(ClientRateLimit {
             per_second: 1000.0,
             burst: 1,
         });

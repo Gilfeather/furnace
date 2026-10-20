@@ -99,6 +99,9 @@ llm = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib"]
 # The nervous system (src/nerve) is always built: the server's own routes run on it. The
 # feature is kept so that existing `--features nerve` builds still work.
 nerve = []
+# `model::DummyModel` and `model::DummyTensorsModel`: constant models for testing and
+# benchmarking the server itself, not for serving
+test-models = []
 wgpu = ["burn/wgpu"]
 metal = ["burn/metal"]
 cuda = ["burn/cuda"]
@@ -203,6 +206,7 @@ required-features = ["llm"]
 [[bench]]
 name = "inference_benchmark"
 harness = false
+required-features = ["test-models"]
 
 [profile.release]
 # Maximum performance optimizations

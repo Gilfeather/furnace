@@ -423,7 +423,7 @@ pub(crate) mod tests {
     async fn api_keys_and_rate_limit() {
         let config = ServerConfig {
             api_keys: vec!["grpc-key-0123456789".to_string()],
-            rate_limit: Some(RateLimit {
+            rate_limit: Some(ClientRateLimit {
                 per_second: 0.001,
                 burst: 2,
             }),

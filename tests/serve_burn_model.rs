@@ -72,7 +72,8 @@ fn app() -> (axum::Router, DigitNet, SentimentNet) {
             device,
             seq_len: 8,
         }))
-        .router();
+        .router()
+        .unwrap();
     (router, digits, sentiment)
 }
 

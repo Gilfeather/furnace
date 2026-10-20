@@ -40,7 +40,7 @@ Server counters for monitoring, as JSON:
   "uptime_seconds": 3600,
   "total_requests": 1520, "total_errors": 12, "rejected_busy": 9,
   "rejected_unauthorized": 0, "rejected_rate_limited": 3,
-  "in_flight_inferences": 2, "max_concurrent_inferences": 100,
+  "in_flight_inferences": 2, "max_concurrent_requests": 100, "max_concurrent_inferences": 100,
   "total_inferences": 1508, "total_batches": 611, "average_batch_size": 2.6, "max_batch_size": 8,
   "average_inference_time_ms": 84.2,
   "last_inference_at": "2026-10-14T05:01:12Z",
@@ -61,8 +61,9 @@ sends, gets `furnace_requests_total`, `furnace_in_flight_requests`, `furnace_bat
 and the rest, plus the latency histograms `furnace_request_duration_seconds` and
 `furnace_inference_duration_seconds` (buckets from 0.5 ms to 10 s), `furnace_build_info{version}`
 and, per model, `furnace_model_info{model, backend}`. `--max-concurrent-requests` is
-`max_concurrent_inferences` in the JSON and `furnace_max_concurrent_requests` here. Point a scrape job at `/metrics`; no exporter is
-needed.
+`max_concurrent_requests` in the JSON and `furnace_max_concurrent_requests` here; the JSON's
+`max_concurrent_inferences` is its old name, kept with the same value until 0.12. Point a
+scrape job at `/metrics`; no exporter is needed.
 
 The percentiles in the JSON are estimated from those histograms, so they are accurate to the
 bucket they fall in.

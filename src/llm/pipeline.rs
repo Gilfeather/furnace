@@ -7,7 +7,7 @@ use std::path::Path;
 use minijinja::{Environment, ErrorKind};
 pub use tokenizers::Tokenizer;
 
-use super::{BoxError, EngineError, Input, Message};
+use super::{BoxError, EngineError, Message, Prompt};
 
 const CHAT_TEMPLATE: &str = "chat";
 
@@ -173,7 +173,7 @@ impl TextPipeline {
         };
         let template = env
             .get_template(CHAT_TEMPLATE)
-            .map_err(|e| EngineError::Failed(e.to_string()))?;
+            .map_err(|e| EngineError::Failed(e.into()))?;
         template
             .render(minijinja::context! {
                 messages => messages,
@@ -193,10 +193,10 @@ impl TextPipeline {
 
     /// The prompt tokens of a request: a chat through the chat template, raw text as it is.
     /// See [`encode`](Self::encode) for the special tokens.
-    pub fn encode_input(&self, input: &Input) -> Result<Vec<u32>, EngineError> {
+    pub fn encode_input(&self, input: &Prompt) -> Result<Vec<u32>, EngineError> {
         let (text, add_special_tokens) = match input {
-            Input::Chat(messages) => (self.apply_chat_template(messages)?, false),
-            Input::Text(text) => (text.clone(), true),
+            Prompt::Chat(messages) => (self.apply_chat_template(messages)?, false),
+            Prompt::Text(text) => (text.clone(), true),
         };
         self.encode(&text, add_special_tokens)
     }
@@ -211,7 +211,7 @@ impl TextPipeline {
         self.tokenizer
             .encode_fast(text, add_special_tokens)
             .map(|encoding| encoding.get_ids().to_vec())
-            .map_err(|e| EngineError::Failed(format!("tokenizer: {e}")))
+            .map_err(|e| EngineError::failed(format!("tokenizer: {e}")))
     }
 }
 
@@ -265,7 +265,7 @@ mod tests {
     fn a_chat_without_a_template_is_refused() {
         let pipeline = TextPipeline::new(mock::byte_tokenizer());
         assert!(matches!(
-            pipeline.encode_input(&Input::Chat(vec![Message::new("user", "Hi")])),
+            pipeline.encode_input(&Prompt::Chat(vec![Message::new("user", "Hi")])),
             Err(EngineError::Invalid(_))
         ));
     }

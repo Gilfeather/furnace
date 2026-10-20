@@ -83,7 +83,7 @@
 //!
 //!     let app = Router::new()
 //!         .route("/labels", get(labels))
-//!         .merge(Server::new().model(model).router());
+//!         .merge(Server::new().model(model).router()?);
 //!
 //!     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
 //!     axum::serve(listener, app).await?;
@@ -170,6 +170,8 @@
 //!   built, since the server's own routes run on it.
 //! - `wgpu`, `metal`, `cuda`: Burn's GPU backends, chosen with [`BackendKind`].
 //! - `embed-weights`: compile built-in models' weights into the binary.
+//! - `test-models`: `model::DummyModel` and `model::DummyTensorsModel`, constant models for
+//!   testing and benchmarking the server itself.
 
 pub mod access;
 pub mod allocator;

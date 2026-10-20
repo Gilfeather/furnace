@@ -24,7 +24,7 @@ struct CliArgs {
     weights: Option<PathBuf>,
     admin_token: Option<String>,
     api_keys: Vec<String>,
-    rate_limit: Option<furnace::access::RateLimit>,
+    rate_limit: Option<furnace::access::ClientRateLimit>,
     tls: Option<api::TlsSettings>,
     host: String,
     port: u16,
@@ -471,7 +471,7 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
     let rate_limit = match matches.get_one::<f64>("rate-limit").copied() {
         None => None,
         Some(per_second) if per_second.is_finite() && per_second > 0.0 => {
-            Some(furnace::access::RateLimit {
+            Some(furnace::access::ClientRateLimit {
                 per_second,
                 burst: matches
                     .get_one::<u32>("rate-limit-burst")
