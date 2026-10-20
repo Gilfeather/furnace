@@ -15,6 +15,33 @@ The server runs on the nervous system: every model is a neuron, every route a re
 - `tls::MAX_HANDSHAKES` (1024): TLS handshakes in flight per listener. Past it the listener
   stops accepting until one ends, so clients that connect and never send a ClientHello cannot
   hold an unbounded number of tasks and sockets.
+- Consolidation, level 1 (`furnace::nerve::consolidation`): a verified cache of a brain's
+  decisions, the foundation for later levels. `FabricBuilder::consolidate` puts a `Recall`
+  reflex in front of a brain and records its decisions (`Record`) in a `Memory`, by default an
+  `EngramStore`: bounded and set-associative, keyed by the signal's feature or a key of your
+  own. After `after` agreeing decisions (3) a key's decision is answered in microseconds without
+  the brain; a sample of those answers (5%, and always the first 3) is still sent to the brain
+  after the reflex acted and compared, never acted on. A disagreement or `failures` effector
+  failures in a row (`EngramStore::watch`) dissolve the engram. Opt-in per effector; volatile
+  argument fields are left out of the comparison. A brain declares the external state it
+  consults (`depends_on`); change notifications to an `Inhibit` neuron dissolve the engrams
+  tagged with what changed (`{"inhibit": ["customer:42"]}`) or void every engram made under a
+  dependency's old version (`{"advance": ["customers"]}`). A brain without declarations is
+  taken to decide from its input alone. Counters and the top engrams are on the recall neuron
+  in `GET /nerve` and `/metrics`. Measured on Loghub's HDFS and BGL logs in
+  [NERVE.md](docs/NERVE.md#consolidation).
+- Expectations v1 (`furnace::nerve::expect`): the brain programs the periphery. An
+  `Expectations` neuron behind a receptor matches every signal against rules the brain
+  installs through the `expect` effector (`match`, `rate`, `every`, `range`, `then`, `never`,
+  each with a selector by template and fields, `on_match` absorb or act, `on_violation`
+  escalate or act, `learn` bounds, `ttl_s`, `depends_on`, provenance). Fitting signals are
+  absorbed in process; what breaks a rule, what no rule covers and what did not come (a timer
+  raises absences) reach the brain as a JSON surprise with its context. Log lines become a
+  template and fields (numbers masked), JSON bodies their fields. Shadow checks of absorbed
+  signals, false-alarm verdicts that tune learnable parameters, scope limits (no wildcard
+  absorb, at least as specific as the surprise answered, allowed effectors only, budgets of
+  rules and writes, optional operator approval), counters and the rules in `GET /nerve`.
+  Checked on a synthetic stream with a scripted brain ([NERVE.md](docs/NERVE.md#expectations-the-brain-programs-the-periphery)).
 
 ### Changed
 - `/predict`, v2 over HTTP and v2 over gRPC share one inference path: the concurrency slot,

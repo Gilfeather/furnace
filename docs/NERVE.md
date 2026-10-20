@@ -336,6 +336,285 @@ Notes on the numbers:
   hop; the afferent/efferent split does, by design.
 - FastAPI runs one uvicorn worker; its habituation table is an `OrderedDict`.
 
+## Consolidation
+
+Consolidation level 1 is a **verified cache of the brain's decisions**, and the foundation for
+what comes later (keys by similarity, expectations the brain writes into the periphery). The
+brain's answers used to vanish: the thousandth signal of the same kind was asked of the brain
+again, at the full price. With consolidation (`furnace::nerve::consolidation`) the fabric
+watches what the brain decides for each key. Once it has decided the same thing for the same
+key a few times in a row, the decision becomes an *engram* and the next such signal is answered
+by a reflex in microseconds, without the brain. A sample of the reflex's answers keeps being
+checked against the brain; an engram the brain disagrees with is dissolved.
+
+```text
+receptor ──► Recall ──(consolidated engram)──────────────────────────► effectors
+               │
+               └──(miss, or shadow check)──► Record(brain) ──(commands)──► effectors
+                    deliberative pathway          │
+                                                  ▼
+                                        Memory (EngramStore)
+changes ──► Inhibit ──(tags, dependency versions)──┘
+```
+
+```rust
+use furnace::nerve::consolidation::{Consolidation, EngramStore, Inhibit};
+
+let engrams = EngramStore::new(
+    Consolidation::new()
+        .effectors(["page", "ticket", "ignore"]) // what may become a reflex
+        .after(3)                                 // agreeing decisions to consolidate
+        .shadow(0.05)                             // fraction of answers re-checked
+        .volatile(["reason"])                     // argument fields not compared
+        .depends_on(["customers"])                // external state the brain consults
+        .tags(|s| customer_of(s).map(|c| vec![format!("customer:{c}")]).unwrap_or_default())
+        .forget_after(Duration::from_secs(3600)),
+);
+// Effector failures reach the engrams they acted for
+b.neuron(Effector::new(engrams.watch(Webhook::new("page", url))), Mechanisms::NONE);
+let (recall, _brain) = b.consolidate(brain, Mechanisms::NONE, Summation::default(), &engrams);
+b.reflex(triage, recall, 1.0); // whatever fed the brain now feeds `recall`
+// Change notifications: {"inhibit": ["customer:42"]} or {"advance": ["customers"]}
+let changes = b.neuron(Inhibit::new("changes", &engrams), Mechanisms::NONE);
+b.reflex(db_changes, changes, 1.0);
+```
+
+- **Key.** Level 1 is exact: the signal's `Feature` by default, or `Consolidation::key`. What
+  makes it useful is the receptor or a reflex in front of `recall` putting the right thing in
+  the key: a log line with its numbers and ids masked, a quantized sensor state, a normalized
+  request. A fired decision carries its key as its feature.
+- **`Recall`** (a reflex in front of the brain, named `<brain>-recall`) looks the key up. A
+  consolidated engram fires its commands at once; anything else passes on to the brain's
+  deliberative pathway, as before.
+- **`Record`** wraps the brain: a brain's commands are routed by name straight to their
+  effectors, so a neuron on a pathway behind the brain would never see them. Wrapping it sees
+  each firing next to the signal that caused it, which is the decision for that key.
+- **`Memory`** is the trait `Recall`, `Record`, `Inhibit` and `Watched` talk to: what a key is,
+  what is stored and how it is looked up. `EngramStore`, the one built in, is a bounded
+  set-associative table like the habituation table, holding commands; another memory (other
+  keys, other contents) can take its place without touching the neurons.
+- **Consolidated** after `after` agreeing brain decisions in a row (3); a different decision
+  starts the count over. After an engram has been dissolved by the brain or by failures, the
+  same key needs `after` more agreeing decisions for each dissolution.
+- **Shadow checks.** A fraction of the reflex's answers (5%, and always the first 3 of every
+  engram, chosen deterministically from the signal's id) also go to the brain, after the reflex
+  acted and without the request's reply. The brain's answer is compared and dropped. A
+  disagreement dissolves the engram.
+- **Policy.** Opt-in per effector: a decision with a command for an effector not listed is never
+  answered from an engram (`delete`, `pay`). Two decisions agree when their commands are equal
+  with the `volatile` argument fields left out; the engram fires the latest brain decision as
+  it was made.
+- **Effector failures.** `engrams.watch(act)` wraps an effector's act; `failures` failures in a
+  row (3, every attempt counts) for a key dissolve its engram.
+
+### What a decision may depend on
+
+A brain declared with no `depends_on` is taken to **decide from its input alone**: the same key
+always gets the same answer. That holds for a log triage on the line's text; it does not hold
+for a brain that looks up a customer's plan before deciding. Such a brain declares what it
+consults, and every change of that state has to reach the store:
+
+- **Tags (inhibition).** `Consolidation::tags` labels each decision with what it is about
+  (`customer:42`). A change notification with `{"inhibit": ["customer:42"]}` reaching an
+  `Inhibit` neuron (from a receptor fed by the database's change stream, a webhook, a queue)
+  dissolves every engram carrying the tag at once, and the next such signal goes to the brain.
+  A brain decision for a stimulus seen before the change, still on its way back, is not
+  recorded. No penalty: the engram may consolidate again as soon as the brain agrees with
+  itself under the new state.
+- **Versions.** Every declared dependency has a version. `{"advance": ["customers"]}` (or
+  `Memory::advance`) raises it, and every engram made under the old version is void, as are
+  decisions made under it that come back later. This is the sure way when changes cannot be
+  tagged (a bulk import, a migration).
+- **Forgetting and shadow checks are the last line, not the mechanism.** An engram unused for
+  `forget_after` (an hour) is forgotten, and the shadow sample catches a reflex the brain no
+  longer agrees with, but only on that sample and only after the fact. A dependency nobody
+  declared is a bug in the brain's declaration; these two bound how long it can last.
+
+### Metrics of consolidation
+
+On the recall neuron in `GET /nerve` (with the policy, the dependencies' versions and the most
+used engrams) and in `/metrics`: signals, sent to the brain, hits, shadow checks, agreements,
+disagreements, consolidated, dissolved (by failures), inhibited, stale, forgotten, decisions
+refused by the policy, `brain_fraction` and `brain_load` (shadow checks included), the brain
+fraction per window of 1,000 signals, the brain's signal-to-decision p50 and the brain time the
+hits saved at that p50. `Inhibit` counts the tags and versions it applied.
+
+Not built yet: keys by similarity (locality-sensitive or perceptual-hash keys), distilling the
+engrams into a small model, and expectations the brain writes into the periphery, of which
+this cache is the simplest kind (an exact match that acts).
+
+### Measured: log triage
+
+[`benches/nerve`](../benches/nerve/src/consolidation.rs) replays two public logs from
+[Loghub](https://github.com/logpai/loghub), `HDFS_2k.log` and `BGL_2k.log` (2,000 lines each;
+BGL's label column dropped), through a `Lines` receptor over TCP at 50 lines per second. A
+reflex makes the feature each line's template (every token holding a digit masked). The brain
+is a mock LLM: a summed window of up to 8 lines takes 400 ms plus 20 ms per further line, 4
+generations at once. It decides on the raw line: `page` for errors and failures, `ticket` for
+warnings and for HDFS blocks stored short of the 64 MB block size, `ignore` otherwise, with a `reason`
+quoting the line (volatile). The block size is masked out of the template, so that template's
+decision depends on what the key does not see: the case consolidation must not get wrong.
+One run each, consolidation off and on, Windows 11:
+
+```bash
+cd benches/nerve && cargo build --release
+target/release/furnace-nerve-bench consolidation --logs DIR
+```
+
+| Log (templates) | Consolidation | Brain calls | Brain calls per 200 lines, in order | Line to action p50 | p99 | Actions equal to the brain's for that line | Shadow agreement |
+|---|---|---|---|---|---|---|---|
+| HDFS (16) | off | 2,000 | 200 every time | 727 ms | 954 ms | 100% | — |
+| | on | 328 | 127, 46, 58, 25, 14, 13, 4, 12, 15, 14 | 0.04 ms | 809 ms | 98.4% | 97.1% (136 of 140) |
+| BGL (142) | off | 2,000 | 200 every time | 723 ms | 949 ms | 100% | — |
+| | on | 666 | 127, 113, 39, 10, 17, 37, 130, 59, 50, 84 | 0.03 ms | 881 ms | 100% | 100% (124 of 124) |
+
+With consolidation on, the reflex's own answers took 0.04 ms (HDFS) and 0.03 ms (BGL) at p50
+and under 0.1 ms at p99, against about 0.55 to 0.6 s through the brain; the p99 rows are the
+lines that still went to the brain. HDFS: 14 consolidations, 1,810 reflex answers, 139 shadow
+checks, 4 dissolutions; the brain time the hits saved, at its p50, was about 1,060 s over a
+40-second replay. BGL: 61 consolidations, 1,458 reflex answers, 124 checks, no dissolution,
+about 810 s saved.
+
+What the numbers say, and what they do not:
+
+- The brain's load falls where traffic repeats: by 6× on HDFS (16 templates) and 3× on BGL
+  (142 templates). Not by an order of magnitude on 2,000 lines: every template costs at least
+  `after` brain decisions plus its first `first_shadows` checks, and BGL keeps showing new
+  templates (the rise at lines 1,200 to 1,400 is a burst of templates not seen before). The
+  share falls further the longer the stream runs on known templates.
+- The HDFS trap worked as intended and shows the risk. The brain tickets a block stored short
+  of 64 MB (35 lines in the sample) and ignores a full one; the template masks the size, so
+  both share one key. The engram for that template consolidated on `ignore`, then the shadow
+  checks caught the disagreement and dissolved it 4 times, each time needing more agreeing
+  decisions to come back. In between, 33 partial-block lines were answered `ignore` by the
+  reflex: 1.6% of all actions differ from what the brain would have done. A key that hides
+  what the decision depends on gives wrong reflexes until a check catches them. The remedy is
+  the key (keep the field the brain looks at), not more checks; the dissolution count in
+  `GET /nerve` is how to find such keys.
+- The brain here is a mock that decides from the line alone (no `depends_on`), at a fixed
+  latency, so the numbers measure the mechanism, not an LLM's answers. A real GGUF is the next
+  measurement.
+- One run per mode, on one idle Windows 11 machine, 50 lines per second. The JSON report has
+  every count (`--json PATH`).
+
+## Expectations: the brain programs the periphery
+
+Consolidation remembers the brain's past answers, and the brain is still asked first about
+anything new. Expectations (`furnace::nerve::expect`) turn that around, the way predictive
+coding describes the cortex: the brain does not only answer signals, it writes down how the
+stream should behave from now on, and those rules run next to the receptor in microseconds.
+A signal that fits is absorbed (or acted on by the rule itself) and goes no further. Only what
+breaks a rule, what no rule covers, and what was expected and **did not come** reach the brain,
+as a *surprise* with its context. The brain's work goes into writing the rules that keep the
+rest away from it.
+
+```text
+             top-down: expectations, through the `expect` effector
+       ┌──────────────────────────────────────────────────────────────┐
+       ▼                                                              │
+receptor ─► Expectations ──matched: absorb / the rule's commands──► effectors
+               │   ▲ deadlines (absences)                             │
+               └──surprise──► brain ──commands──► effectors           │
+                                   └──expect commands────────────────┘
+```
+
+```rust
+use furnace::nerve::expect::{ExpectConfig, Expectations};
+
+let expectations = Expectations::new(
+    "logs-expect",
+    ExpectConfig::new().effectors(["ticket"]), // what a rule's own commands may reach
+);
+let expect = b.receptor(expectations.clone(), Mechanisms::NONE); // its timer raises absences
+b.reflex(logs, expect, 1.0);
+b.neuron(Effector::new(expectations.effector("expect")), Mechanisms::NONE); // top-down
+b.deliberative(expect, brain, 1.0, Summation::default());
+```
+
+The brain installs rules by commanding the `expect` effector, which goes through the same
+command parsing, policy and metrics as any other effector:
+
+```json
+{"effector": "expect", "args": {"add": {
+  "id": "hb-a", "kind": "every", "period_ms": 5000, "tolerance_ms": 1000,
+  "selector": {"template": "heartbeat from svc-a"},
+  "learn": {"period_ms": [4000, 8000]},
+  "provenance": {"surprise": "unexpected heartbeat from svc-a"}
+}}}
+```
+
+### The language (v1)
+
+Declarative and schema-checked; unknown fields are refused. Each kind compiles to a matcher
+with a few words of state.
+
+| Kind | Holds when | Example |
+|---|---|---|
+| `match` | a matching signal arrives; with `on_match` commands, act | "this template → ticket" (the cache case) |
+| `rate` | matching signals per `window_ms` stay within `[min, max]` | "`WARN disk <*>` at most 3 a minute" |
+| `every` | one matching signal at least every `period_ms` ± `tolerance_ms` | "heartbeat from svc-a every 5 s" |
+| `range` | the numeric `field` stays within `[min, max]` | "temperature 18 to 27" |
+| `then` | a match is followed by one matching `then` within `within_ms` | "job start → job end within 10 min" |
+| `never` | no matching signal at all | "no `auth failure for root`" |
+
+Every expectation also has a `selector` (a template and field equalities), `on_match`
+(`"absorb"`, the default, or `{"act": [commands]}`), `on_violation` (`"escalate"`, the default,
+or `{"act": [commands]}` and escalate), `learn` (parameters the periphery may tune itself, each
+within `[low, high]` the brain sets), `ttl_s`, `depends_on` and `provenance`. Besides `add`, the
+effector takes `replace`, `retire`, `verdict` and `changed`.
+
+**Fields.** The extraction is part of v1: a log line's template is the line with every token
+holding a digit masked as `<*>`, and the masked tokens are the fields `v0`, `v1`, ...; a
+`key=value` token is also the field `key`. A JSON body's fields are its members, nested objects
+joined with dots, and its template is the sorted list of its field names.
+
+**Surprises** are JSON signals under `"surprise"`: the reason (`unexpected`, `violation`,
+`absence`, `shadow`), what broke (expectation, kind, observed and expected), the observation
+(template, fields, text), up to `context` (8) recent signals of the same template, and the
+expectations installed for that template now. An absence comes from the neuron's timer (a
+deadline heap on a thread of its own, woken when an earlier deadline is armed) and is reported
+once per silence; the next match arms it again.
+
+### Keeping it honest
+
+- **Shadow checks.** Every match of a young expectation (the first 5) and a sample of the rest
+  (1%) also go to the brain as a `shadow` surprise, after the rule acted and without the
+  request's reply. The brain answers `{"verdict": {"id": ..., "correct": false}}` when it would
+  not have absorbed it; `retire_after` (2) such answers retire the rule.
+- **False alarms.** `{"verdict": {"id": ..., "normal": true}}` answers a surprise the brain finds
+  normal: a parameter the rule lets the periphery `learn` moves to cover what was seen, within
+  the brain's bounds. An `every` whose period is learnable also follows the observed interval.
+- **Scope limits**, because log content reaches an LLM and an attacker can try to make it write
+  "absorb everything": an absorbing rule must name a template or fields, at least as
+  specifically as the surprise it answers (no wildcard absorb); a rule's commands only reach
+  the effectors in `ExpectConfig::effectors`; at most `max` (256) rules and `writes_per_minute`
+  (60) writes, refused ones included; with `approval`, new absorbing rules from the brain wait
+  for `Expectations::approve`, which is the operator's and not a command.
+- **Forgetting.** A rule not matched for its `ttl_s` (or an hour) expires; rules that declare
+  `depends_on` retire when that state changes (`Expectations::changed`, or `{"changed": [...]}`).
+
+### Metrics of expectations
+
+On the neuron in `GET /nerve` (the rules with their counters and provenance, those waiting for
+approval, the last retirements) and in `/metrics`: signals, absorbed, acted, unexpected,
+violations by kind, absences, surprises, shadow checks and wrong verdicts, false alarms,
+parameters learned, installed, replaced, retired, expired, refused, the surprise rate and its
+timeline per 1,000 signals.
+
+### Checked on a synthetic stream
+
+The public datasets of the design (Loghub BGL with its anomaly labels, the Numenta Anomaly
+Benchmark) are not downloaded yet. Until then a test runs ten simulated minutes, time passed in,
+with a scripted brain that learns the shape of what is normal (a `match` per routine template,
+an `every` for the heartbeat, a `range` for a sensor, a `never` after a root login) and pages
+on what is not: 6,846 signals of five routine templates, a heartbeat every second that drops out
+for ten seconds, a reading every two seconds that leaves its range three times, three kernel
+panics and two root logins. Every one of the 8 anomalies reached the brain and was paged, the
+dropout was one absence, nothing normal was paged, and the brain was called for 16 surprises,
+21 checks of young rules and a 1% sample of the rest: about 110 calls, 1.6% of the stream. This
+checks the mechanism; it measures nothing about an LLM writing the rules, which is the next
+step (the LLM adapter), nor about real logs.
+
 ## What it is not, and limits
 
 - Not a workflow engine or a DAG DSL: pathways and neurons are code.
