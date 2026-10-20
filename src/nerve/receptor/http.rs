@@ -16,7 +16,7 @@ type FeatureFn = dyn Fn(&Ingest<'_>) -> Feature + Send + Sync;
 /// unless the receptor is given its own; the urgency comes from the `x-deadline-ms` header,
 /// else the route's default.
 ///
-/// The response is whatever a [`Respond`](super::effector::Respond) effector on the chain
+/// The response is whatever a [`Respond`](crate::nerve::effector::Respond) effector on the chain
 /// answers; a chain that ends without one answers `202 Accepted` (queued to the brain) or
 /// `204 No Content` (a reflex acted, or the signal died at the gate), with the outcome in the
 /// `x-furnace-nerve` header.
