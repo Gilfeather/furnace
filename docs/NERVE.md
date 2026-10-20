@@ -497,6 +497,124 @@ What the numbers say, and what they do not:
 - One run per mode, on one idle Windows 11 machine, 50 lines per second. The JSON report has
   every count (`--json PATH`).
 
+## Expectations: the brain programs the periphery
+
+Consolidation remembers the brain's past answers, and the brain is still asked first about
+anything new. Expectations (`furnace::nerve::expect`) turn that around, the way predictive
+coding describes the cortex: the brain does not only answer signals, it writes down how the
+stream should behave from now on, and those rules run next to the receptor in microseconds.
+A signal that fits is absorbed (or acted on by the rule itself) and goes no further. Only what
+breaks a rule, what no rule covers, and what was expected and **did not come** reach the brain,
+as a *surprise* with its context. The brain's work goes into writing the rules that keep the
+rest away from it.
+
+```text
+             top-down: expectations, through the `expect` effector
+       ┌──────────────────────────────────────────────────────────────┐
+       ▼                                                              │
+receptor ─► Expectations ──matched: absorb / the rule's commands──► effectors
+               │   ▲ deadlines (absences)                             │
+               └──surprise──► brain ──commands──► effectors           │
+                                   └──expect commands────────────────┘
+```
+
+```rust
+use furnace::nerve::expect::{ExpectConfig, Expectations};
+
+let expectations = Expectations::new(
+    "logs-expect",
+    ExpectConfig::new().effectors(["ticket"]), // what a rule's own commands may reach
+);
+let expect = b.receptor(expectations.clone(), Mechanisms::NONE); // its timer raises absences
+b.reflex(logs, expect, 1.0);
+b.neuron(Effector::new(expectations.effector("expect")), Mechanisms::NONE); // top-down
+b.deliberative(expect, brain, 1.0, Summation::default());
+```
+
+The brain installs rules by commanding the `expect` effector, which goes through the same
+command parsing, policy and metrics as any other effector:
+
+```json
+{"effector": "expect", "args": {"add": {
+  "id": "hb-a", "kind": "every", "period_ms": 5000, "tolerance_ms": 1000,
+  "selector": {"template": "heartbeat from svc-a"},
+  "learn": {"period_ms": [4000, 8000]},
+  "provenance": {"surprise": "unexpected heartbeat from svc-a"}
+}}}
+```
+
+### The language (v1)
+
+Declarative and schema-checked; unknown fields are refused. Each kind compiles to a matcher
+with a few words of state.
+
+| Kind | Holds when | Example |
+|---|---|---|
+| `match` | a matching signal arrives; with `on_match` commands, act | "this template → ticket" (the cache case) |
+| `rate` | matching signals per `window_ms` stay within `[min, max]` | "`WARN disk <*>` at most 3 a minute" |
+| `every` | one matching signal at least every `period_ms` ± `tolerance_ms` | "heartbeat from svc-a every 5 s" |
+| `range` | the numeric `field` stays within `[min, max]` | "temperature 18 to 27" |
+| `then` | a match is followed by one matching `then` within `within_ms` | "job start → job end within 10 min" |
+| `never` | no matching signal at all | "no `auth failure for root`" |
+
+Every expectation also has a `selector` (a template and field equalities), `on_match`
+(`"absorb"`, the default, or `{"act": [commands]}`), `on_violation` (`"escalate"`, the default,
+or `{"act": [commands]}` and escalate), `learn` (parameters the periphery may tune itself, each
+within `[low, high]` the brain sets), `ttl_s`, `depends_on` and `provenance`. Besides `add`, the
+effector takes `replace`, `retire`, `verdict` and `changed`.
+
+**Fields.** The extraction is part of v1: a log line's template is the line with every token
+holding a digit masked as `<*>`, and the masked tokens are the fields `v0`, `v1`, ...; a
+`key=value` token is also the field `key`. A JSON body's fields are its members, nested objects
+joined with dots, and its template is the sorted list of its field names.
+
+**Surprises** are JSON signals under `"surprise"`: the reason (`unexpected`, `violation`,
+`absence`, `shadow`), what broke (expectation, kind, observed and expected), the observation
+(template, fields, text), up to `context` (8) recent signals of the same template, and the
+expectations installed for that template now. An absence comes from the neuron's timer (a
+deadline heap on a thread of its own, woken when an earlier deadline is armed) and is reported
+once per silence; the next match arms it again.
+
+### Keeping it honest
+
+- **Shadow checks.** Every match of a young expectation (the first 5) and a sample of the rest
+  (1%) also go to the brain as a `shadow` surprise, after the rule acted and without the
+  request's reply. The brain answers `{"verdict": {"id": ..., "correct": false}}` when it would
+  not have absorbed it; `retire_after` (2) such answers retire the rule.
+- **False alarms.** `{"verdict": {"id": ..., "normal": true}}` answers a surprise the brain finds
+  normal: a parameter the rule lets the periphery `learn` moves to cover what was seen, within
+  the brain's bounds. An `every` whose period is learnable also follows the observed interval.
+- **Scope limits**, because log content reaches an LLM and an attacker can try to make it write
+  "absorb everything": an absorbing rule must name a template or fields, at least as
+  specifically as the surprise it answers (no wildcard absorb); a rule's commands only reach
+  the effectors in `ExpectConfig::effectors`; at most `max` (256) rules and `writes_per_minute`
+  (60) writes, refused ones included; with `approval`, new absorbing rules from the brain wait
+  for `Expectations::approve`, which is the operator's and not a command.
+- **Forgetting.** A rule not matched for its `ttl_s` (or an hour) expires; rules that declare
+  `depends_on` retire when that state changes (`Expectations::changed`, or `{"changed": [...]}`).
+
+### Metrics of expectations
+
+On the neuron in `GET /nerve` (the rules with their counters and provenance, those waiting for
+approval, the last retirements) and in `/metrics`: signals, absorbed, acted, unexpected,
+violations by kind, absences, surprises, shadow checks and wrong verdicts, false alarms,
+parameters learned, installed, replaced, retired, expired, refused, the surprise rate and its
+timeline per 1,000 signals.
+
+### Checked on a synthetic stream
+
+The public datasets of the design (Loghub BGL with its anomaly labels, the Numenta Anomaly
+Benchmark) are not downloaded yet. Until then a test runs ten simulated minutes, time passed in,
+with a scripted brain that learns the shape of what is normal (a `match` per routine template,
+an `every` for the heartbeat, a `range` for a sensor, a `never` after a root login) and pages
+on what is not: 6,846 signals of five routine templates, a heartbeat every second that drops out
+for ten seconds, a reading every two seconds that leaves its range three times, three kernel
+panics and two root logins. Every one of the 8 anomalies reached the brain and was paged, the
+dropout was one absence, nothing normal was paged, and the brain was called for 16 surprises,
+21 checks of young rules and a 1% sample of the rest: about 110 calls, 1.6% of the stream. This
+checks the mechanism; it measures nothing about an LLM writing the rules, which is the next
+step (the LLM adapter), nor about real logs.
+
 ## What it is not, and limits
 
 - Not a workflow engine or a DAG DSL: pathways and neurons are code.

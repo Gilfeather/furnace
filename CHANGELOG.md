@@ -30,6 +30,18 @@ The server runs on the nervous system: every model is a neuron, every route a re
   taken to decide from its input alone. Counters and the top engrams are on the recall neuron
   in `GET /nerve` and `/metrics`. Measured on Loghub's HDFS and BGL logs in
   [NERVE.md](docs/NERVE.md#consolidation).
+- Expectations v1 (`furnace::nerve::expect`): the brain programs the periphery. An
+  `Expectations` neuron behind a receptor matches every signal against rules the brain
+  installs through the `expect` effector (`match`, `rate`, `every`, `range`, `then`, `never`,
+  each with a selector by template and fields, `on_match` absorb or act, `on_violation`
+  escalate or act, `learn` bounds, `ttl_s`, `depends_on`, provenance). Fitting signals are
+  absorbed in process; what breaks a rule, what no rule covers and what did not come (a timer
+  raises absences) reach the brain as a JSON surprise with its context. Log lines become a
+  template and fields (numbers masked), JSON bodies their fields. Shadow checks of absorbed
+  signals, false-alarm verdicts that tune learnable parameters, scope limits (no wildcard
+  absorb, at least as specific as the surprise answered, allowed effectors only, budgets of
+  rules and writes, optional operator approval), counters and the rules in `GET /nerve`.
+  Checked on a synthetic stream with a scripted brain ([NERVE.md](docs/NERVE.md#expectations-the-brain-programs-the-periphery)).
 
 ### Changed
 - `/predict`, v2 over HTTP and v2 over gRPC share one inference path: the concurrency slot,
