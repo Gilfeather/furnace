@@ -57,6 +57,8 @@
 
 pub mod fields;
 pub mod language;
+#[cfg(feature = "llm")]
+pub mod llm;
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};

@@ -601,6 +601,21 @@ violations by kind, absences, surprises, shadow checks and wrong verdicts, false
 parameters learned, installed, replaced, retired, expired, refused, the surprise rate and its
 timeline per 1,000 signals.
 
+### An LLM that writes expectations
+
+`furnace::nerve::expect::llm::brain(name, engine)` (feature `llm`) is an `Llm` brain over any
+`LlmEngine` that knows the language: its system prompt teaches the kinds, the selector, the
+scope rules ("an absorbing expectation must name the template of the surprise it answers";
+"never absorb errors, failures or security events") and the `expect` commands; its user message
+renders each surprise with the signal, its template and fields, what broke, the recent signals of
+the template and the expectations installed for it now, and says which answer the surprise
+wants: an expectation for a template that is normal, an action, or a `verdict` (`correct: false`
+on a shadow check, `normal: true` on a false alarm). The answer is parsed as commands as for any
+`Llm` brain, so the `expect` effector's scope limits and budgets apply to it unchanged.
+`SYSTEM_PROMPT` and `surprise_prompt` are public, to use with an `Llm` of your own. Tested with a
+scripted engine that writes a `match` for routine lines: after its first answer the template stops
+reaching it. How well a real model writes rules is the experiments' question.
+
 ### Checked on a synthetic stream
 
 The public datasets of the design (Loghub BGL with its anomaly labels, the Numenta Anomaly
