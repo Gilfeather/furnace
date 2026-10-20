@@ -362,18 +362,26 @@ impl Trace {
     }
 }
 
-/// What an effector sends back to whoever started the chain, when that was a request: the
-/// HTTP response, for the HTTP receptor
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Answer {
-    pub status: u16,
-    pub content_type: String,
-    pub body: Bytes,
+/// What a chain sends back to whoever started it, when that was a request
+#[derive(Debug)]
+pub enum Answer {
+    /// An HTTP response, as the [`Respond`](super::effector::Respond) effector makes it for
+    /// the HTTP receptor
+    Http {
+        status: u16,
+        content_type: String,
+        body: Bytes,
+    },
+    /// Tensors, for a protocol that encodes them itself (the server's `/predict`, the
+    /// Open Inference Protocol over HTTP and gRPC)
+    Tensors(Vec<HostTensor>),
+    /// The chain failed and says why: the request's own error
+    Failed(Box<crate::error::FurnaceError>),
 }
 
 impl Answer {
     pub fn text(status: u16, body: &str) -> Self {
-        Self {
+        Self::Http {
             status,
             content_type: "text/plain; charset=utf-8".to_string(),
             body: Bytes::copy_from_slice(body.as_bytes()),
@@ -381,7 +389,7 @@ impl Answer {
     }
 
     pub fn json(status: u16, value: &serde_json::Value) -> Self {
-        Self {
+        Self::Http {
             status,
             content_type: "application/json".to_string(),
             body: Bytes::from(value.to_string()),
@@ -389,38 +397,86 @@ impl Answer {
     }
 
     pub fn bytes(status: u16, content_type: &str, body: Bytes) -> Self {
-        Self {
+        Self::Http {
             status,
             content_type: content_type.to_string(),
             body,
         }
     }
+
+    pub fn failed(error: crate::error::FurnaceError) -> Self {
+        Self::Failed(Box::new(error))
+    }
+}
+
+struct ReplyInner {
+    sender: Mutex<Option<oneshot::Sender<Answer>>>,
+    /// Whether the chain exists to answer: a signal whose requester stopped waiting is then
+    /// worth nothing, and a deliberative pathway skips it
+    required: bool,
 }
 
 /// The way back to the request that started a chain, carried by the signal and every signal
 /// derived from it. The first effector to answer wins; a chain that ends without answering
 /// drops the sender, and the receptor sees that.
-#[derive(Clone, Debug)]
-pub struct Reply(Arc<Mutex<Option<oneshot::Sender<Answer>>>>);
+#[derive(Clone)]
+pub struct Reply(Arc<ReplyInner>);
+
+impl fmt::Debug for Reply {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Reply")
+            .field("open", &self.is_open())
+            .field("required", &self.0.required)
+            .finish()
+    }
+}
 
 impl Reply {
+    /// A way back that the chain may use: the chain still runs if nobody waits any more (a
+    /// request answered `202 Accepted` before its signal reached the brain)
     pub fn new() -> (Self, oneshot::Receiver<Answer>) {
+        Self::make(false)
+    }
+
+    /// A way back the chain exists for: once nobody waits, the signal is dropped before it
+    /// reaches a deliberative pathway's neuron
+    pub fn required() -> (Self, oneshot::Receiver<Answer>) {
+        Self::make(true)
+    }
+
+    fn make(required: bool) -> (Self, oneshot::Receiver<Answer>) {
         let (sender, receiver) = oneshot::channel();
-        (Self(Arc::new(Mutex::new(Some(sender)))), receiver)
+        let inner = ReplyInner {
+            sender: Mutex::new(Some(sender)),
+            required,
+        };
+        (Self(Arc::new(inner)), receiver)
     }
 
     /// Send the answer; `false` if one was sent already or nobody is waiting
     pub fn answer(&self, answer: Answer) -> bool {
-        let sender = self.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let sender = self
+            .0
+            .sender
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         sender.is_some_and(|s| s.send(answer).is_ok())
     }
 
     pub fn is_open(&self) -> bool {
         self.0
+            .sender
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .is_some_and(|s| !s.is_closed())
+    }
+
+    /// Whether the signal carrying this is still worth running: always, unless the chain
+    /// exists to answer and nobody waits any more
+    pub fn wanted(&self) -> bool {
+        !self.0.required || self.is_open()
     }
 }
 
@@ -553,7 +609,22 @@ mod tests {
         assert!(child.answer(Answer::text(200, "ok")));
         // Only the first answer counts
         assert!(!signal.answer(Answer::text(200, "again")));
-        assert_eq!(receiver.try_recv().unwrap().body, Bytes::from_static(b"ok"));
+        let Answer::Http { body, .. } = receiver.try_recv().unwrap() else {
+            panic!("an HTTP answer");
+        };
+        assert_eq!(body, Bytes::from_static(b"ok"));
+    }
+
+    #[test]
+    fn only_a_required_reply_makes_its_signal_unwanted_once_abandoned() {
+        let (optional, receiver) = Reply::new();
+        drop(receiver);
+        assert!(!optional.is_open());
+        assert!(optional.wanted());
+        let (required, receiver) = Reply::required();
+        assert!(required.wanted());
+        drop(receiver);
+        assert!(!required.wanted());
     }
 
     #[test]

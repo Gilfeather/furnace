@@ -23,8 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::signal;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
-use tokio::task::JoinHandle;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
 #[cfg(feature = "grpc")]
@@ -33,13 +32,14 @@ mod v2;
 
 use crate::access::{Access, RateLimit, Rejection, constant_time_eq, presented_key};
 pub use crate::batching::BatchConfig;
-use crate::batching::{Arrival, Batcher, NamedInput};
 use crate::error::{ApiError, FurnaceError, ModelError, Result};
-use crate::model::{FlatInput, MAX_BATCH_SIZE, Model, ModelInfo, ModelStats};
+use crate::model::{MAX_BATCH_SIZE, Model, ModelInfo, ModelStats};
+use crate::nerve::Announced;
+use crate::nerve::serve::{Refused, ServedModel as ServedNeuron, Serving};
 #[cfg(feature = "image")]
 use crate::preprocess::{ImageKind, image_input_size, preprocess_image};
 use crate::telemetry::{Histogram, Percentiles};
-use crate::tensor::HostTensor;
+use crate::tensor::{HostTensor, Values};
 
 /// Media type of the raw little-endian `f32` input/output format
 pub const OCTET_STREAM: &str = "application/octet-stream";
@@ -190,8 +190,8 @@ pub struct MetricsResponse {
     #[cfg(feature = "llm")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub llm: Vec<crate::llm::LlmMetrics>,
-    /// The nervous system (feature `nerve`); absent without one
-    #[cfg(feature = "nerve")]
+    /// The nervous system: the served models' pathways, and the neurons added with
+    /// `Server::nerve`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nerve: Option<crate::nerve::NerveMetrics>,
     pub timestamp: String,
@@ -396,8 +396,7 @@ struct Contents {
     models: Vec<ServedModel>,
     #[cfg(feature = "llm")]
     llms: Vec<Arc<dyn crate::llm::LlmEngine>>,
-    #[cfg(feature = "nerve")]
-    nerve: Option<crate::nerve::Fabric>,
+    nerve: Option<crate::nerve::FabricBuilder>,
 }
 
 impl Contents {
@@ -406,7 +405,6 @@ impl Contents {
         if !self.llms.is_empty() {
             return false;
         }
-        #[cfg(feature = "nerve")]
         if self.nerve.is_some() {
             return false;
         }
@@ -420,7 +418,6 @@ impl From<Vec<ServedModel>> for Contents {
             models,
             #[cfg(feature = "llm")]
             llms: Vec::new(),
-            #[cfg(feature = "nerve")]
             nerve: None,
         }
     }
@@ -477,12 +474,14 @@ impl Server {
         self
     }
 
-    /// Serve a nervous system (feature `nerve`): its HTTP receptors become routes, its
-    /// receptors start with the server, `GET /nerve` describes its neurons, pathways and
-    /// measured latencies, `GET /nerve/effectors/{name}/events` streams an SSE effector's
-    /// commands, and `/metrics` carries its metrics. A server may serve a fabric alone.
-    #[cfg(feature = "nerve")]
-    pub fn nerve(mut self, fabric: crate::nerve::Fabric) -> Self {
+    /// Add neurons of your own to the server's nervous system. The server wires its models
+    /// into the same fabric (an entrance `in:{model}`, a neuron `model:{model}` and the
+    /// `respond` effector), so your pathways and its requests share one system. The HTTP
+    /// receptors become routes, the receptors start with the server, `GET /nerve` describes
+    /// every neuron, pathway and measured latency, `GET /nerve/effectors/{name}/events`
+    /// streams an SSE effector's commands, and `/metrics` carries it all. A server may serve
+    /// your neurons alone.
+    pub fn nerve(mut self, fabric: crate::nerve::FabricBuilder) -> Self {
         self.contents.nerve = Some(fabric);
         self
     }
@@ -518,21 +517,18 @@ impl Server {
     }
 }
 
-/// What a reload replaces at once: the model with its batching workers and readiness
+/// What a reload replaces at once: the model and its readiness. Its pathway in the nervous
+/// system stays; the model's neuron reads the current one.
 struct Loaded {
     model: Arc<Model>,
-    /// `None` when batching is off: every request runs its own forward pass
-    batcher: Option<Batcher>,
-    /// For models of named tensors with fixed per-item shapes
-    named_batcher: Option<Batcher<NamedInput>>,
     /// Set once the warm-up inference has run
     ready: Arc<AtomicBool>,
 }
 
 impl Loaded {
     /// Serve `model`, warming it up on a background thread (`/readyz` waits for it)
-    fn start(model: Model, batching: BatchConfig) -> Arc<Self> {
-        let loaded = Self::new(model, batching);
+    fn start(model: Model) -> Arc<Self> {
+        let loaded = Self::new(model);
         let model = loaded.model.clone();
         let ready = loaded.ready.clone();
         std::thread::spawn(move || {
@@ -553,15 +549,9 @@ impl Loaded {
         Arc::new(loaded)
     }
 
-    fn new(model: Model, batching: BatchConfig) -> Self {
-        let model = Arc::new(model);
+    fn new(model: Model) -> Self {
         Self {
-            // Only simple models batch: their requests are flat buffers of one shape
-            batcher: (batching.enabled() && model.is_simple())
-                .then(|| Batcher::new(model.clone(), batching)),
-            named_batcher: (batching.enabled() && model.batches_named())
-                .then(|| Batcher::new(model.clone(), batching)),
-            model,
+            model: Arc::new(model),
             ready: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -603,7 +593,6 @@ struct ServerState {
     inference_slots: Arc<Semaphore>,
     max_concurrent: usize,
     request_timeout: Option<Duration>,
-    batching: BatchConfig,
     max_batch_size: usize,
     admin_token: Option<String>,
     access: Access,
@@ -619,9 +608,8 @@ struct ServerState {
     /// The LLMs, when there are any
     #[cfg(feature = "llm")]
     llm: Option<Arc<crate::llm::LlmState>>,
-    /// The nervous system, when there is one
-    #[cfg(feature = "nerve")]
-    nerve: Option<crate::nerve::Fabric>,
+    /// The nervous system: every model's pathway, and the neurons added with `Server::nerve`
+    serving: Serving,
 }
 
 impl ServerState {
@@ -688,20 +676,36 @@ fn server_state(contents: Contents, config: &ServerConfig) -> AppState {
         .map(|served| {
             Arc::new(ModelSlot {
                 name: served.model.get_info().name.clone(),
-                current: std::sync::RwLock::new(Loaded::start(served.model, batching)),
+                current: std::sync::RwLock::new(Loaded::start(served.model)),
                 reload: served.reload,
                 reloading: tokio::sync::Mutex::new(()),
                 inference_latency: Histogram::new(),
             })
         })
-        .collect();
+        .collect::<Vec<Arc<ModelSlot>>>();
+    let serving = Serving::build(
+        contents.nerve.unwrap_or_default(),
+        models
+            .iter()
+            .map(|slot| {
+                let model = slot.get().model.clone();
+                let current = slot.clone();
+                ServedNeuron {
+                    name: slot.name.clone(),
+                    batches: model.is_simple() || model.batches_named(),
+                    source: Arc::new(move || current.get().model.clone()),
+                }
+            })
+            .collect(),
+        batching,
+        config.max_concurrent_requests,
+    );
     Arc::new(ServerState {
         models,
         start_time: SystemTime::now(),
         inference_slots,
         max_concurrent: config.max_concurrent_requests,
         request_timeout: config.request_timeout,
-        batching,
         max_batch_size: batching.max_batch_size.max(1),
         admin_token: config.admin_token.clone(),
         access: Access::new(&config.api_keys, config.rate_limit),
@@ -714,8 +718,7 @@ fn server_state(contents: Contents, config: &ServerConfig) -> AppState {
         inference_latency: Histogram::new(),
         #[cfg(feature = "llm")]
         llm,
-        #[cfg(feature = "nerve")]
-        nerve: contents.nerve,
+        serving,
     })
 }
 
@@ -749,11 +752,7 @@ fn router_with_state(state: AppState, config: &ServerConfig) -> Router {
         Some(llm) => router.merge(crate::llm::routes(llm.clone())),
         None => router,
     };
-    #[cfg(feature = "nerve")]
-    let router = match &state.nerve {
-        Some(fabric) => router.merge(crate::nerve::http::routes(fabric.clone())),
-        None => router,
-    };
+    let router = router.merge(crate::nerve::http::routes(state.serving.fabric().clone()));
     // Without API keys or a rate limit every request is admitted: skip the check altogether
     let router = if state.access.is_open() {
         router
@@ -934,12 +933,6 @@ async fn serve(config: ServerConfig, contents: Contents) -> Result<()> {
         .into_iter()
         .chain(state.llm.iter().flat_map(|llm| llm.names()))
         .collect();
-    #[cfg(feature = "nerve")]
-    let names: Vec<&str> = if state.nerve.is_some() {
-        names.into_iter().chain(["a nervous system"]).collect()
-    } else {
-        names
-    };
     info!("📚 Serving {}", names.join(", "));
     let app = router_with_state(state.clone(), &config);
     info!(
@@ -1191,9 +1184,9 @@ async fn predict_with(state: &AppState, slot: &ModelSlot, request: Request) -> R
             None,
         );
     }
-    // Tell the batcher a request is on its way in, so a batch about to start can wait
-    // for it while its body is received and decoded
-    let arrival = loaded.batcher.as_ref().map(Batcher::arrival);
+    // Announce the request on its pathway, so a batch about to start can wait for it while
+    // its body is received and decoded
+    let announced = state.serving.announce(&slot.name);
     // Pick the decoder before buffering the body so unsupported types fail fast
     let format = match RequestFormat::from_headers(request.headers()) {
         Some(format) => format,
@@ -1256,7 +1249,7 @@ async fn predict_with(state: &AppState, slot: &ModelSlot, request: Request) -> R
         }
     };
 
-    let result = match run_inference(state, &loaded, arrival, data, batch_size, permit).await {
+    let result = match run_inference(state, &loaded, announced, data, batch_size, permit).await {
         Ok(result) => result,
         Err(response) => return *response,
     };
@@ -1322,80 +1315,63 @@ async fn predict_with(state: &AppState, slot: &ModelSlot, request: Request) -> R
     }
 }
 
-/// Run one request's inference, batched with others when batching is on.
+/// Run one request of flat `f32` inputs through its model's pathway (see [`run_general`]).
 ///
-/// The outer error is a finished response (timeout, panic); the inner result is the
-/// model's answer for this request.
+/// The outer error is a finished response (busy, timeout, a lost request); the inner result is
+/// the model's answer for this request.
 async fn run_inference(
     state: &ServerState,
     loaded: &Loaded,
-    arrival: Option<Arrival<'_>>,
+    announced: Option<Announced<'_>>,
     data: Vec<f32>,
     batch_size: usize,
     permit: OwnedSemaphorePermit,
 ) -> std::result::Result<Result<Vec<f32>>, Box<Response>> {
-    let task = match (&loaded.batcher, arrival) {
-        (Some(batcher), Some(arrival)) => {
-            let receiver = batcher.submit(arrival, FlatInput { data, batch_size }, permit);
-            InferenceTask::Batched(receiver)
-        }
-        _ => {
-            // Inference is CPU/GPU-bound; keep it off the async runtime threads
-            let model = loaded.model.clone();
-            InferenceTask::Alone(tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                model.predict_flat(data, batch_size)
-            }))
-        }
+    let mut shape = Vec::with_capacity(loaded.model.get_info().input_spec.shape.len() + 1);
+    shape.push(batch_size);
+    shape.extend_from_slice(&loaded.model.get_info().input_spec.shape);
+    let input = HostTensor {
+        shape,
+        values: Values::F32(data),
     };
-
-    let joined = match state.request_timeout {
-        Some(timeout) => match tokio::time::timeout(timeout, task.wait()).await {
-            Ok(joined) => joined,
-            Err(_) => return Err(Box::new(timeout_response(timeout))),
-        },
-        None => task.wait().await,
-    };
-
-    joined.ok_or_else(|| Box::new(panicked_response()))
+    let outputs = run_general(state, loaded, announced, vec![input], permit).await?;
+    Ok(outputs.and_then(|outputs| match outputs.into_iter().next() {
+        Some(HostTensor {
+            values: Values::F32(values),
+            ..
+        }) => Ok(values),
+        _ => Err(ModelError::InferenceFailed("the model returned no f32 output".to_string()).into()),
+    }))
 }
 
-/// Run one request of named tensors ([`Model::infer`]) on its own blocking thread, under the
-/// timeout. Models with several or non-`f32` tensors are served this way, without batching.
+/// Run one request of named tensors through its model's pathway in the nervous system:
+/// summed with concurrent requests when batching is on, on a blocking thread of its own
+/// otherwise; under the timeout, holding its concurrency slot until it is answered.
 async fn run_general(
     state: &ServerState,
     loaded: &Loaded,
-    arrival: Option<Arrival<'_, NamedInput>>,
+    announced: Option<Announced<'_>>,
     inputs: Vec<HostTensor>,
     permit: OwnedSemaphorePermit,
 ) -> std::result::Result<Result<Vec<HostTensor>>, Box<Response>> {
-    let task = async {
-        match (&loaded.named_batcher, arrival) {
-            // Batched with concurrent requests; a dropped sender means the batch panicked
-            (Some(batcher), Some(arrival)) => batcher
-                .submit(arrival, NamedInput(inputs), permit)
-                .await
-                .ok(),
-            _ => {
-                let model = loaded.model.clone();
-                tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    model.infer(inputs)
-                })
-                .await
-                .inspect_err(|e| error!("Inference task failed: {}", e))
-                .ok()
-            }
-        }
-    };
-    let joined = match state.request_timeout {
+    let task = state
+        .serving
+        .infer(&loaded.model.get_info().name, inputs, announced);
+    let answered = match state.request_timeout {
         Some(timeout) => match tokio::time::timeout(timeout, task).await {
-            Ok(joined) => joined,
+            Ok(answered) => answered,
             Err(_) => return Err(Box::new(timeout_response(timeout))),
         },
         None => task.await,
     };
-    joined.ok_or_else(|| Box::new(panicked_response()))
+    // Free the slot before the response is made, so a client that reads /metrics right after
+    // its response never sees its own request still in flight
+    drop(permit);
+    match answered {
+        Ok(result) => Ok(result),
+        Err(Refused::Busy) => Err(Box::new(busy_response())),
+        Err(Refused::Lost) => Err(Box::new(panicked_response())),
+    }
 }
 
 fn timeout_response(timeout: Duration) -> Response {
@@ -1415,29 +1391,6 @@ fn panicked_response() -> Response {
         "Inference task panicked",
         None,
     )
-}
-
-/// An inference in progress: queued for the batcher, or on its own blocking thread
-enum InferenceTask {
-    Batched(oneshot::Receiver<Result<Vec<f32>>>),
-    Alone(JoinHandle<Result<Vec<f32>>>),
-}
-
-impl InferenceTask {
-    /// The result, or `None` if the inference panicked
-    async fn wait(self) -> Option<Result<Vec<f32>>> {
-        match self {
-            // A dropped sender means the batch it was in panicked
-            Self::Batched(receiver) => receiver.await.ok(),
-            Self::Alone(handle) => match handle.await {
-                Ok(result) => Some(result),
-                Err(e) => {
-                    error!("Inference task failed: {}", e);
-                    None
-                }
-            },
-        }
-    }
 }
 
 fn busy_response() -> Response {
@@ -1898,10 +1851,7 @@ fn prometheus_metrics(state: &ServerState) -> String {
     if let Some(llm) = &state.llm {
         llm.render_prometheus(&mut out);
     }
-    #[cfg(feature = "nerve")]
-    if let Some(fabric) = &state.nerve {
-        fabric.render_prometheus(&mut out);
-    }
+    state.serving.fabric().render_prometheus(&mut out);
 
     // Per model, labelled `model`
     let models: Vec<_> = state
@@ -2068,8 +2018,7 @@ fn json_metrics(state: &ServerState) -> MetricsResponse {
             .as_ref()
             .map(|llm| llm.json_metrics())
             .unwrap_or_default(),
-        #[cfg(feature = "nerve")]
-        nerve: state.nerve.as_ref().map(crate::nerve::Fabric::metrics),
+        nerve: Some(state.serving.fabric().metrics()),
         timestamp: Utc::now().to_rfc3339(),
     }
 }
@@ -2205,7 +2154,6 @@ async fn reload_model(
     };
 
     let previous = slot.get();
-    let batching = state.batching;
     let weights = request.weights.clone();
     let start = Instant::now();
     let task = tokio::task::spawn_blocking(move || -> Result<(Loaded, f64)> {
@@ -2237,7 +2185,7 @@ async fn reload_model(
             .into());
         }
         model.adopt_stats(&previous.model);
-        let loaded = Loaded::new(model, batching);
+        let loaded = Loaded::new(model);
         let warm_up = loaded
             .model
             .warm_up()

@@ -69,11 +69,13 @@ mod latency;
 mod metrics;
 mod neuron;
 pub mod receptor;
+pub(crate) mod serve;
 mod signal;
 pub mod wire;
 
 pub use fabric::{
-    Fabric, FabricBuilder, FnNeuron, MAX_HOPS, Outcome, Pathway, PathwayKind, Summation,
+    Announced, Fabric, FabricBuilder, FnNeuron, MAX_HOPS, Outcome, Pathway, PathwayKind,
+    Summation,
 };
 pub use http::{OUTCOME_HEADER, SIGNAL_HEADER};
 pub use latency::{LatencyEstimate, LatencySnapshot};

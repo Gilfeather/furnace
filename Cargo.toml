@@ -92,11 +92,10 @@ grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost", "dep:tonic-prost-build", "d
 tls = ["dep:rustls", "dep:tokio-rustls", "dep:tokio-stream", "dep:aes-gcm", "dep:chacha20poly1305", "dep:p256", "dep:p384", "dep:ed25519-dalek", "dep:x25519-dalek", "dep:sha2", "dep:hmac", "dep:getrandom"]
 # Serve LLMs: OpenAI-compatible chat and completions with streaming, behind the `LlmEngine` and
 # `StepModel` traits (src/llm). Engines come from other crates, such as furnace-candle.
-llm = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:futures-util"]
-# The nervous system (src/nerve): receptors, reflex and deliberative pathways, effectors and
-# brains, with habituation, thresholds and refractory periods. futures-util (already an `llm`
-# dependency) for the SSE effector's event stream; nothing else.
-nerve = ["dep:futures-util"]
+llm = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib"]
+# The nervous system (src/nerve) is always built: the server's own routes run on it. The
+# feature is kept so that existing `--features nerve` builds still work.
+nerve = []
 wgpu = ["burn/wgpu"]
 metal = ["burn/metal"]
 cuda = ["burn/cuda"]
@@ -163,7 +162,7 @@ getrandom = { version = "0.4", optional = true }
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"], optional = true }
 minijinja = { version = "2.24", default-features = false, features = ["builtins", "json", "serde", "macros", "loop_controls", "multi_template"], optional = true }
 minijinja-contrib = { version = "2.24", default-features = false, features = ["pycompat"], optional = true }
-futures-util = { version = "0.3", default-features = false, optional = true }
+futures-util = { version = "0.3", default-features = false }
 
 [build-dependencies]
 burn-onnx = { version = "0.22", optional = true }
@@ -185,21 +184,16 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 rand = "0.10"
 # Builds ONNX graphs for the build/optimize.rs tests (already a build dependency)
 onnx-ir = "0.22"
-# Reads streamed response bodies in the LLM tests
-futures-util = "0.3"
 
 [[test]]
 name = "llm"
 required-features = ["llm"]
 
-[[test]]
-name = "nerve"
-required-features = ["nerve"]
 
 [[example]]
 name = "nerve"
 path = "examples/nerve/main.rs"
-required-features = ["nerve", "llm"]
+required-features = ["llm"]
 
 [[bench]]
 name = "inference_benchmark"

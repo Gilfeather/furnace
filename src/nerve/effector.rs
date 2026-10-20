@@ -606,9 +606,13 @@ pub(crate) fn render_prometheus_help(out: &mut String) {
 // ---------------------------------------------------------------------------------------------
 // Respond
 
-/// The HTTP response to the request that started the chain. The command's `args` is
+/// The answer to the request that started the chain. The command's `args` is
 /// `{"status": 200, "content_type": "...", "body": ...}` (a string body as it is, anything
-/// else as JSON); a plain signal is answered with its payload.
+/// else as JSON); a plain signal is answered with its payload, tensors as tensors for the
+/// protocol that asked.
+///
+/// A requester that stopped waiting (it timed out, or disconnected) is not a failure of the
+/// effector: the answer is dropped, and the circuit breaker never counts it.
 pub struct Respond {
     name: String,
 }
@@ -635,7 +639,7 @@ impl Act for Respond {
                     .and_then(|s| u16::try_from(s).ok())
                     .unwrap_or(200);
                 match args.get("body") {
-                    Some(serde_json::Value::String(text)) => Answer {
+                    Some(serde_json::Value::String(text)) => Answer::Http {
                         status,
                         content_type: args
                             .get("content_type")
@@ -650,6 +654,7 @@ impl Act for Respond {
             }
             serde_json::Value::String(text) => Answer::text(200, text),
             serde_json::Value::Null => match &signal.payload {
+                Payload::Tensors(tensors) => Answer::Tensors(tensors.to_vec()),
                 Payload::Text(text) => Answer::text(200, text),
                 Payload::Bytes(bytes) => {
                     Answer::bytes(200, "application/octet-stream", bytes.clone())
@@ -659,11 +664,10 @@ impl Act for Respond {
             },
             other => Answer::json(200, other),
         };
-        if signal.answer(answer) {
-            Action::ok()
-        } else {
-            Action::Done(Err(ActError::fatal("nobody is waiting for a response")))
+        if !signal.answer(answer) {
+            debug!("nerve: '{}': nobody is waiting for the answer", self.name);
         }
+        Action::ok()
     }
 }
 

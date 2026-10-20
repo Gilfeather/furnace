@@ -218,11 +218,10 @@ async fn infer(
     let slot = resolve_model(state, &request.model_name, &request.model_version)
         .map_err(Status::not_found)?;
     let loaded = slot.get();
+    let announced = state.serving.announce(&slot.name);
     if !loaded.model.is_simple() {
-        let arrival = loaded.named_batcher.as_ref().map(Batcher::arrival);
-        return infer_named(state, &slot, &loaded, arrival, request).await;
+        return infer_named(state, &slot, &loaded, announced, request).await;
     }
-    let arrival = loaded.batcher.as_ref().map(Batcher::arrival);
     let [input] = request.inputs.as_mut_slice() else {
         return Err(Status::invalid_argument(format!(
             "Expected exactly one input ('{INPUT_NAME}'), got {}",
@@ -278,7 +277,7 @@ async fn infer(
         .clone()
         .try_acquire_owned()
         .map_err(|_| Status::resource_exhausted("Too many concurrent requests, retry later"))?;
-    let output = run_inference(state, &loaded, arrival, data, batch_size, permit)
+    let output = run_inference(state, &loaded, announced, data, batch_size, permit)
         .await
         .map_err(|response| response_status(&response))?
         .map_err(error_status)?;
@@ -335,7 +334,7 @@ async fn infer_named(
     state: &ServerState,
     slot: &ModelSlot,
     loaded: &Loaded,
-    arrival: Option<crate::batching::Arrival<'_, crate::batching::NamedInput>>,
+    announced: Option<crate::nerve::Announced<'_>>,
     mut request: pb::ModelInferRequest,
 ) -> std::result::Result<pb::ModelInferResponse, Status> {
     let model = &loaded.model;
@@ -415,7 +414,7 @@ async fn infer_named(
         .clone()
         .try_acquire_owned()
         .map_err(|_| Status::resource_exhausted("Too many concurrent requests, retry later"))?;
-    let outputs = run_general(state, loaded, arrival, inputs, permit)
+    let outputs = run_general(state, loaded, announced, inputs, permit)
         .await
         .map_err(|response| response_status(&response))?
         .map_err(error_status)?;

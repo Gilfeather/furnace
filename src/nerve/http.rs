@@ -18,7 +18,7 @@ use axum::routing::{get, post};
 use super::fabric::{Fabric, Outcome};
 use super::neuron::Quiet;
 use super::receptor::{HttpMethod, Ingest, Receptor};
-use super::signal::{NeuronId, Reply};
+use super::signal::{Answer, NeuronId, Reply};
 
 /// What became of the request's signal, on responses the chain did not answer itself
 pub const OUTCOME_HEADER: HeaderName = HeaderName::from_static("x-furnace-nerve");
@@ -95,16 +95,7 @@ async fn ingest(State(mounted): State<Arc<Mounted>>, headers: HeaderMap, body: B
         Err(_) => None,
     };
     let mut response = match answer {
-        Some(answer) => (
-            StatusCode::from_u16(answer.status).unwrap_or(StatusCode::OK),
-            [(
-                CONTENT_TYPE,
-                HeaderValue::from_str(&answer.content_type)
-                    .unwrap_or(HeaderValue::from_static("application/octet-stream")),
-            )],
-            answer.body,
-        )
-            .into_response(),
+        Some(answer) => answer_response(answer),
         None => {
             let status = if outcome.queued > 0 {
                 StatusCode::ACCEPTED
@@ -118,6 +109,43 @@ async fn ingest(State(mounted): State<Arc<Mounted>>, headers: HeaderMap, body: B
     headers.insert(OUTCOME_HEADER, describe_outcome(&outcome));
     headers.insert(SIGNAL_HEADER, HeaderValue::from(id.0));
     response
+}
+
+/// An answer as this route's response: an HTTP answer as it is, tensors as their bytes, a
+/// failure as its message
+fn answer_response(answer: Answer) -> Response {
+    match answer {
+        Answer::Http {
+            status,
+            content_type,
+            body,
+        } => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
+            [(
+                CONTENT_TYPE,
+                HeaderValue::from_str(&content_type)
+                    .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+            )],
+            body,
+        )
+            .into_response(),
+        Answer::Tensors(tensors) => (
+            [(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            )],
+            super::signal::Payload::tensors(tensors).to_bytes(),
+        )
+            .into_response(),
+        Answer::Failed(error) => {
+            let status = if error.is_client_error() {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, error.to_string()).into_response()
+        }
+    }
 }
 
 /// `quiet:habituation`, `queued`, `acted:2`, `done`

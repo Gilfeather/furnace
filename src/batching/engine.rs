@@ -192,7 +192,6 @@ impl<I: Send + 'static> Engine<I> {
     }
 
     /// Items queued and not yet taken by a worker
-    #[cfg(any(feature = "nerve", test))]
     pub fn waiting(&self) -> usize {
         self.waiting.load(Ordering::Relaxed)
     }

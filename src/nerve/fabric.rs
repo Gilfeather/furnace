@@ -47,6 +47,13 @@ pub struct Summation {
     /// Signals waiting at once; beyond it, new ones are dropped (and counted) rather than
     /// queued without bound
     pub capacity: usize,
+    /// Firings of the neuron that may run at the same time. While one of these workers is
+    /// idle, a signal fires on its own at once; signals are summed only while all are busy.
+    pub workers: usize,
+    /// Wait out the window only for signals announced as on their way
+    /// ([`Fabric::announce`]): a lone signal then never waits. Off, the worker always waits
+    /// out the window for more.
+    pub announced_only: bool,
 }
 
 impl Default for Summation {
@@ -57,6 +64,8 @@ impl Default for Summation {
             min_window: Duration::from_micros(200),
             max_window: Duration::from_millis(20),
             capacity: 1024,
+            workers: 1,
+            announced_only: false,
         }
     }
 }
@@ -85,10 +94,22 @@ impl Summation {
         self.capacity = n.max(1);
         self
     }
+
+    pub fn workers(mut self, n: usize) -> Self {
+        self.workers = n.max(1);
+        self
+    }
+
+    /// See [`Summation::announced_only`]
+    pub fn announced_only(mut self) -> Self {
+        self.announced_only = true;
+        self
+    }
 }
 
 /// A directed connection from one neuron to the next, with a measured latency
 pub struct Pathway {
+    pub id: PathwayId,
     pub from: NeuronId,
     pub to: NeuronId,
     pub kind: PathwayKind,
@@ -225,6 +246,8 @@ pub struct Outcome {
     pub unrouted: usize,
     /// Signals with no pathway fast enough for their deadline
     pub no_pathway: usize,
+    /// Signals dropped because a deliberative queue was full
+    pub dropped: usize,
 }
 
 impl Outcome {
@@ -242,6 +265,7 @@ impl Outcome {
         self.acted += other.acted;
         self.unrouted += other.unrouted;
         self.no_pathway += other.no_pathway;
+        self.dropped += other.dropped;
     }
 }
 
@@ -306,6 +330,11 @@ impl FabricBuilder {
         let id = self.add(neuron, mechanisms);
         self.receptors.push((id, receptor));
         id
+    }
+
+    /// The id the next pathway added will have
+    pub(crate) fn next_pathway(&self) -> PathwayId {
+        PathwayId(u32::try_from(self.pathways.len()).expect("fewer than 4G pathways"))
     }
 
     /// A reflex pathway: `to` is called directly when `from` fires
@@ -387,14 +416,15 @@ impl FabricBuilder {
                             },
                             engine::Config {
                                 max_batch: s.max_batch,
-                                workers: 1,
+                                workers: s.workers,
                                 capacity: Some(s.capacity),
-                                waits_unannounced: true,
+                                waits_unannounced: !s.announced_only,
                             },
                             move |_| format!("furnace-nerve-{i}"),
                         )
                     });
                     Pathway {
+                        id,
                         from,
                         to,
                         kind,
@@ -520,10 +550,34 @@ impl Fabric {
     /// Hand a signal to a receptor: the whole synchronous chain runs before this returns.
     /// Receptors call this through their [`Afferent`] handle; tests and in-process sources
     /// call it directly.
-    pub fn stimulate(&self, receptor: NeuronId, mut signal: Signal) -> Outcome {
+    pub fn stimulate(&self, receptor: NeuronId, signal: Signal) -> Outcome {
+        self.stimulate_announced(receptor, signal, None)
+    }
+
+    /// Announce a signal that will take `pathway` once it is ready (its request's body is
+    /// still being received or decoded): a worker collecting a batch there waits for it.
+    /// Hold the guard while preparing the signal, then hand both to
+    /// [`Fabric::stimulate_announced`]. `None` for a reflex pathway, which has no queue.
+    pub fn announce(&self, pathway: PathwayId) -> Option<Announced<'_>> {
+        let queue = self.0.pathways.get(pathway.index())?.queue.as_ref()?;
+        Some(Announced {
+            pathway,
+            arrival: queue.arrival(),
+        })
+    }
+
+    /// [`Fabric::stimulate`] for a signal announced with [`Fabric::announce`]: if it takes
+    /// the announced pathway, it is queued as the arrival a worker may be waiting for
+    pub fn stimulate_announced(
+        &self,
+        receptor: NeuronId,
+        mut signal: Signal,
+        announced: Option<Announced<'_>>,
+    ) -> Outcome {
         signal.origin = receptor;
         self.0.received.fetch_add(1, Ordering::Relaxed);
-        self.drive(receptor, signal, 0)
+        let mut announced = announced;
+        self.drive(receptor, signal, 0, &mut announced)
     }
 
     /// [`Fabric::stimulate`] by the receptor's name
@@ -532,7 +586,13 @@ impl Fabric {
     }
 
     /// Run `id`'s gate and `stimulate`, then propagate what it fires
-    fn drive(&self, id: NeuronId, mut signal: Signal, depth: usize) -> Outcome {
+    fn drive(
+        &self,
+        id: NeuronId,
+        mut signal: Signal,
+        depth: usize,
+        announced: &mut Option<Announced<'_>>,
+    ) -> Outcome {
         let cell = &self.0.cells[id.index()];
         let now = Instant::now();
         let nanos = self.nanos(now);
@@ -569,13 +629,20 @@ impl Fabric {
             fabric: self,
         };
         let firing = cell.neuron.stimulate(signal, &cx);
-        let mut outcome = self.after_firing(id, firing, nanos, depth);
+        let mut outcome = self.after_firing(id, firing, nanos, depth, announced);
         outcome.acted += acted;
         outcome
     }
 
     /// Propagate what `id` fired
-    fn after_firing(&self, id: NeuronId, firing: Firing, nanos: u64, depth: usize) -> Outcome {
+    fn after_firing(
+        &self,
+        id: NeuronId,
+        firing: Firing,
+        nanos: u64,
+        depth: usize,
+        announced: &mut Option<Announced<'_>>,
+    ) -> Outcome {
         let cell = &self.0.cells[id.index()];
         let emitted = match firing {
             Firing::Quiet => {
@@ -599,13 +666,19 @@ impl Fabric {
             ..Outcome::default()
         };
         for signal in emitted {
-            outcome.merge(self.route(id, signal, depth + 1));
+            outcome.merge(self.route(id, signal, depth + 1, announced));
         }
         outcome
     }
 
     /// Send a signal `from` fired along the pathway its timing selects
-    fn route(&self, from: NeuronId, mut signal: Signal, depth: usize) -> Outcome {
+    fn route(
+        &self,
+        from: NeuronId,
+        mut signal: Signal,
+        depth: usize,
+        announced: &mut Option<Announced<'_>>,
+    ) -> Outcome {
         if depth >= MAX_HOPS {
             self.0.loops.fetch_add(1, Ordering::Relaxed);
             warn!(
@@ -629,7 +702,7 @@ impl Fabric {
                         Some(pathway) => Some(pathway),
                         None => {
                             self.0.commands_direct.fetch_add(1, Ordering::Relaxed);
-                            return self.drive(target, signal, depth);
+                            return self.drive(target, signal, depth, announced);
                         }
                     }
                 }
@@ -662,14 +735,22 @@ impl Fabric {
         pathway.signals.fetch_add(1, Ordering::Relaxed);
         match &pathway.queue {
             None => {
-                let outcome = self.drive(pathway.to, signal, depth);
+                let outcome = self.drive(pathway.to, signal, depth, announced);
                 pathway.latency.observe(now.elapsed());
                 outcome
             }
             Some(queue) => {
                 self.prepare_for(pathway, &signal, now);
                 signal.trace.mark_queued();
-                match queue.submit(None, signal) {
+                // The arrival a worker may be waiting for, if this is the announced pathway
+                let arrival = match announced.take() {
+                    Some(a) if a.pathway == pathway.id => Some(a.arrival),
+                    other => {
+                        *announced = other;
+                        None
+                    }
+                };
+                match queue.submit(arrival, signal) {
                     Ok(()) => Outcome {
                         queued: 1,
                         ..Outcome::default()
@@ -677,7 +758,10 @@ impl Fabric {
                     // Full: dropped rather than queued without bound
                     Err(_) => {
                         pathway.overflow.fetch_add(1, Ordering::Relaxed);
-                        Outcome::default()
+                        Outcome {
+                            dropped: 1,
+                            ..Outcome::default()
+                        }
                     }
                 }
             }
@@ -775,7 +859,7 @@ impl Fabric {
         };
         let firings = cell.neuron.stimulate_many(admitted, &cx);
         for (firing, at) in firings.into_iter().zip(queued_at) {
-            self.after_firing(pathway.to, firing, nanos, 1);
+            self.after_firing(pathway.to, firing, nanos, 1, &mut None);
             pathway.latency.observe(at.elapsed());
         }
     }
@@ -798,6 +882,12 @@ impl Fabric {
     }
 }
 
+/// A signal announced on a deliberative pathway, see [`Fabric::announce`]
+pub struct Announced<'a> {
+    pathway: PathwayId,
+    arrival: engine::Arrival<'a, Signal>,
+}
+
 /// A deliberative pathway's summation: the batching engine over the pathway's queue, with
 /// the window learned from the pathway's latency, firing the pathway's neuron with each
 /// batch and propagating what it fires
@@ -809,8 +899,18 @@ struct Summing {
 impl Batching for Summing {
     type Item = Signal;
 
-    fn weight(&self, _: &Signal) -> usize {
-        1
+    /// A signal of tensors counts its items (the batch dimension); any other counts one
+    fn weight(&self, signal: &Signal) -> usize {
+        signal
+            .payload
+            .as_tensors()
+            .and_then(<[_]>::first)
+            .map_or(1, |t| t.batch().max(1))
+    }
+
+    /// A signal that exists to answer a request nobody waits for any more is skipped
+    fn wanted(&self, signal: &Signal) -> bool {
+        signal.reply.as_ref().is_none_or(super::signal::Reply::wanted)
     }
 
     fn window(&self) -> Duration {
