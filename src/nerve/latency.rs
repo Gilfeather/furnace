@@ -20,7 +20,7 @@ const UNKNOWN: u64 = u64::MAX;
 /// A latency estimate, in nanoseconds, from a rolling window of measurements. Never
 /// configured, only measured. The window's percentiles steer pathway selection; the
 /// histogram of every measurement is what the metrics report.
-pub struct LatencyEstimate {
+pub(crate) struct LatencyEstimate {
     recent: Mutex<Ring>,
     histogram: Histogram,
     p50: AtomicU64,

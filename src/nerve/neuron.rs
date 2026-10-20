@@ -1,6 +1,7 @@
 //! Neurons: anything that takes a signal and may fire, and the three small state machines
 //! every neuron owns (threshold, habituation, refractory period).
 
+use std::marker::PhantomData;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -26,7 +27,7 @@ pub enum NeuronKind {
 
 impl NeuronKind {
     /// The name in JSON and in the Prometheus `kind` label
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Receptor => "receptor",
             Self::Reflex => "reflex",
@@ -62,6 +63,24 @@ impl Firing {
     /// Whether the neuron was not interested
     pub fn is_quiet(&self) -> bool {
         matches!(self, Self::Quiet)
+    }
+}
+
+impl From<Signal> for Firing {
+    fn from(signal: Signal) -> Self {
+        Self::one(signal)
+    }
+}
+
+impl From<Option<Signal>> for Firing {
+    fn from(signal: Option<Signal>) -> Self {
+        signal.map_or(Self::Quiet, Self::one)
+    }
+}
+
+impl From<Vec<Signal>> for Firing {
+    fn from(signals: Vec<Signal>) -> Self {
+        Self::Fire(signals)
     }
 }
 
@@ -146,16 +165,20 @@ pub trait Neuron: Send + Sync + 'static {
     }
 }
 
-/// A neuron made from a closure: `Fn(Signal, &Cx) -> Firing`
-pub struct FnNeuron<F> {
+/// A neuron made from a closure: `Fn(Signal, &Cx) -> R`, where `R` is a [`Firing`] or
+/// anything that becomes one: a [`Signal`] fires it, an `Option<Signal>` fires it or stays
+/// quiet, a `Vec<Signal>` fires them all
+pub struct FnNeuron<F, R = Firing> {
     name: String,
     kind: NeuronKind,
     f: F,
+    returns: PhantomData<fn() -> R>,
 }
 
-impl<F> FnNeuron<F>
+impl<F, R> FnNeuron<F, R>
 where
-    F: Fn(Signal, &Cx<'_>) -> Firing + Send + Sync + 'static,
+    F: Fn(Signal, &Cx<'_>) -> R + Send + Sync + 'static,
+    R: Into<Firing> + 'static,
 {
     /// A reflex: feature in, signals (or commands) out, in process
     pub fn reflex(name: &str, f: F) -> Self {
@@ -163,6 +186,7 @@ where
             name: name.to_string(),
             kind: NeuronKind::Reflex,
             f,
+            returns: PhantomData,
         }
     }
 
@@ -173,9 +197,10 @@ where
     }
 }
 
-impl<F> Neuron for FnNeuron<F>
+impl<F, R> Neuron for FnNeuron<F, R>
 where
-    F: Fn(Signal, &Cx<'_>) -> Firing + Send + Sync + 'static,
+    F: Fn(Signal, &Cx<'_>) -> R + Send + Sync + 'static,
+    R: Into<Firing> + 'static,
 {
     fn name(&self) -> &str {
         &self.name
@@ -186,7 +211,7 @@ where
     }
 
     fn stimulate(&self, signal: Signal, cx: &Cx<'_>) -> Firing {
-        (self.f)(signal, cx)
+        (self.f)(signal, cx).into()
     }
 }
 
@@ -296,7 +321,7 @@ pub enum Quiet {
 
 impl Quiet {
     /// The name in JSON and in the Prometheus `reason` label
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Threshold => "threshold",
             Self::Habituation => "habituation",

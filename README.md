@@ -175,21 +175,19 @@ local commands, files, the response) with their own retry, circuit-breaker and r
 loops. Measured against a hand-written server doing the same work: 146 ns per hop, 0.8 µs from stimulus to effector call on a reflex arc, a brain fraction of 0.45 on a stream with half repeats, 47 µs added to a webhook; at 16 clients the fabric server serves 11% fewer requests per second than the bare handler (the server layer around it, not the fabric).
 
 ```rust
+use furnace::nerve::prelude::*;
+
 let mut b = Fabric::builder();
-let events = b.receptor(Http::new("events", "/events").text(),
-    Mechanisms::NONE.threshold(0.6).habituation(Habituation::new(Duration::from_secs(30))));
-let triage = b.neuron(FnNeuron::reflex("triage", |signal, _| {
-    if signal.payload.as_text().is_some_and(|t| t.contains("ALERT")) {
-        Firing::one(signal.command("alarm", json!({})).with_urgency(Urgency::within(Duration::from_millis(2))))
-    } else {
-        Firing::one(signal) // to the brain, by weight
-    }
-}), Mechanisms::NONE);
-let brain = b.neuron(Llm::new("brain", engine), Mechanisms::NONE);
-let alarm = b.neuron(Effector::new(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")?), Mechanisms::NONE);
-b.reflex(events, triage, 1.0);
-b.reflex(triage, alarm, 1.0);
-b.deliberative(triage, brain, 2.0, Summation::default());
+let events = b.receptor(Http::new("events", "/events").text());
+b.gate(events, Mechanisms::NONE.threshold(0.6).habituation(Habituation::new(Duration::from_secs(30))));
+let triage = b.neuron(FnNeuron::reflex("triage", |signal, _| match signal.payload.as_text() {
+    Some(t) if t.contains("ALERT") => signal.command("alarm", json!({"text": t})), // acts at once
+    _ => signal, // goes on to the brain
+}));
+let brain = b.neuron(Llm::new("brain", engine)); // its answer is commands
+b.effector(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")?);
+b.reflex(events, triage);
+b.deliberative(triage, brain);
 Server::new().nerve(b).serve().await?;
 ```
 

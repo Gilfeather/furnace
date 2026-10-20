@@ -101,7 +101,7 @@ pub struct ArcMetrics {
 
 /// `GET /nerve`: the neurons, their mechanisms, the pathways and the measured latencies
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Description {
+pub(crate) struct Description {
     /// Each neuron with its mechanisms and counters, by id
     pub neurons: Vec<NeuronDescription>,
     /// Each pathway's counters and latency, by id
@@ -114,7 +114,7 @@ pub struct Description {
 
 /// One neuron in `GET /nerve`
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NeuronDescription {
+pub(crate) struct NeuronDescription {
     /// Its index in the fabric
     pub id: NeuronId,
     /// The neuron's name
@@ -152,7 +152,7 @@ impl Fabric {
     }
 
     /// Neurons, mechanisms, pathways and latencies, for `GET /nerve`
-    pub fn describe(&self) -> Description {
+    pub(crate) fn describe(&self) -> Description {
         let inner = &self.0;
         Description {
             neurons: inner
@@ -228,7 +228,7 @@ impl Fabric {
     }
 
     /// Append the fabric's metrics in the Prometheus text format
-    pub fn render_prometheus(&self, out: &mut String) {
+    pub(crate) fn render_prometheus(&self, out: &mut String) {
         let m = self.metrics();
         render_fabric(&m, out);
         self.render_latencies(out);
@@ -396,9 +396,9 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::nerve::effector::{ChannelOut, Effector};
+    use crate::nerve::effector::ChannelOut;
     use crate::nerve::fabric::Summation;
-    use crate::nerve::neuron::{Firing, FnNeuron, Mechanisms};
+    use crate::nerve::neuron::{Firing, FnNeuron};
 
     fn neuron(name: &str, kind: NeuronKind, base: u64) -> NeuronMetrics {
         NeuronMetrics {
@@ -476,25 +476,16 @@ mod tests {
     #[test]
     fn a_fabric_with_an_effector_renders_as_before() {
         let mut b = Fabric::builder();
-        let input = b.neuron(
-            FnNeuron::reflex("in", |s, _| Firing::one(s)).with_kind(NeuronKind::Receptor),
-            Mechanisms::NONE,
-        );
-        let brain = b.neuron(
-            FnNeuron::reflex("brain", |s, _| Firing::one(s)).with_kind(NeuronKind::Brain),
-            Mechanisms::NONE,
-        );
+        let input =
+            b.neuron(FnNeuron::reflex("in", |s, _| Firing::one(s)).with_kind(NeuronKind::Receptor));
+        let brain =
+            b.neuron(FnNeuron::reflex("brain", |s, _| Firing::one(s)).with_kind(NeuronKind::Brain));
         let (channel, _rx) = ChannelOut::new("out", 1);
-        let out = b.neuron(Effector::new(channel), Mechanisms::NONE);
-        b.reflex(input, out, 1.0).deliberative(
-            input,
-            brain,
-            0.5,
-            Summation {
-                window: Some(Duration::from_millis(1)),
-                ..Summation::default()
-            },
-        );
+        let out = b.effector(channel);
+        b.reflex(input, out);
+        b.deliberative(input, brain)
+            .weight(0.5)
+            .summation(Summation::default().window(Duration::from_millis(1)));
         let fabric = b.build().unwrap();
         let mut text = String::new();
         fabric.render_prometheus(&mut text);
@@ -538,15 +529,10 @@ mod tests {
     #[test]
     fn a_measured_pathway_renders_its_histogram() {
         let mut b = Fabric::builder();
-        let input = b.neuron(
-            FnNeuron::reflex("in", |s, _| Firing::one(s)).with_kind(NeuronKind::Receptor),
-            Mechanisms::NONE,
-        );
-        let sink = b.neuron(
-            FnNeuron::reflex("sink", |_, _| Firing::Quiet),
-            Mechanisms::NONE,
-        );
-        b.reflex(input, sink, 1.0);
+        let input =
+            b.neuron(FnNeuron::reflex("in", |s, _| Firing::one(s)).with_kind(NeuronKind::Receptor));
+        let sink = b.neuron(FnNeuron::reflex("sink", |_, _| Firing::Quiet));
+        b.reflex(input, sink);
         let fabric = b.build().unwrap();
         fabric.0.pathways[0]
             .latency

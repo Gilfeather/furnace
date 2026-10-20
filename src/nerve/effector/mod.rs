@@ -314,8 +314,17 @@ impl Effector {
     }
 
     /// The act, for its own state (a channel's receiver, an SSE effector's subscribers)
-    pub fn act(&self) -> &dyn Act {
+    #[cfg(test)]
+    pub(crate) fn act(&self) -> &dyn Act {
         &*self.inner.act
+    }
+}
+
+/// An act with the default local loop, so [`FabricBuilder::effector`](super::FabricBuilder::effector)
+/// takes either
+impl<A: Act> From<A> for Effector {
+    fn from(act: A) -> Self {
+        Self::new(act)
     }
 }
 

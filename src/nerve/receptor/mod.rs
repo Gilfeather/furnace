@@ -42,7 +42,7 @@ pub mod kinds {
     pub const TEXT: u16 = 2;
     /// A timer's tick, or its one fixed feature ([`Timer`](super::Timer))
     pub const TIMER: u16 = 3;
-    /// A sketch of an upstream event's data ([`SseIn`](super::Sse))
+    /// A sketch of an upstream event's data ([`SseIn`](super::SseIn))
     pub const SSE: u16 = 4;
 }
 
@@ -250,7 +250,7 @@ impl UrgencyRule {
 
 /// The rate a stream arrives at: an exponential moving average of inter-arrival times, in
 /// signals per second, without a clock in the hot path beyond one `Instant`
-pub struct RateMeter {
+pub(crate) struct RateMeter {
     /// Nanoseconds since `epoch` of the last arrival; 0 before any
     last: AtomicU64,
     /// EWMA of the interval, nanoseconds as bits of an f64

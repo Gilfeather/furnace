@@ -20,10 +20,10 @@ use std::sync::Arc;
 
 use tracing::error;
 
-use super::effector::{Effector, Respond};
+use super::effector::Respond;
 use super::fabric::{Announced, Fabric, FabricBuilder, Outcome, Summation};
 use super::latency::LatencyEstimate;
-use super::neuron::{Cx, Firing, Mechanisms, Neuron, NeuronKind};
+use super::neuron::{Cx, Firing, Neuron, NeuronKind};
 use super::signal::{Answer, Feature, NeuronId, PathwayId, Payload, ReplyHandle, Signal};
 use crate::batching::BatchConfig;
 use crate::error::Result;
@@ -251,31 +251,21 @@ impl Serving {
         capacity: usize,
     ) -> std::result::Result<Self, crate::nerve::BuildError> {
         // Only a server with models answers requests through the fabric
-        let respond = (!models.is_empty())
-            .then(|| builder.neuron(Effector::new(Respond::new(RESPOND)), Mechanisms::NONE));
+        let respond = (!models.is_empty()).then(|| builder.effector(Respond::new(RESPOND)));
         let mut wired = Vec::with_capacity(models.len());
         for model in models {
-            let entrance = builder.neuron(
-                Entrance {
-                    name: entrance_name(&model.name),
-                },
-                Mechanisms::NONE,
-            );
-            let served = builder.neuron(
-                Served {
-                    name: model_name(&model.name),
-                    source: model.source,
-                    latency: LatencyEstimate::new(),
-                },
-                Mechanisms::NONE,
-            );
+            let entrance = builder.neuron(Entrance {
+                name: entrance_name(&model.name),
+            });
+            let served = builder.neuron(Served {
+                name: model_name(&model.name),
+                source: model.source,
+                latency: LatencyEstimate::new(),
+            });
             let deliberative = batching.enabled() && model.batches;
             let pathway = builder.next_pathway();
             if deliberative {
-                builder.deliberative(
-                    entrance,
-                    served,
-                    1.0,
+                builder.deliberative(entrance, served).summation(
                     Summation::default()
                         .max_batch(batching.max_batch_size)
                         .window(batching.batch_timeout)
@@ -284,10 +274,10 @@ impl Serving {
                         .announced_only(),
                 );
             } else {
-                builder.reflex(entrance, served, 1.0);
+                builder.reflex(entrance, served);
             }
             if let Some(respond) = respond {
-                builder.reflex(served, respond, 1.0);
+                builder.reflex(served, respond);
             }
             wired.push((
                 model.name,
@@ -303,20 +293,14 @@ impl Serving {
             .iter()
             .map(|engine| {
                 let name = engine.name().to_string();
-                let entrance = builder.neuron(
-                    Entrance {
-                        name: entrance_name(&name),
-                    },
-                    Mechanisms::NONE,
-                );
-                let brain = builder.neuron(
-                    Speaking {
-                        name: format!("llm:{name}"),
-                        engine: engine.clone(),
-                    },
-                    Mechanisms::NONE,
-                );
-                builder.reflex(entrance, brain, 1.0);
+                let entrance = builder.neuron(Entrance {
+                    name: entrance_name(&name),
+                });
+                let brain = builder.neuron(Speaking {
+                    name: format!("llm:{name}"),
+                    engine: engine.clone(),
+                });
+                builder.reflex(entrance, brain);
                 (name, entrance)
             })
             .collect();
@@ -931,7 +915,7 @@ mod tests {
             0,
         ));
         let mut yours = FabricBuilder::new();
-        yours.neuron(Effector::new(Respond::new("respond")), Mechanisms::NONE);
+        yours.effector(Respond::new("respond"));
         let source = model.clone();
         let serving = Serving::build(
             yours,
@@ -946,13 +930,8 @@ mod tests {
             10,
         )
         .unwrap();
-        let names: Vec<String> = serving
-            .fabric()
-            .neurons()
-            .map(|(_, n)| n.name().to_string())
-            .collect();
         for name in ["respond", RESPOND, "in:m", "model:m"] {
-            assert!(names.iter().any(|n| n == name), "{name} in {names:?}");
+            assert!(serving.fabric().neuron(name).is_some(), "{name}");
         }
     }
 }
