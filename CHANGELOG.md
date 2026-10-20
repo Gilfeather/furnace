@@ -7,16 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The server runs on the nervous system: every model is a neuron, every route a receptor.
+
 ### Changed
-- One batching engine (`src/batching/engine.rs`) behind both the server's dynamic batching
-  and the nervous system's deliberative pathways: the queue, the workers that merge what is
-  queued once they are all busy, the window from the first item, arrival hints, skipping
-  abandoned items and containing a panicking batch. The server's `Batcher` runs it over a
-  `Model` with a reply per request and the configured `--batch-timeout-us`; a deliberative
-  pathway runs it with one worker, a bounded queue and the window learned from its latency.
-  Nothing changes for either: batching stays off by default, the flags keep their meaning,
-  and the pathway's summation window, capacity and overflow count are as before. A brain
-  that panics now loses that window's signals instead of its pathway's worker.
+- `/predict`, `/models/{model}/predict`, v2 over HTTP and gRPC, and the OpenAI routes run on
+  the fabric: each model is `in:{model}` → `model:{model}` → `serve:respond`, each LLM a brain
+  `llm:{llm}` behind `in:{llm}`, all listed in `GET /nerve` with measured latencies. With
+  batching off a model's pathway is a reflex (the forward pass on a blocking thread, as
+  before); with `--max-batch-size` above 1 it is a deliberative pathway. The server's own work
+  per request grew by about 4 µs on a laptop; over HTTP the difference is within noise.
+- One batching engine (`src/batching/engine.rs`) behind the server's dynamic batching and
+  every deliberative pathway. A brain that panics loses that window's signals instead of its
+  pathway's worker. The internal `Batcher` is gone.
+- The nervous system is always built; the `nerve` feature is kept and changes nothing.
+  `GET /nerve` and the fabric's metrics are always served.
+- `Server::nerve` takes a `FabricBuilder` (was a built `Fabric`), so the server can add its
+  models and LLMs to it.
+- `nerve::Answer` is an enum: an HTTP answer, tensors, a failure, or (feature `llm`) a
+  generation's events. `Payload::Prompt` carries a generation request (feature `llm`).
+- `HostTensor::batch()` is 0 for a tensor without dimensions (was 1).
+- `--request-timeout-ms` covers the OpenAI routes: `504` for a whole answer, an error payload
+  and `[DONE]` for a stream whose model goes quiet for that long.
+- A refractory neuron admits one of several signals arriving together (compare-and-swap).
+- `wire::Client::request` (and so `Webhook`) bounds the whole call, response body included;
+  `Process` writes stdin within its timeout; `FileAppend` writes on a thread of its own.
+- `Respond` with nobody waiting any more is not a failure, so late answers no longer open its
+  breaker.
+
+### Fixed
+- A batch size a fixed-batch graph cannot run is a `400` on `/predict` too (was `500` with a
+  doubled message).
+- Warming up a simple model with a fixed batch runs that batch (was always 1).
+- An input tensor without dimensions is refused with a clear message.
+- A loop through a deliberative pathway is cut after `MAX_HOPS` like any other.
+- Chat template rendering and tokenization no longer run on the async runtime.
+- A rate limit without API keys logs a warning when the router may be served without
+  `ClientAddr`, in which case every client shares one budget.
 
 ## [0.10.0] - 2026-10-21
 

@@ -1,7 +1,7 @@
 # The nervous system
 
 Inference getting faster is worth nothing if the layer that moves signals to and from the
-models is the bottleneck. With the `nerve` feature, Furnace is that layer: not a server that
+models is the bottleneck. Furnace is that layer: not a server that
 loads models and answers requests, but the nervous system between sensors, small fast models,
 the large slow model (the brain, an LLM) and actuators. Text, images, tensors and model outputs
 are one kind of signal. Most signals never reach the brain. The receptive side and the motor
@@ -9,11 +9,13 @@ side are separate systems. The mechanisms are a neuron's.
 
 ```toml
 [dependencies]
-furnace-server = { version = "0.9", default-features = false, features = ["nerve"] }
+furnace-server = { version = "0.10", default-features = false }
 ```
 
-Everything is pure Rust and adds no dependency: `nerve` uses what the crate already has, plus
-a 300-line HTTP/1.1 client over Tokio sockets for the outbound side (`furnace::nerve::wire`).
+The nervous system is always built: the server's own routes run on it. The `nerve` feature is
+still accepted and changes nothing. Everything is pure Rust and adds no dependency: `nerve`
+uses what the crate already has, plus a small HTTP/1.1 client over Tokio sockets for the
+outbound side (`furnace::nerve::wire`).
 
 ## Why a fly dodges a hand
 
@@ -73,8 +75,8 @@ state, run by the fabric before `stimulate`:
   intensity by `1 - a` and raises `a` toward 1 by `gain`; `a` decays as `exp(-dt / tau)`. A
   repeated stimulus dies here, below the threshold, and recovers with time. This is caching as
   a property of every neuron, not a layer.
-- *Refractory period*: after firing, the neuron ignores signals for a while. Backpressure
-  without counters.
+- *Refractory period*: after firing, the neuron ignores signals for a while. Of signals
+  arriving together, one is admitted. Backpressure without counters.
 
 **Pathway.** A directed connection with a **measured** rolling p50/p99 latency, never
 configured. Reflex pathways are direct calls on the firing thread: `Receptor::stimulate` →
@@ -160,10 +162,10 @@ b.reflex(events, triage, 1.0);
 b.reflex(triage, alarm, 1.0);
 b.deliberative(triage, brain, 2.0, Summation::default());
 
-Server::new().port(3000).nerve(b.build()).serve().await?;
+Server::new().port(3000).nerve(b).serve().await?;
 ```
 
-`Server::nerve` mounts the HTTP receptors as routes, starts the other receptors, serves
+`Server::nerve` takes the builder, adds the server's models and LLMs to it (see below), mounts the HTTP receptors as routes, starts the other receptors, serves
 `GET /nerve` (neurons, mechanisms, pathways and their measured latencies) and
 `GET /nerve/effectors/{name}/events` (an SSE effector's commands), and adds the fabric's
 metrics to `/metrics`, next to whatever else the server serves. A request to a receptor is
@@ -172,6 +174,25 @@ was queued to the brain, or `204 No Content`, with what happened in the `x-furna
 header (`quiet:habituation`, `acted:1`, `queued`). A fabric can also be driven without a
 server: `fabric.stimulate(receptor, signal)` runs the whole synchronous chain before it
 returns.
+
+## The server runs on it
+
+The server's own routes are receptors and effectors on the same fabric. Each model has an
+entrance `in:{model}`, its neuron `model:{model}` and the effector `serve:respond`: `/predict`,
+`/models/{model}/predict`, v2 over HTTP and gRPC stimulate the entrance, the model fires its
+output tensors, and `serve:respond` hands them back to the route, which encodes them for its
+protocol. With batching off (the default) the model's pathway is a reflex, and the forward
+pass runs on a blocking thread of its own, as a hand-written server would; with
+`--max-batch-size` above 1 it is a deliberative pathway, whose summation is the server's
+dynamic batching. Each LLM is a brain, `llm:{llm}` behind `in:{llm}`, whose stream of tokens
+goes straight back to the OpenAI route. `GET /nerve` shows all of them with their measured
+latencies, next to your own neurons; the names `in:*`, `model:*`, `llm:*` and `serve:respond`
+are the server's.
+
+Measured on the same laptop as below, before and after the routes moved onto the fabric: the
+server's own work for a request to a trivial model went from about 17 µs to about 21 µs (three
+alternating runs each); over HTTP to the digits model, 1 and 16 clients, the two are the same
+within noise.
 
 ### Receptors (`furnace::nerve::receptor`)
 
@@ -196,10 +217,10 @@ the reflex arc; the rest run on the efferent runtime. Implement `Act` for your o
 
 | Act | Does |
 |---|---|
-| `Respond` | answers the request that started the chain: `{"status", "content_type", "body"}` or the signal's payload |
-| `Webhook` | `POST url` with the command's args as JSON, or the payload as it is; 5xx and 429 are retried |
-| `Process` | runs a local command with fixed arguments plus `{"args": [...], "stdin": "..."}` |
-| `FileAppend` | appends `args.line`, or a JSON line with the time, the signal id and the args |
+| `Respond` | answers the request that started the chain: `{"status", "content_type", "body"}` or the signal's payload; with nobody waiting any more it does nothing, which is not a failure |
+| `Webhook` | `POST url` with the command's args as JSON, or the payload as it is; 5xx and 429 are retried; plain `http://`, no redirects; the timeout covers the whole call, response body included |
+| `Process` | runs a local command with fixed arguments plus `{"args": [...], "stdin": "..."}`; writing stdin counts against the timeout; the args reach argv as they are, with no shell |
+| `FileAppend` | appends `args.line`, or a JSON line with the time, the signal id and the args, on a thread of its own, in order |
 | `Channel` | hands `Delivery { command, signal }` to the code holding the receiver |
 | `Sse` | pushes `{"signal", "effector", "args"}` to subscribers of `GET /nerve/effectors/{name}/events` |
 
@@ -230,7 +251,7 @@ In `/metrics` (`nerve` in the JSON, `furnace_nerve_*` in Prometheus) and `GET /n
 ## The demo
 
 ```bash
-cargo run --release --features nerve,llm --example nerve
+cargo run --release --features llm --example nerve
 ```
 
 [`examples/nerve`](../examples/nerve/main.rs) runs, in one process, a tiny webhook receiver
@@ -322,11 +343,10 @@ Notes on the numbers:
   brain.
 - Not a new engine: reflex models and brains are Burn, candle or anything behind `Model` or
   `LlmEngine`.
-- A deliberative pathway and the server's `Batcher` are the same engine (`src/batching`):
-  a queue, workers that merge what is queued once they are all busy, a window from the
-  first item, a bound on the batch. The pathway runs it with one worker, a bounded queue, the
-  window learned instead of configured, and a batch that fires the neuron and propagates
-  what it fires instead of replying to a caller.
+- A deliberative pathway is the server's dynamic batching (`src/batching`): a queue, workers
+  that merge what is queued once they are all busy, a window from the first item, a bound on
+  the batch. Your pathways run it with one worker, a bounded queue and the window learned
+  instead of configured; a model's pathway with the configured workers and timeout.
 - "Pinned" reflex threads are the receptors' own threads (a timer's, a line reader's, the
   request handler's for an HTTP receptor); there is no CPU affinity. A reflex that runs a
   model blocks that thread for the forward pass, which is what makes it a reflex; keep such
