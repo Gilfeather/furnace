@@ -227,7 +227,8 @@ impl Streaming {
     }
 }
 
-/// Connections kept alive per host, and a timeout per request
+/// Connections kept alive per host, and a timeout per request: the whole exchange for
+/// [`request`](Self::request), up to the response head for [`send`](Self::send)
 pub struct Client {
     pool: Mutex<HashMap<String, Vec<TcpStream>>>,
     timeout: Duration,
@@ -281,7 +282,8 @@ impl Client {
         }
     }
 
-    /// Send a request and collect the whole response
+    /// Send a request and collect the whole response, all within the timeout: a server that
+    /// sends its head and then stalls fails with [`io::ErrorKind::TimedOut`]
     pub async fn request(
         &self,
         method: &str,
@@ -289,7 +291,19 @@ impl Client {
         headers: &[(&str, &str)],
         body: &[u8],
     ) -> io::Result<Response> {
-        let mut streaming = self.send(method, url, headers, body).await?;
+        tokio::time::timeout(self.timeout, self.request_inner(method, url, headers, body))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "request timed out"))?
+    }
+
+    async fn request_inner(
+        &self,
+        method: &str,
+        url: &Url,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> io::Result<Response> {
+        let mut streaming = self.send_inner(method, url, headers, body).await?;
         let mut collected = Vec::new();
         while let Some(piece) = streaming.next().await? {
             collected.extend_from_slice(&piece);
@@ -307,7 +321,8 @@ impl Client {
         })
     }
 
-    /// Send a request and return the response with its body still streaming
+    /// Send a request and return the response with its body still streaming. The timeout
+    /// covers the request and the response head; reading the body is the caller's to bound.
     pub async fn send(
         &self,
         method: &str,
@@ -505,6 +520,73 @@ mod tests {
             String::from_utf8(all).unwrap(),
             "data: 0\n\ndata: 1\n\ndata: 2\n\n"
         );
+    }
+
+    /// A server that answers every connection with `response`, then holds it open, or closes
+    /// it if `close`
+    async fn raw(response: &'static [u8], close: bool) -> Url {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut request = [0u8; 4096];
+                    let _ = stream.read(&mut request).await;
+                    let _ = stream.write_all(response).await;
+                    if !close {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    }
+                });
+            }
+        });
+        Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_body_that_stalls_times_out() {
+        let url = raw(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nhalf", false).await;
+        let client = Client::new(Duration::from_millis(100));
+        let started = std::time::Instant::now();
+        let err = client.request("POST", &url, &[], b"x").await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn a_body_without_length_runs_until_the_connection_closes() {
+        let url = raw(b"HTTP/1.1 200 OK\r\n\r\nuntil the end", true).await;
+        let response = Client::default()
+            .request("GET", &url, &[], b"")
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(&response.body[..], b"until the end");
+    }
+
+    #[tokio::test]
+    async fn a_truncated_head_is_an_error() {
+        let url = raw(b"HTTP/1.1 200 OK\r\nContent-Le", true).await;
+        let err = Client::default()
+            .request("GET", &url, &[], b"")
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof, "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_body_over_the_limit_is_refused() {
+        let base =
+            serve(Router::new().route("/big", get(|| async { vec![0u8; MAX_BODY + 1] }))).await;
+        let url = Url {
+            path: "/big".into(),
+            ..base
+        };
+        let err = Client::default()
+            .request("GET", &url, &[], b"")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
     }
 
     /// Three SSE events, as a stream of results

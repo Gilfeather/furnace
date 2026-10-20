@@ -394,7 +394,11 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A model call, with a panic turned into an error so the worker and its other sequences live on
+/// A model call, with a panic turned into an error so the worker and its other sequences live on.
+///
+/// Only where panics unwind: a build with `panic = "abort"` (furnace's own release profile)
+/// stops the process instead. Where they do unwind, the model goes on serving after a panic,
+/// whatever state it was left in.
 fn guarded<T>(call: impl FnOnce() -> Result<T, BoxError>) -> Result<T, String> {
     match catch_unwind(AssertUnwindSafe(call)) {
         Ok(Ok(value)) => Ok(value),

@@ -188,6 +188,10 @@ pub enum Payload {
     Json(Arc<serde_json::Value>),
     Tensors(Arc<Vec<HostTensor>>),
     Command(Arc<Command>),
+    /// A request for an LLM to generate (feature `llm`): what the OpenAI routes send the
+    /// brain
+    #[cfg(feature = "llm")]
+    Prompt(Arc<crate::llm::GenerateRequest>),
 }
 
 impl Payload {
@@ -249,6 +253,8 @@ impl Payload {
             Self::Text(_) | Self::Bytes(_) => serde_json::from_slice(self.as_bytes()?).ok(),
             Self::Command(c) => serde_json::to_value(&**c).ok(),
             Self::None | Self::Tensors(_) => None,
+            #[cfg(feature = "llm")]
+            Self::Prompt(_) => None,
         }
     }
 
@@ -273,6 +279,8 @@ impl Payload {
                     })
                     .collect::<Vec<u8>>(),
             ),
+            #[cfg(feature = "llm")]
+            Self::Prompt(_) => Bytes::new(),
         }
     }
 
@@ -284,6 +292,8 @@ impl Payload {
             Self::Json(_) => "json",
             Self::Tensors(_) => "tensors",
             Self::Command(_) => "command",
+            #[cfg(feature = "llm")]
+            Self::Prompt(_) => "prompt",
         }
     }
 }
@@ -377,6 +387,15 @@ pub enum Answer {
     Tensors(Vec<HostTensor>),
     /// The chain failed and says why: the request's own error
     Failed(Box<crate::error::FurnaceError>),
+    /// An LLM's generation (feature `llm`): its events, which go straight from the engine to
+    /// whoever asked, or why the engine refused it
+    #[cfg(feature = "llm")]
+    Generation(
+        std::result::Result<
+            tokio::sync::mpsc::Receiver<crate::llm::Event>,
+            crate::llm::EngineError,
+        >,
+    ),
 }
 
 impl Answer {

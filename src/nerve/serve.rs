@@ -10,6 +10,10 @@
 //! forward pass, a request whose body is still arriving is announced so a batch about to start
 //! waits for it, and a lone request never waits. Otherwise the pathway is a reflex: the request
 //! runs its forward pass on a blocking thread of its own, as a hand-written server would.
+//!
+//! An LLM (feature `llm`) is the brain: the OpenAI routes stimulate its entrance `in:{llm}`,
+//! and its neuron `llm:{llm}` asks the engine to generate. The tokens do not hop from neuron to
+//! neuron: the engine's stream goes straight back to the route, which writes it to the client.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -153,6 +157,47 @@ impl Neuron for Served {
     }
 }
 
+/// An LLM as the brain: a generation request in, the engine's stream of events back
+#[cfg(feature = "llm")]
+struct Speaking {
+    name: String,
+    engine: Arc<dyn crate::llm::LlmEngine>,
+}
+
+#[cfg(feature = "llm")]
+impl Neuron for Speaking {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> NeuronKind {
+        NeuronKind::Brain
+    }
+
+    /// Asks the engine, which must not block (it is the route's thread), and answers with the
+    /// stream itself
+    fn stimulate(&self, mut signal: Signal, _cx: &Cx<'_>) -> Firing {
+        let request = match std::mem::take(&mut signal.payload) {
+            Payload::Prompt(request) => {
+                Arc::try_unwrap(request).unwrap_or_else(|shared| (*shared).clone())
+            }
+            other => {
+                signal.payload = other;
+                return Firing::Quiet;
+            }
+        };
+        signal.answer(Answer::Generation(self.engine.generate(request)));
+        Firing::Fire(Vec::new())
+    }
+
+    fn describe(&self) -> serde_json::Value {
+        serde_json::json!({
+            "engine": self.engine.name(),
+            "max_context": self.engine.max_context(),
+        })
+    }
+}
+
 /// A model to wire into the fabric
 pub(crate) struct ServedModel {
     pub name: String,
@@ -183,6 +228,9 @@ pub(crate) enum Refused {
 pub(crate) struct Serving {
     fabric: Fabric,
     routes: HashMap<String, Route>,
+    /// Each LLM's entrance
+    #[cfg(feature = "llm")]
+    llms: HashMap<String, NeuronId>,
 }
 
 impl Serving {
@@ -192,6 +240,7 @@ impl Serving {
     pub(crate) fn build(
         mut builder: FabricBuilder,
         models: Vec<ServedModel>,
+        #[cfg(feature = "llm")] llms: &[Arc<dyn crate::llm::LlmEngine>],
         batching: BatchConfig,
         capacity: usize,
     ) -> Self {
@@ -243,9 +292,78 @@ impl Serving {
                 },
             ));
         }
+        #[cfg(feature = "llm")]
+        let llms = llms
+            .iter()
+            .map(|engine| {
+                let name = engine.name().to_string();
+                let entrance = builder.neuron(
+                    Entrance {
+                        name: entrance_name(&name),
+                    },
+                    Mechanisms::NONE,
+                );
+                let brain = builder.neuron(
+                    Speaking {
+                        name: format!("llm:{name}"),
+                        engine: engine.clone(),
+                    },
+                    Mechanisms::NONE,
+                );
+                builder.reflex(entrance, brain, 1.0);
+                (name, entrance)
+            })
+            .collect();
         Self {
             fabric: builder.build(),
             routes: wired.into_iter().collect(),
+            #[cfg(feature = "llm")]
+            llms,
+        }
+    }
+
+    /// [`generate`](Self::generate) on a blocking thread: an engine renders the chat template
+    /// and tokenizes the prompt before it returns, milliseconds for a long prompt during which
+    /// a runtime worker would deliver no other stream's tokens
+    #[cfg(feature = "llm")]
+    pub(crate) async fn generate_off_runtime(
+        self: Arc<Self>,
+        name: String,
+        request: crate::llm::GenerateRequest,
+    ) -> std::result::Result<tokio::sync::mpsc::Receiver<crate::llm::Event>, crate::llm::EngineError>
+    {
+        tokio::task::spawn_blocking(move || self.generate(&name, request))
+            .await
+            .unwrap_or_else(|_| {
+                Err(crate::llm::EngineError::Failed(
+                    "the engine panicked".to_string(),
+                ))
+            })
+    }
+
+    /// Ask the LLM `name` to generate, through its pathway: the engine's stream of events, or
+    /// why it refused
+    #[cfg(feature = "llm")]
+    pub(crate) fn generate(
+        &self,
+        name: &str,
+        request: crate::llm::GenerateRequest,
+    ) -> std::result::Result<tokio::sync::mpsc::Receiver<crate::llm::Event>, crate::llm::EngineError>
+    {
+        let lost = || {
+            crate::llm::EngineError::Failed(format!("the generation for '{name}' got no answer"))
+        };
+        let Some(&entrance) = self.llms.get(name) else {
+            return Err(lost());
+        };
+        let (reply, mut receiver) = Reply::required();
+        let signal =
+            Signal::new(Feature::NONE, Payload::Prompt(Arc::new(request))).with_reply(reply);
+        // The chain is synchronous: the brain has answered when this returns
+        self.fabric.stimulate(entrance, signal);
+        match receiver.try_recv() {
+            Ok(Answer::Generation(result)) => result,
+            _ => Err(lost()),
         }
     }
 
@@ -297,6 +415,11 @@ impl Serving {
         match receiver.await {
             Ok(Answer::Tensors(outputs)) => Ok(Ok(outputs)),
             Ok(Answer::Failed(e)) => Ok(Err(*e)),
+            #[cfg(feature = "llm")]
+            Ok(Answer::Generation(_)) => {
+                error!("nerve: model '{model}' was answered with a generation");
+                Err(Refused::Lost)
+            }
             Ok(Answer::Http { .. }) => {
                 error!("nerve: model '{model}' was answered with an HTTP response");
                 Err(Refused::Lost)
@@ -410,6 +533,8 @@ mod tests {
                 batches: model.is_simple() || model.batches_named(),
                 source: Arc::new(move || source.clone()),
             }],
+            #[cfg(feature = "llm")]
+            &[],
             batching,
             1000,
         ))
@@ -780,6 +905,8 @@ mod tests {
                 batches: true,
                 source: Arc::new(move || source.clone()),
             }],
+            #[cfg(feature = "llm")]
+            &[],
             BatchConfig::default(),
             10,
         );

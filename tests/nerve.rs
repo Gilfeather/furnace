@@ -301,3 +301,52 @@ async fn a_server_may_serve_a_fabric_alone() {
     let (status, _) = get_json(&demo.app, "/readyz", "application/json").await;
     assert_eq!(status, StatusCode::OK);
 }
+
+/// Two receptors into one deliberative pathway ending in `Respond`: `/later` does not wait for
+/// the answer, `/now` does
+fn queued_answers() -> (Router, Effector) {
+    let mut b = Fabric::builder();
+    let later = b.receptor(Http::new("later", "/later").text(), Mechanisms::NONE);
+    let now = b.receptor(
+        Http::new("now", "/now")
+            .text()
+            .respond_within(Duration::from_secs(5)),
+        Mechanisms::NONE,
+    );
+    let answer = b.neuron(
+        FnNeuron::reflex("answer", |signal, _| {
+            let text = signal.payload.as_text().unwrap_or_default().to_string();
+            Firing::Fire(vec![signal.command(
+                "respond",
+                serde_json::json!({"status": 200, "body": format!("answered {text}")}),
+            )])
+        }),
+        Mechanisms::NONE,
+    );
+    let respond = Effector::new(Respond::new("respond"));
+    let id = b.neuron(respond.clone(), Mechanisms::NONE);
+    for receptor in [later, now] {
+        b.deliberative(receptor, answer, 1.0, Summation::default());
+    }
+    b.reflex(answer, id, 1.0);
+    (Server::new().nerve(b).router(), respond)
+}
+
+#[tokio::test]
+async fn answers_nobody_waits_for_do_not_open_the_breaker() {
+    let (app, respond) = queued_answers();
+    for i in 0..6 {
+        let (status, outcome, _) = post(&app, "/later", &format!("{i}")).await;
+        assert_eq!((status, outcome.as_str()), (StatusCode::ACCEPTED, "queued"));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while respond.metrics().acted < 6 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let metrics = respond.metrics();
+    assert_eq!((metrics.acted, metrics.failed), (6, 0));
+    // Six answers nobody waited for, and the next one waited for still arrives
+    let (status, _, body) = post(&app, "/now", "7").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from("answered 7"));
+}

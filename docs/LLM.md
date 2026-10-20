@@ -141,6 +141,15 @@ is complete, and gets a 503 when none is free. `Scheduled` also refuses requests
 queue (`SchedulerConfig::max_waiting`, 256 by default), and never runs more sequences than the
 model's `max_sequences`.
 
+A model that panics fails its own sequences with an error, and the worker goes on, but only
+where panics unwind. furnace's release profile sets `panic = "abort"`, so the `furnace` binary
+and the examples stop instead; a library user on the default profile keeps a model that may
+have been left half-updated.
+
+`request_timeout` bounds the LLM routes too: a whole answer that takes longer is a 504
+(`"code": "timeout"`), and a stream whose engine sends nothing for that long ends with an error
+payload and `[DONE]`. Either way the request is cancelled.
+
 ## Metrics
 
 `GET /metrics` has an `llm` entry per model in JSON, and these series in the Prometheus format,

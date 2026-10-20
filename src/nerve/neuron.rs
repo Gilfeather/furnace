@@ -150,7 +150,8 @@ pub struct Habituation {
     /// How much of the remaining way to full attenuation one repeat covers (0..1). With 0.5,
     /// the second occurrence of a feature arrives at half intensity, the third at a quarter.
     pub gain: f32,
-    /// Features remembered at once; the least recently seen in a feature's set is replaced
+    /// Features remembered at once, rounded up to a multiple of 4 (a set's ways); the least
+    /// recently seen in a feature's set is replaced
     pub capacity: usize,
 }
 
@@ -177,6 +178,7 @@ impl Habituation {
         self
     }
 
+    /// Remember this many features at once, rounded up to a multiple of 4; at least 4
     pub fn capacity(mut self, capacity: usize) -> Self {
         self.capacity = capacity.max(WAYS);
         self
@@ -325,7 +327,8 @@ pub(crate) struct Gate {
     threshold: f32,
     table: Option<Mutex<Table>>,
     refractory_nanos: u64,
-    /// Nanoseconds since the epoch of the last firing; 0 before any
+    /// Nanoseconds since the epoch of the last firing, or of the signal now being admitted;
+    /// 0 before any
     last_fired: AtomicU64,
 }
 
@@ -362,18 +365,39 @@ impl Gate {
             }
         }
         if self.refractory_nanos > 0 {
-            let last = self.last_fired.load(Ordering::Relaxed);
-            if last != 0 && now.saturating_sub(last) < self.refractory_nanos {
-                return Err(Quiet::Refractory);
+            // The admitted signal takes the period at once, so two signals arriving together
+            // cannot both pass; signals of the same instant are one firing (a summed batch)
+            let claim = now.max(1);
+            let mut last = self.last_fired.load(Ordering::Acquire);
+            while last != claim {
+                if last != 0 && now.saturating_sub(last) < self.refractory_nanos {
+                    return Err(Quiet::Refractory);
+                }
+                match self.last_fired.compare_exchange_weak(
+                    last,
+                    claim,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(current) => last = current,
+                }
             }
         }
         Ok(())
     }
 
-    /// The neuron fired `now`
-    pub(crate) fn fired(&self, now: u64) {
+    /// The neuron admitted at `now` stayed quiet: it did not fire, so it is not refractory.
+    /// Whatever fired before was a full period ago (or the signal would not have been
+    /// admitted), so forgetting it changes nothing.
+    pub(crate) fn stayed_quiet(&self, now: u64) {
         if self.refractory_nanos > 0 {
-            self.last_fired.store(now.max(1), Ordering::Relaxed);
+            let _ = self.last_fired.compare_exchange(
+                now.max(1),
+                0,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            );
         }
     }
 
@@ -484,14 +508,40 @@ mod tests {
         let gate = Gate::new(Mechanisms::NONE.refractory(Duration::from_millis(10)));
         let mut s = signal(b"a");
         assert_eq!(gate.admit(&mut s, SECOND), Ok(()));
-        gate.fired(SECOND);
+        // Admitting took the period: a signal right behind it is refused even before the
+        // neuron has fired, so two signals racing in cannot both pass
         let mut during = signal(b"b");
         assert_eq!(
             gate.admit(&mut during, SECOND + 5_000_000),
             Err(Quiet::Refractory)
         );
+        // Signals of the same instant are one firing, as a summed batch is
+        let mut same = signal(b"s");
+        assert_eq!(gate.admit(&mut same, SECOND), Ok(()));
         let mut after = signal(b"c");
         assert_eq!(gate.admit(&mut after, SECOND + 10_000_000), Ok(()));
+        // A neuron that stayed quiet did not fire, and is not refractory
+        gate.stayed_quiet(SECOND + 10_000_000);
+        let mut next = signal(b"d");
+        assert_eq!(gate.admit(&mut next, SECOND + 11_000_000), Ok(()));
+    }
+
+    #[test]
+    fn racing_signals_pass_a_refractory_gate_once() {
+        let gate = Gate::new(Mechanisms::NONE.refractory(Duration::from_secs(60)));
+        let passed = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for i in 0..8u64 {
+                let (gate, passed) = (&gate, &passed);
+                scope.spawn(move || {
+                    let mut s = signal(b"x");
+                    if gate.admit(&mut s, SECOND + i).is_ok() {
+                        passed.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        assert_eq!(passed.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -500,7 +550,6 @@ mod tests {
         for _ in 0..3 {
             let mut s = signal(b"same").with_intensity(0.0);
             assert_eq!(gate.admit(&mut s, SECOND), Ok(()));
-            gate.fired(SECOND);
         }
     }
 }

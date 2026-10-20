@@ -145,18 +145,25 @@ fn answer_response(answer: Answer) -> Response {
             };
             (status, error.to_string()).into_response()
         }
+        #[cfg(feature = "llm")]
+        Answer::Generation(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a generation is answered on the OpenAI routes, not here",
+        )
+            .into_response(),
     }
 }
 
-/// `quiet:habituation`, `queued`, `acted:2`, `done`
+/// `quiet:habituation`, `queued`, `acted:2`, `done`. Only the receptor's own mechanisms make
+/// a request quiet; a neuron further on that stays quiet ends the signal's way, and the
+/// request is `done`.
 fn describe_outcome(outcome: &Outcome) -> HeaderValue {
     if outcome.is_quiet() {
         return HeaderValue::from_static(match outcome.quiet {
             Some((_, Quiet::Threshold)) => "quiet:threshold",
             Some((_, Quiet::Habituation)) => "quiet:habituation",
             Some((_, Quiet::Refractory)) => "quiet:refractory",
-            Some((_, Quiet::NotInterested)) => "quiet:not_interested",
-            None => "quiet",
+            Some((_, Quiet::NotInterested)) | None => "quiet",
         });
     }
     match (

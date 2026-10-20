@@ -744,3 +744,90 @@ async fn api_keys_guard_the_llm_routes() {
         .insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
     assert_eq!(send(&app, request).await.status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn an_answer_past_the_request_timeout_is_a_504() {
+    let engine = MockEngine::new("mock", &["a"; 3]).piece_delay(Duration::from_secs(60));
+    let live = engine.live();
+    let app = Server::new()
+        .configure(|c| c.request_timeout = Some(Duration::from_millis(50)))
+        .llm(engine)
+        .router();
+    let answer = send(&app, post("/v1/chat/completions", &chat(json!({})))).await;
+    let error = assert_openai_error(&answer, StatusCode::GATEWAY_TIMEOUT, "server_error");
+    assert_eq!(error["code"], "timeout");
+    // Giving up cancelled the generation
+    wait_for(|| live.get() == 0).await;
+}
+
+#[tokio::test]
+async fn a_stream_that_stalls_ends_with_an_error_and_done() {
+    let engine = MockEngine::new("mock", &["a"; 3]).piece_delay(Duration::from_secs(60));
+    let live = engine.live();
+    let app = Server::new()
+        .configure(|c| c.request_timeout = Some(Duration::from_millis(50)))
+        .llm(engine)
+        .router();
+    let answer = send(
+        &app,
+        post("/v1/chat/completions", &chat(json!({"stream": true}))),
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::OK);
+    let chunks = answer.chunks();
+    // The role, the first piece, then the error in place of the second
+    assert_eq!(chunks[1]["choices"][0]["delta"]["content"], "a");
+    let error = &chunks.last().unwrap()["error"];
+    assert_eq!(error["code"], "timeout", "{error}");
+    wait_for(|| live.get() == 0).await;
+}
+
+/// Starts, says one word, then fails
+#[derive(Debug)]
+struct FailsMidway;
+
+impl LlmEngine for FailsMidway {
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    fn max_context(&self) -> usize {
+        64
+    }
+
+    fn generate(
+        &self,
+        _request: GenerateRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<Event>, furnace::llm::EngineError> {
+        let (events, receiver) = tokio::sync::mpsc::channel(4);
+        for event in [
+            Event::Started { prompt_tokens: 1 },
+            Event::Text("half".to_string()),
+            Event::Error(furnace::llm::EngineError::Failed(
+                "the model broke".to_string(),
+            )),
+        ] {
+            events.try_send(event).unwrap();
+        }
+        Ok(receiver)
+    }
+}
+
+#[tokio::test]
+async fn an_error_mid_stream_is_a_payload_then_done() {
+    let app = Server::new().llm(FailsMidway).router();
+    let answer = send(
+        &app,
+        post("/v1/chat/completions", &chat(json!({"stream": true}))),
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::OK);
+    let chunks = answer.chunks();
+    assert_eq!(chunks[1]["choices"][0]["delta"]["content"], "half");
+    let error = &chunks.last().unwrap()["error"];
+    assert_eq!(error["message"], "the model broke", "{error}");
+    assert_eq!(error["type"], "server_error", "{error}");
+    // Without streaming, the same failure is a 500
+    let answer = send(&app, post("/v1/chat/completions", &chat(json!({})))).await;
+    assert_openai_error(&answer, StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+}

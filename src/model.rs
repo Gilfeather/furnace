@@ -703,7 +703,15 @@ impl Model {
                     )));
                 }
             }
-            let item = tensor.shape.get(1..).unwrap_or_default();
+            // The batch dimension comes first: a rank-0 tensor has none, and joining or splitting
+            // it would index past its shape
+            if tensor.shape.is_empty() {
+                return Err(invalid(format!(
+                    "'{name}' has no batch dimension: its shape is [], the model takes {:?}",
+                    spec.v2_shape()
+                )));
+            }
+            let item = &tensor.shape[1..];
             let fits = item.len() == spec.shape.len()
                 && item
                     .iter()
@@ -904,7 +912,13 @@ impl Model {
                         }
                     }
                 }
-                Err(message) => {
+                // A lone request keeps its error; a shared failure is reported to each
+                Err(e) if valid.len() == 1 => {
+                    stats.record_error();
+                    results[valid[0].0] = Some(Err(e));
+                }
+                Err(e) => {
+                    let message = e.to_string();
                     for (i, _) in &valid {
                         stats.record_error();
                         results[*i] =
@@ -989,11 +1003,7 @@ impl Model {
     /// guessing it, and is skipped (`Ok(None)`).
     pub fn warm_up(&self) -> std::result::Result<Option<std::time::Duration>, String> {
         let start = Instant::now();
-        if self.simple {
-            let input_size: usize = self.info.input_spec.shape.iter().product();
-            self.forward(vec![0.0; input_size], 1)?;
-            return Ok(Some(start.elapsed()));
-        }
+        // A graph with a fixed batch size runs only that many items at once
         let batch = self.inner.fixed_batch().unwrap_or(1);
         let Some(inputs) = self
             .inputs
@@ -1017,28 +1027,27 @@ impl Model {
         Ok(Some(start.elapsed()))
     }
 
-    /// One forward pass over validated input; the error is the failure message
-    fn forward(&self, input: Vec<f32>, batch_size: usize) -> std::result::Result<Vec<f32>, String> {
+    /// One forward pass over validated input
+    fn forward(&self, input: Vec<f32>, batch_size: usize) -> Result<Vec<f32>> {
         let mut shape = vec![batch_size];
         shape.extend_from_slice(&self.info.input_spec.shape);
         let input = HostTensor {
             shape,
             values: Values::F32(input),
         };
-        let outputs = self
-            .run_in_chunks(vec![input], batch_size)
-            .map_err(|e| e.to_string())?;
+        let outputs = self.run_in_chunks(vec![input], batch_size)?;
         let output_size: usize = self.info.output_spec.shape.iter().product();
         match outputs.into_iter().next() {
             Some(HostTensor {
                 values: Values::F32(values),
                 ..
             }) if values.len() == batch_size * output_size => Ok(values),
-            Some(output) => Err(format!(
+            Some(output) => Err(ModelError::InferenceFailed(format!(
                 "model returned shape {:?}, expected [{batch_size}, ..{:?}]",
                 output.shape, self.info.output_spec.shape
-            )),
-            None => Err("model returned no output".to_string()),
+            ))
+            .into()),
+            None => Err(ModelError::InferenceFailed("model returned no output".to_string()).into()),
         }
     }
 
@@ -1292,6 +1301,66 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("runs batches of 2"), "{err}");
+        // Warming up runs the batch the graph was built for, not one item
+        assert!(model.warm_up().unwrap().is_some());
+    }
+
+    /// A simple model exported for batches of two only
+    #[derive(Debug)]
+    struct PairsOnly(DummyModel);
+
+    impl BurnModel for PairsOnly {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        fn backend(&self) -> BackendKind {
+            self.0.backend()
+        }
+        fn inputs(&self) -> Vec<IoSpec> {
+            self.0.inputs()
+        }
+        fn outputs(&self) -> Vec<IoSpec> {
+            self.0.outputs()
+        }
+        fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
+            self.0.run(inputs)
+        }
+        fn fixed_batch(&self) -> Option<usize> {
+            Some(2)
+        }
+    }
+
+    #[test]
+    fn a_batch_the_graph_cannot_run_is_the_clients_error() {
+        let dummy = DummyModel::new("pairs".to_string(), vec![3], vec![2]);
+        let model = Model::new(Box::new(PairsOnly(dummy)), "dummy", 0);
+        let err = model
+            .predict_many(vec![FlatInput {
+                data: vec![1.0; 9],
+                batch_size: 3,
+            }])
+            .pop()
+            .unwrap()
+            .unwrap_err();
+        assert!(err.is_client_error(), "{err:?}");
+        assert!(!err.to_string().contains("Inference failed"), "{err}");
+        assert!(err.to_string().contains("runs batches of 2"), "{err}");
+        let pairs = model.predict_many(vec![FlatInput {
+            data: vec![1.0; 12],
+            batch_size: 4,
+        }]);
+        assert_eq!(pairs[0].as_ref().unwrap().len(), 8);
+        assert!(model.warm_up().unwrap().is_some());
+    }
+
+    #[test]
+    fn an_input_without_a_batch_dimension_is_rejected() {
+        let model = Model::new(Box::new(DummyTensorsModel::new(None)), "dummy", 0);
+        let mut inputs = tensors(vec![1, 2, 3, 4], vec![1.0]);
+        inputs[1].shape = vec![];
+        assert_eq!(inputs[1].batch(), 0);
+        let err = model.infer(inputs).unwrap_err().to_string();
+        assert!(err.contains("'scale' has no batch dimension"), "{err}");
     }
 
     #[test]

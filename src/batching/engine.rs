@@ -1,5 +1,5 @@
-//! The batching engine: the one algorithm behind the server's [`Batcher`](super::Batcher)
-//! and the nervous system's deliberative pathways.
+//! The batching engine: the one algorithm behind the nervous system's deliberative pathways,
+//! the served models' among them.
 //!
 //! Items queue to a few worker threads, each running one batch at a time. While some worker
 //! is idle, every item gets a batch of its own, started at once. Once all workers are busy,
@@ -9,7 +9,8 @@
 //! the first item was queued: a server waits only while an announced item is still on its
 //! way in (its body is being received or decoded), a deliberative pathway waits out its
 //! summation window. Items nobody wants any more (their client gave up) are skipped, and a
-//! batch that panics loses only its own items.
+//! batch that panics loses only its own items, where panics unwind: with `panic = "abort"`
+//! (furnace's own release profile) the process stops.
 //!
 //! What a batch is made of, how heavy each item is, how long the window is and what to do
 //! with the batch are the [`Batching`]'s: the engine knows nothing about models, replies or

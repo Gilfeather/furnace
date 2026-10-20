@@ -13,7 +13,7 @@
 //! - **Reflex pathways** are direct calls on the firing thread, with no queue and no
 //!   scheduler: microseconds from stimulus to effector.
 //! - **Deliberative pathways** queue to a worker that sums a window of signals into one
-//!   firing of the [`Brain`] (temporal summation).
+//!   firing of a brain ([`NeuronKind::Brain`]) (temporal summation).
 //! - **Timing selects the pathway**: a pathway whose measured p99 does not fit in the
 //!   signal's remaining deadline is not eligible; among the eligible, the heaviest weight
 //!   wins. No classifier decides "is this urgent".
