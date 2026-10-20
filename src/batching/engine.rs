@@ -395,24 +395,39 @@ mod tests {
 
     #[test]
     fn waits_out_the_window_only_when_told_to() {
+        // Told to, the worker that took the first item waits for the rest of the batch: with
+        // a window of an hour, only a full batch ends the wait
         let s = setup(
             Config {
                 waits_unannounced: true,
                 ..ONE_WORKER
             },
-            Duration::from_millis(100),
+            Duration::from_secs(3600),
         );
         s.engine.submit(None, 1).unwrap();
-        std::thread::sleep(Duration::from_millis(10));
-        s.engine.submit(None, 2).unwrap();
-        assert_eq!(s.batches.recv().unwrap(), vec![1, 2]);
+        wait_until_taken(&s.engine);
+        for i in 2..=4 {
+            s.engine.submit(None, i).unwrap();
+        }
+        assert_eq!(s.batches.recv().unwrap(), vec![1, 2, 3, 4]);
 
-        let s = setup(ONE_WORKER, Duration::from_millis(100));
+        // Otherwise it runs what it has at once, and the next item makes a batch of its own
+        let s = setup(ONE_WORKER, Duration::from_secs(3600));
+        let held = s.hold.lock().unwrap();
         s.engine.submit(None, 1).unwrap();
-        std::thread::sleep(Duration::from_millis(10));
-        s.engine.submit(None, 2).unwrap();
         assert_eq!(s.batches.recv().unwrap(), vec![1]);
+        s.engine.submit(None, 2).unwrap();
+        drop(held);
         assert_eq!(s.batches.recv().unwrap(), vec![2]);
+    }
+
+    /// Wait until a worker has taken what was submitted; fails the test after 10 seconds
+    fn wait_until_taken(engine: &Engine<u32>) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while engine.waiting() > 0 {
+            assert!(Instant::now() < deadline, "not taken after 10 s");
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     #[test]

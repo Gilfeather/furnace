@@ -165,4 +165,49 @@ mod tests {
         assert_eq!((m.acted, m.failed), (1, 1));
         drop(fabric);
     }
+
+    /// Run `process` once for `command` and `signal`, as the effector's loop would
+    async fn run(process: &Process, command: &Command, signal: &Signal) -> Result<(), ActError> {
+        match process.act(command, signal) {
+            Action::Done(result) => result,
+            Action::Pending(future) => future.await,
+        }
+    }
+
+    #[tokio::test]
+    async fn stdin_payload_feeds_the_signal_and_the_command_s_stdin_wins() {
+        // Succeeds only if its input contains `hello`
+        let process = if cfg!(windows) {
+            Process::new("check", "findstr").args(&["hello"])
+        } else {
+            Process::new("check", "grep").args(&["-q", "hello"])
+        }
+        .stdin_payload();
+        let signal = |text: &str| {
+            Signal::new(
+                crate::nerve::signal::Feature::NONE,
+                crate::nerve::signal::Payload::bytes(text.as_bytes().to_vec()),
+            )
+        };
+        let plain = Command::new("check", serde_json::Value::Null);
+        assert_eq!(run(&process, &plain, &signal("hello\n")).await, Ok(()));
+        let err = run(&process, &plain, &signal("goodbye\n"))
+            .await
+            .unwrap_err();
+        assert!(!err.retryable(), "{err}");
+        // A command that gives its own stdin is fed that, not the payload
+        let own = Command::new("check", serde_json::json!({"stdin": "hello\n"}));
+        assert_eq!(run(&process, &own, &signal("goodbye\n")).await, Ok(()));
+        // Without stdin_payload the process gets no input
+        let plain_process = if cfg!(windows) {
+            Process::new("check", "findstr").args(&["hello"])
+        } else {
+            Process::new("check", "grep").args(&["-q", "hello"])
+        };
+        assert!(
+            run(&plain_process, &plain, &signal("hello\n"))
+                .await
+                .is_err()
+        );
+    }
 }

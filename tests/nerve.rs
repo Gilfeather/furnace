@@ -3,13 +3,13 @@
 //! metrics.
 
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode};
 use furnace::Server;
-use furnace::nerve::effector::{ChannelOut, Delivery, Effector, FileAppend, Respond, SseOut};
+use furnace::nerve::effector::{ChannelOut, Delivery, Effector, Respond, SseOut};
 use furnace::nerve::receptor::Http;
 use furnace::nerve::{
     Fabric, Firing, FnNeuron, Habituation, Mechanisms, NeuronKind, OUTCOME_HEADER, Summation,
@@ -20,16 +20,20 @@ use tower::ServiceExt;
 struct Demo {
     app: Router,
     alarms: mpsc::Receiver<Delivery>,
-    journal: std::path::PathBuf,
-    _dir: tempfile::TempDir,
+    journal: mpsc::Receiver<Delivery>,
+}
+
+/// The next command `channel` carries; fails the test after 10 seconds
+fn next(channel: &mpsc::Receiver<Delivery>) -> Delivery {
+    channel
+        .recv_timeout(Duration::from_secs(10))
+        .expect("a command within 10 s")
 }
 
 /// POST /events → habituating receptor → reflex classifier → `ALERT` lines: the alarm
 /// channel and the response, at once; other lines: the brain, which journals them and
 /// pushes a command to SSE subscribers
 fn demo() -> Demo {
-    let dir = tempfile::tempdir().unwrap();
-    let journal = dir.path().join("journal.log");
     let mut b = Fabric::builder();
     let events = b.receptor(
         Http::new("events", "/events").text(),
@@ -71,10 +75,8 @@ fn demo() -> Demo {
     let (alarm, alarms) = ChannelOut::new("alarm", 16);
     let alarm = b.neuron(Effector::new(alarm), Mechanisms::NONE);
     b.neuron(Effector::new(Respond::new("respond")), Mechanisms::NONE);
-    b.neuron(
-        Effector::new(FileAppend::new("journal", &journal)),
-        Mechanisms::NONE,
-    );
+    let (journal, journal_lines) = ChannelOut::new("journal", 16);
+    b.neuron(Effector::new(journal), Mechanisms::NONE);
     b.neuron(Effector::new(SseOut::new("push", 16)), Mechanisms::NONE);
     b.reflex(events, classify, 1.0);
     b.reflex(classify, alarm, 1.0);
@@ -88,8 +90,7 @@ fn demo() -> Demo {
     Demo {
         app,
         alarms,
-        journal,
-        _dir: dir,
+        journal: journal_lines,
     }
 }
 
@@ -186,15 +187,9 @@ async fn novel_signals_go_to_the_brain_and_commands_reach_effectors() {
     assert_eq!(event["effector"], "push");
     assert_eq!(event["args"]["text"], "the door opened");
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let journal = std::fs::read_to_string(&demo.journal).unwrap_or_default();
-        if journal.contains("seen: the door opened") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "journal: {journal:?}");
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    let journal = next(&demo.journal);
+    assert_eq!(journal.command.args["line"], "seen: the door opened");
+    assert!(journal.signal.trace.reached_brain());
 
     // Unknown effectors in a chain are not routes
     let request = Request::get("/nerve/effectors/nobody/events")
@@ -252,18 +247,13 @@ async fn nerve_and_metrics_describe_the_fabric() {
         "{arcs:?}"
     );
 
-    // The brain fires on its worker, a moment after the request was accepted
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let metrics: serde_json::Value = loop {
-        let (status, body) = get_json(&demo.app, "/metrics", "application/json").await;
-        assert_eq!(status, StatusCode::OK);
-        let metrics: serde_json::Value = serde_json::from_str(&body).unwrap();
-        if metrics["nerve"]["reached_brain"] == 1 {
-            break metrics;
-        }
-        assert!(Instant::now() < deadline, "{}", metrics["nerve"]);
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    };
+    // The brain fires on its worker, a moment after the request was accepted: once its
+    // command is journaled, it has been counted
+    next(&demo.journal);
+    let (status, body) = get_json(&demo.app, "/metrics", "application/json").await;
+    assert_eq!(status, StatusCode::OK);
+    let metrics: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(metrics["nerve"]["reached_brain"], 1);
     let nerve = &metrics["nerve"];
     assert_eq!(nerve["received"], 3);
     assert!((nerve["brain_fraction"].as_f64().unwrap() - 1.0 / 3.0).abs() < 1e-9);
@@ -304,8 +294,9 @@ async fn a_server_may_serve_a_fabric_alone() {
 }
 
 /// Two receptors into one deliberative pathway ending in `Respond`: `/later` does not wait for
-/// the answer, `/now` does
-fn queued_answers() -> (Router, Effector) {
+/// the answer, `/now` does. Every answer is also announced on the channel returned, after
+/// `Respond` has acted on it.
+fn queued_answers() -> (Router, Effector, mpsc::Receiver<Delivery>) {
     let mut b = Fabric::builder();
     let later = b.receptor(Http::new("later", "/later").text(), Mechanisms::NONE);
     let now = b.receptor(
@@ -317,10 +308,13 @@ fn queued_answers() -> (Router, Effector) {
     let answer = b.neuron(
         FnNeuron::reflex("answer", |signal, _| {
             let text = signal.payload.as_text().unwrap_or_default().to_string();
-            Firing::Fire(vec![signal.command(
-                "respond",
-                serde_json::json!({"status": 200, "body": format!("answered {text}")}),
-            )])
+            Firing::Fire(vec![
+                signal.command(
+                    "respond",
+                    serde_json::json!({"status": 200, "body": format!("answered {text}")}),
+                ),
+                signal.command("answered", serde_json::json!(text)),
+            ])
         }),
         Mechanisms::NONE,
     );
@@ -329,20 +323,21 @@ fn queued_answers() -> (Router, Effector) {
     for receptor in [later, now] {
         b.deliberative(receptor, answer, 1.0, Summation::default());
     }
-    b.reflex(answer, id, 1.0);
-    (Server::new().nerve(b).router().unwrap(), respond)
+    let (answered, answers) = ChannelOut::new("answered", 16);
+    let answered = b.neuron(Effector::new(answered), Mechanisms::NONE);
+    b.reflex(answer, id, 1.0).reflex(answer, answered, 1.0);
+    (Server::new().nerve(b).router().unwrap(), respond, answers)
 }
 
 #[tokio::test]
 async fn answers_nobody_waits_for_do_not_open_the_breaker() {
-    let (app, respond) = queued_answers();
+    let (app, respond, answers) = queued_answers();
     for i in 0..6 {
         let (status, outcome, _) = post(&app, "/later", &format!("{i}")).await;
         assert_eq!((status, outcome.as_str()), (StatusCode::ACCEPTED, "queued"));
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while respond.metrics().acted < 6 && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(5)).await;
+    for _ in 0..6 {
+        next(&answers);
     }
     let metrics = respond.metrics();
     assert_eq!((metrics.acted, metrics.failed), (6, 0));
@@ -350,4 +345,51 @@ async fn answers_nobody_waits_for_do_not_open_the_breaker() {
     let (status, _, body) = post(&app, "/now", "7").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, Bytes::from("answered 7"));
+}
+
+#[tokio::test]
+async fn an_answer_later_than_respond_within_is_not_waited_for() {
+    let mut b = Fabric::builder();
+    let soon = b.receptor(
+        Http::new("soon", "/soon")
+            .text()
+            .respond_within(Duration::from_millis(1)),
+        Mechanisms::NONE,
+    );
+    // The answer is held until the test lets it go, long after the request gave up waiting
+    let (release, released) = mpsc::channel::<()>();
+    let released = std::sync::Mutex::new(released);
+    let answer = b.neuron(
+        FnNeuron::reflex("answer", move |signal, _| {
+            released
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .expect("released within 10 s");
+            Firing::Fire(vec![
+                signal.command(
+                    "respond",
+                    serde_json::json!({"status": 200, "body": "late"}),
+                ),
+                signal.command("answered", serde_json::Value::Null),
+            ])
+        }),
+        Mechanisms::NONE,
+    );
+    let respond = Effector::new(Respond::new("respond"));
+    let id = b.neuron(respond.clone(), Mechanisms::NONE);
+    let (answered, answers) = ChannelOut::new("answered", 16);
+    let answered = b.neuron(Effector::new(answered), Mechanisms::NONE);
+    b.deliberative(soon, answer, 1.0, Summation::default());
+    b.reflex(answer, id, 1.0).reflex(answer, answered, 1.0);
+    let app = Server::new().nerve(b).router().unwrap();
+
+    let (status, outcome, body) = post(&app, "/soon", "x").await;
+    assert_eq!((status, outcome.as_str()), (StatusCode::ACCEPTED, "queued"));
+    assert!(body.is_empty());
+    // The late answer goes to nobody, and counts as acted, not failed
+    release.send(()).unwrap();
+    next(&answers);
+    let metrics = respond.metrics();
+    assert_eq!((metrics.acted, metrics.failed), (1, 0));
 }

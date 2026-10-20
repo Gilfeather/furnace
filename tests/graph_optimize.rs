@@ -3,7 +3,7 @@
 #[path = "../build/optimize.rs"]
 mod optimize;
 
-use onnx_ir::{AttributeProto, ModelProto, NodeProto, TensorProto};
+use onnx_ir::{AttributeProto, ModelProto, NodeProto, TensorProto, ValueInfoProto};
 use optimize::{floats, fold_conv_batchnorm};
 
 const FLOAT: i32 = 1;
@@ -182,4 +182,167 @@ fn keeps_batchnorm_not_preceded_by_conv() {
     let report = fold_conv_batchnorm(&mut model);
     assert_eq!(report.folded, 0);
     assert_eq!(model.graph.node.len(), 1);
+}
+
+fn bn_mut(model: &mut ModelProto) -> &mut NodeProto {
+    model
+        .graph
+        .mut_or_insert_default()
+        .node
+        .iter_mut()
+        .find(|n| n.op_type == "BatchNormalization")
+        .unwrap()
+}
+
+fn value(name: &str) -> ValueInfoProto {
+    let mut v = ValueInfoProto::new();
+    v.name = name.to_string();
+    v
+}
+
+/// The branches of planning a fold, one row each: what is changed in the Conv -> BN model
+/// with a bias, and the reason the fold is refused (`None`: it folds)
+#[test]
+fn every_reason_to_keep_a_batchnorm() {
+    type Edit = fn(&mut ModelProto);
+    let cases: [(&str, Edit, Option<&str>); 9] = [
+        ("as built", |_| {}, None),
+        (
+            "a BN parameter read by another node",
+            |m| {
+                let graph = m.graph.mut_or_insert_default();
+                graph
+                    .node
+                    .push(node("Add", &["gamma", "gamma"], &["twice"]));
+            },
+            Some("'gamma' is read by 3 nodes"),
+        ),
+        (
+            "the Conv output is a graph output",
+            |m| {
+                m.graph
+                    .mut_or_insert_default()
+                    .output
+                    .push(value("conv_out"))
+            },
+            Some("Conv output is used elsewhere"),
+        ),
+        (
+            "training-mode outputs",
+            |m| bn_mut(m).output.push("running_mean".to_string()),
+            Some("training-mode outputs are used"),
+        ),
+        (
+            "a missing BN input",
+            |m| {
+                bn_mut(m).input.pop();
+            },
+            Some("expected 5 inputs, found 4"),
+        ),
+        (
+            "a weight not a multiple of its output channels",
+            |m| {
+                let graph = m.graph.mut_or_insert_default();
+                let w = graph
+                    .initializer
+                    .iter_mut()
+                    .find(|t| t.name == "w")
+                    .unwrap();
+                w.float_data = vec![0.2, -1.0, 0.7];
+            },
+            Some("Conv weight size is not a multiple of its output channels"),
+        ),
+        (
+            "a BN parameter of the wrong length",
+            |m| {
+                let graph = m.graph.mut_or_insert_default();
+                let var = graph
+                    .initializer
+                    .iter_mut()
+                    .find(|t| t.name == "var")
+                    .unwrap();
+                var.float_data = vec![1.0];
+            },
+            Some("'var' has 1 values for 2 output channels"),
+        ),
+        (
+            "a BN parameter that is not an initializer",
+            |m| {
+                let graph = m.graph.mut_or_insert_default();
+                graph.initializer.retain(|t| t.name != "mean");
+            },
+            Some("'mean' is not an initializer"),
+        ),
+        (
+            "a bias shared with another Conv",
+            |m| {
+                let graph = m.graph.mut_or_insert_default();
+                graph.node.push(node("Conv", &["x", "w2", "b"], &["other"]));
+            },
+            Some("'b' is read by 2 nodes"),
+        ),
+    ];
+    for (name, edit, refused) in cases {
+        let mut model = conv_bn_model(true);
+        edit(&mut model);
+        let report = fold_conv_batchnorm(&mut model);
+        match refused {
+            None => assert_eq!((report.folded, report.skipped.len()), (1, 0), "{name}"),
+            Some(reason) => {
+                assert_eq!(report.folded, 0, "{name}");
+                assert_eq!(
+                    report.skipped,
+                    [("BatchNormalization_y".to_string(), reason.to_string())],
+                    "{name}"
+                );
+                // Left as it was
+                assert!(
+                    model
+                        .graph
+                        .node
+                        .iter()
+                        .any(|n| n.op_type == "BatchNormalization"),
+                    "{name}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn epsilon_defaults_to_1e_5() {
+    let mut model = conv_bn_model(true);
+    bn_mut(&mut model).attribute.clear();
+    assert_eq!(fold_conv_batchnorm(&mut model).folded, 1);
+    let b = floats(init(&model, "b")).unwrap();
+    for (c, &b) in b.iter().enumerate() {
+        let expected = (B[c] - MEAN[c]) * GAMMA[c] / (VAR[c] + 1e-5).sqrt() + BETA[c];
+        assert!((b - expected).abs() < 1e-6, "c={c}: {b} != {expected}");
+    }
+}
+
+#[test]
+fn folding_prunes_what_nothing_reads_any_more() {
+    let mut model = conv_bn_model(true);
+    let graph = model.graph.mut_or_insert_default();
+    // An IR < 4 model lists its initializers as inputs too; shapes are recorded for both
+    // the intermediate Conv output and the graph output
+    for name in ["x", "w", "b", "gamma", "beta", "mean", "var"] {
+        graph.input.push(value(name));
+    }
+    graph.value_info.push(value("conv_out"));
+    graph.value_info.push(value("y"));
+    graph.output.push(value("y"));
+
+    assert_eq!(fold_conv_batchnorm(&mut model).folded, 1);
+    let graph = &model.graph;
+    let names = |values: &[ValueInfoProto]| -> Vec<String> {
+        values.iter().map(|v| v.name.clone()).collect()
+    };
+    // With a bias of its own, the Conv no longer needs beta either
+    assert_eq!(names(&graph.input), ["x", "w", "b"]);
+    let inits: Vec<&str> = graph.initializer.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(inits, ["w", "b"]);
+    assert_eq!(names(&graph.value_info), ["y"]);
+    assert_eq!(graph.node[0].output, ["y"]);
 }

@@ -1137,12 +1137,14 @@ mod tests {
         b.deliberative(r, bid, 1.0, Summation::default().window(Duration::ZERO));
         let fabric = b.build().unwrap();
 
+        let mut queued = 0;
         for _ in 0..10 {
-            fabric.stimulate(r, signal(b"same"));
+            queued += fabric.stimulate(r, signal(b"same")).queued;
         }
-        fabric.stimulate(r, signal(b"new"));
+        queued += fabric.stimulate(r, signal(b"new")).queued;
+        // Only two were queued, so no more than two can reach the brain
+        assert_eq!(queued, 2);
         brain.wait_for(2);
-        std::thread::sleep(Duration::from_millis(20));
         assert_eq!(brain.hits(), 2);
         assert_eq!(brain.queued.load(Ordering::SeqCst), 2);
         let c = &fabric.0.cells[r.index()].counters;
@@ -1176,15 +1178,61 @@ mod tests {
         );
         assert_eq!((fast.hits(), slow.hits()), (1, 1));
         assert_eq!(fabric.pathways()[1].ineligible.load(Ordering::SeqCst), 1);
-        // A deadline nothing can meet goes nowhere
+        // A deadline already past goes nowhere
         let outcome = fabric.stimulate(
             r,
-            signal(b"c").with_urgency(super::super::signal::Urgency::within(
-                Duration::from_micros(1),
-            )),
+            signal(b"c").with_urgency(super::super::signal::Urgency::at(Instant::now())),
         );
-        std::thread::sleep(Duration::from_micros(5));
-        assert_eq!(outcome.no_pathway + usize::from(fast.hits() == 2), 1);
+        assert_eq!(outcome.no_pathway, 1);
+        assert_eq!((fast.hits(), slow.hits()), (1, 1));
+    }
+
+    #[test]
+    fn a_pathway_fits_a_deadline_its_p99_equals() {
+        let mut b = Fabric::builder();
+        let r = b.neuron(pass("in"), Mechanisms::NONE);
+        let e = b.add(Sink::new("act", NeuronKind::Effector), Mechanisms::NONE);
+        b.reflex(r, e, 1.0);
+        let fabric = b.build().unwrap();
+        let pathway = &fabric.pathways()[0];
+        // Unmeasured, it fits anything
+        assert!(pathway.fits(Some(Duration::ZERO)));
+        fabric.seed_latency(0, Duration::from_millis(50));
+        assert_eq!(pathway.latency().p99(), Some(Duration::from_millis(50)));
+        assert!(pathway.fits(None));
+        assert!(pathway.fits(Some(Duration::from_millis(50))));
+        assert!(!pathway.fits(Some(Duration::from_millis(50) - Duration::from_nanos(1))));
+    }
+
+    #[test]
+    fn compute_runs_inline_on_a_reflex_arc_and_its_signals_propagate() {
+        let mut b = Fabric::builder();
+        let r = b.neuron(pass("in"), Mechanisms::NONE);
+        let ran_on = Arc::new(Mutex::new(None));
+        let model = b.neuron(
+            FnNeuron::reflex("model", {
+                let ran_on = ran_on.clone();
+                move |s, _| {
+                    let ran_on = ran_on.clone();
+                    Firing::compute(move || {
+                        *ran_on.lock().unwrap() = Some(std::thread::current().id());
+                        vec![s.command("act", 1.into())]
+                    })
+                }
+            }),
+            Mechanisms::NONE,
+        );
+        let effector = Sink::new("act", NeuronKind::Effector);
+        let e = b.add(effector.clone(), Mechanisms::NONE);
+        b.reflex(r, model, 1.0).reflex(model, e, 1.0);
+        let fabric = b.build().unwrap();
+
+        let outcome = fabric.stimulate(r, signal(b"x"));
+        assert_eq!((outcome.acted, effector.hits()), (1, 1));
+        assert_eq!(*ran_on.lock().unwrap(), Some(std::thread::current().id()));
+        let c = &fabric.0.cells[model.index()].counters;
+        assert_eq!(c.computed.load(Ordering::SeqCst), 1);
+        assert_eq!(c.fired.load(Ordering::SeqCst), 1);
     }
 
     #[test]
