@@ -547,7 +547,7 @@ impl Fabric {
 
     /// Nanoseconds since the fabric was built
     pub(crate) fn nanos(&self, now: Instant) -> u64 {
-        u64::try_from(now.saturating_duration_since(self.0.epoch).as_nanos()).unwrap_or(u64::MAX)
+        super::nanos_since(self.0.epoch, now)
     }
 
     /// Signals that entered through receptors, and those that reached a brain
@@ -1005,6 +1005,7 @@ mod tests {
     use super::*;
     use crate::nerve::neuron::Habituation;
     use crate::nerve::signal::{Feature, Payload};
+    use crate::nerve::testing::{pass, wait_until};
     use std::sync::atomic::AtomicUsize;
     use std::thread::ThreadId;
 
@@ -1035,16 +1036,7 @@ mod tests {
         }
 
         fn wait_for(&self, hits: usize) {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while self.hits() < hits {
-                assert!(
-                    Instant::now() < deadline,
-                    "{}: {} hits",
-                    self.name,
-                    self.hits()
-                );
-                std::thread::sleep(Duration::from_millis(1));
-            }
+            wait_until(|| self.hits() >= hits);
         }
     }
 
@@ -1068,11 +1060,6 @@ mod tests {
 
     fn receptor(name: &'static str) -> Arc<Sink> {
         Sink::new(name, NeuronKind::Receptor)
-    }
-
-    /// A receptor that passes everything on
-    fn pass(name: &str) -> impl Neuron {
-        FnNeuron::reflex(name, |s, _| Firing::one(s)).with_kind(NeuronKind::Receptor)
     }
 
     fn signal(bytes: &[u8]) -> Signal {
@@ -1267,19 +1254,10 @@ mod tests {
         for i in 0..6u8 {
             assert_eq!(fabric.stimulate(r, signal(&[i])).queued, 1);
         }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let sizes = batchy.sizes.lock().unwrap().clone();
-            if sizes.iter().sum::<usize>() == 6 {
-                assert_eq!(sizes, vec![4, 2]);
-                break;
-            }
-            assert!(Instant::now() < deadline, "{sizes:?}");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        // The pathway's latency is measured last, after the batch has fired
+        wait_until(|| fabric.pathways()[0].latency().count() == 6);
+        assert_eq!(*batchy.sizes.lock().unwrap(), vec![4, 2]);
         assert_eq!(fabric.waiting(), 0);
-        let latency = fabric.pathways()[0].latency();
-        assert_eq!(latency.count(), 6);
     }
 
     #[test]
@@ -1310,11 +1288,7 @@ mod tests {
         let fabric = b.build();
         fabric.stimulate(reflex, signal(b"round"));
         // Each pass through the queue restarts the depth; the trace still counts every hop
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while fabric.0.loops.load(Ordering::SeqCst) == 0 {
-            assert!(Instant::now() < deadline, "the loop never ended");
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        wait_until(|| fabric.0.loops.load(Ordering::SeqCst) > 0);
         assert_eq!(fabric.0.loops.load(Ordering::SeqCst), 1);
         assert!(fabric.0.reached_brain.load(Ordering::SeqCst) < MAX_HOPS as u64);
     }

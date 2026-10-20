@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tracing::{debug, warn};
 
-use super::{ActError, ActFuture, Action, Inner};
+use super::{ActError, ActFuture, Action, EffectorInner};
+use crate::nerve::nanos_since;
 use crate::nerve::signal::{Command, Signal};
 
 /// Retry with exponential backoff
@@ -81,11 +82,7 @@ pub enum BreakerState {
     HalfOpen,
 }
 
-impl Inner {
-    fn nanos(&self, now: Instant) -> u64 {
-        u64::try_from(now.saturating_duration_since(self.epoch).as_nanos()).unwrap_or(u64::MAX)
-    }
-
+impl EffectorInner {
     /// Whether to act now, after how long, or not at all
     pub(super) fn admit(&self, now: Instant) -> Admission {
         if let Some(refractory) = self.refractory {
@@ -130,7 +127,7 @@ impl Inner {
             state.tokens -= 1.0;
         }
         self.last_acted
-            .store(self.nanos(now).max(1), Ordering::Relaxed);
+            .store(nanos_since(self.epoch, now).max(1), Ordering::Relaxed);
         self.counters.inflight.fetch_add(1, Ordering::Relaxed);
         Admission::After(delay)
     }
@@ -187,7 +184,7 @@ pub(super) enum Admission {
 
 /// The attempts after the first, or a delayed first one, on the motor side's runtime
 pub(super) async fn run(
-    inner: Arc<Inner>,
+    inner: Arc<EffectorInner>,
     command: Command,
     signal: Signal,
     mut pending: Option<ActFuture>,

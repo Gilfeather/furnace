@@ -118,8 +118,7 @@ impl Act for FileAppend {
 mod tests {
     use super::super::Effector;
     use super::*;
-    use crate::nerve::testing::{command, fabric_with};
-    use std::time::{Duration, Instant};
+    use crate::nerve::testing::{command, fabric_with, wait_until};
 
     #[test]
     fn file_append_writes_lines() {
@@ -133,10 +132,7 @@ mod tests {
         );
         fabric.stimulate(r, command("journal", serde_json::json!({"k": 1})));
         // The lines are written on the effector's own thread
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while effector.metrics().acted < 2 && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        wait_until(|| effector.metrics().acted >= 2);
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "raw line");

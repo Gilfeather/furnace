@@ -194,9 +194,7 @@ impl RateMeter {
 
     /// Record an arrival and return the rate so far, in per second (0 for the first)
     pub fn tick(&self, now: Instant) -> f32 {
-        let nanos = u64::try_from(now.saturating_duration_since(self.epoch).as_nanos())
-            .unwrap_or(u64::MAX)
-            .max(1);
+        let nanos = super::nanos_since(self.epoch, now).max(1);
         let last = self.last.swap(nanos, Ordering::Relaxed);
         if last == 0 {
             return 0.0;
@@ -223,6 +221,34 @@ impl RateMeter {
         } else {
             0.0
         }
+    }
+}
+
+/// The wait before reconnecting to a source that dropped or refused: from `initial`, doubling
+/// up to 10 s, and back to `initial` once connected
+struct Backoff {
+    initial: Duration,
+    next: Duration,
+}
+
+impl Backoff {
+    fn new(initial: Duration) -> Self {
+        Self {
+            initial,
+            next: initial,
+        }
+    }
+
+    /// Connected: the next wait is the first one again
+    fn reset(&mut self) {
+        self.next = self.initial;
+    }
+
+    /// The wait before this attempt; the one after it is twice as long
+    fn next(&mut self) -> Duration {
+        let wait = self.next;
+        self.next = (wait * 2).min(Duration::from_secs(10));
+        wait
     }
 }
 

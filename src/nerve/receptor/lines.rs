@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, warn};
 
-use super::{Afferent, RateMeter, Receptor, Source, UrgencyRule, kinds};
+use super::{Afferent, Backoff, RateMeter, Receptor, Source, UrgencyRule, kinds};
 use crate::nerve::neuron::{Cx, Firing, Neuron, NeuronKind};
 use crate::nerve::signal::{Feature, Payload, Signal};
 
@@ -135,11 +135,11 @@ impl Receptor for Lines {
                 let addr = addr.clone();
                 spawn(Box::new(move || {
                     let meter = RateMeter::new();
-                    let mut backoff = Duration::from_millis(100);
+                    let mut backoff = Backoff::new(Duration::from_millis(100));
                     loop {
                         match std::net::TcpStream::connect(&addr) {
                             Ok(stream) => {
-                                backoff = Duration::from_millis(100);
+                                backoff.reset();
                                 if !pump_lines(stream, &afferent, rule, &meter) {
                                     return;
                                 }
@@ -149,8 +149,7 @@ impl Receptor for Lines {
                         if afferent.fabric().is_none() {
                             return;
                         }
-                        std::thread::sleep(backoff);
-                        backoff = (backoff * 2).min(Duration::from_secs(10));
+                        std::thread::sleep(backoff.next());
                     }
                 }));
             }

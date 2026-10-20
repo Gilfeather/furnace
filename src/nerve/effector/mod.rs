@@ -122,7 +122,7 @@ struct LoopState {
 }
 
 #[derive(Default)]
-struct Counters {
+struct LoopCounters {
     acted: AtomicU64,
     failed: AtomicU64,
     retries: AtomicU64,
@@ -152,7 +152,7 @@ pub struct EffectorMetrics {
     pub latency: super::latency::LatencySnapshot,
 }
 
-struct Inner {
+struct EffectorInner {
     act: Box<dyn Act>,
     /// The command a plain signal with no JSON payload (tensors, nothing) acts as
     plain: Command,
@@ -164,7 +164,7 @@ struct Inner {
     /// Nanoseconds since `epoch` of the last command admitted; 0 before any
     last_acted: AtomicU64,
     state: Mutex<LoopState>,
-    counters: Counters,
+    counters: LoopCounters,
     latency: LatencyEstimate,
 }
 
@@ -173,7 +173,7 @@ struct Inner {
 /// [`Mechanisms`](super::Mechanisms) (habituation, threshold) apply in front of it.
 #[derive(Clone)]
 pub struct Effector {
-    inner: Arc<Inner>,
+    inner: Arc<EffectorInner>,
 }
 
 impl Effector {
@@ -183,7 +183,7 @@ impl Effector {
         let now = Instant::now();
         let plain = Command::new(act.name(), serde_json::Value::Null);
         Self {
-            inner: Arc::new(Inner {
+            inner: Arc::new(EffectorInner {
                 act: Box::new(act),
                 plain,
                 retry: Retry::default(),
@@ -199,13 +199,13 @@ impl Effector {
                     tokens: 0.0,
                     refilled_at: now,
                 }),
-                counters: Counters::default(),
+                counters: LoopCounters::default(),
                 latency: LatencyEstimate::new(),
             }),
         }
     }
 
-    fn configure(mut self, f: impl FnOnce(&mut Inner)) -> Self {
+    fn configure(mut self, f: impl FnOnce(&mut EffectorInner)) -> Self {
         f(Arc::get_mut(&mut self.inner).expect("configured before use"));
         self
     }
