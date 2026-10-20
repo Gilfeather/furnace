@@ -77,9 +77,7 @@
 #![warn(missing_docs)]
 
 pub mod brain;
-pub mod consolidation;
 pub mod effector;
-pub mod expect;
 mod fabric;
 pub(crate) mod http;
 mod latency;
