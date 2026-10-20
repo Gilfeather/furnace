@@ -19,6 +19,21 @@ pub enum FurnaceError {
     Cli(#[from] CliError),
 }
 
+impl FurnaceError {
+    /// Whether the request is at fault (its inputs do not fit the model), rather than the
+    /// server: a 400 rather than a 500
+    pub fn is_client_error(&self) -> bool {
+        matches!(
+            self,
+            Self::Model(
+                ModelError::InputValidation { .. }
+                    | ModelError::InvalidDataType(_)
+                    | ModelError::InvalidInput(_)
+            )
+        )
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ModelError {
     #[error("Failed to load model from {path}: {source}")]

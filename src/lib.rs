@@ -166,9 +166,8 @@
 //! - `image`: JPEG / PNG input on `/predict`, with ImageNet preprocessing.
 //! - `llm`: serve LLMs with the OpenAI chat and completions API, streaming included, next to
 //!   the other models; see the `llm` module.
-//! - `nerve`: the nervous system between sensors, small fast models, an LLM and actuators:
-//!   receptors, reflex arcs, a brain and effectors, with habituation, thresholds and
-//!   refractory periods; see the `nerve` module.
+//! - `nerve`: kept for compatibility. The nervous system (the `nerve` module) is always
+//!   built, since the server's own routes run on it.
 //! - `wgpu`, `metal`, `cuda`: Burn's GPU backends, chosen with [`BackendKind`].
 //! - `embed-weights`: compile built-in models' weights into the binary.
 
@@ -185,7 +184,6 @@ mod json_fast;
 pub mod llm;
 pub mod model;
 pub mod models;
-#[cfg(feature = "nerve")]
 pub mod nerve;
 #[cfg(feature = "image")]
 pub mod preprocess;

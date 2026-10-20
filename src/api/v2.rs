@@ -545,7 +545,7 @@ async fn infer_named(
     state: &ServerState,
     slot: &ModelSlot,
     loaded: &Loaded,
-    arrival: Option<crate::batching::Arrival<'_, crate::batching::NamedInput>>,
+    announced: Option<crate::nerve::Announced<'_>>,
     mut request: InferRequest,
     binary: &[u8],
 ) -> Response {
@@ -573,7 +573,7 @@ async fn infer_named(
             return busy_response();
         }
     };
-    let mut outputs = match run_general(state, loaded, arrival, inputs, permit).await {
+    let mut outputs = match run_general(state, loaded, announced, inputs, permit).await {
         Ok(Ok(outputs)) => outputs,
         Ok(Err(e)) => {
             let status = match e {
@@ -662,8 +662,7 @@ async fn infer(
     };
     let loaded = slot.get();
     // As in `/predict`: a batch about to start may wait for this request's body
-    let arrival = loaded.batcher.as_ref().map(Batcher::arrival);
-    let named_arrival = loaded.named_batcher.as_ref().map(Batcher::arrival);
+    let announced = state.serving.announce(&slot.name);
     let header_len = match request.headers().get(&INFERENCE_HEADER_CONTENT_LENGTH) {
         None => None,
         Some(value) => match value
@@ -708,7 +707,7 @@ async fn infer(
         }
     };
     if !loaded.model.is_simple() {
-        return infer_named(&state, &slot, &loaded, named_arrival, request, binary).await;
+        return infer_named(&state, &slot, &loaded, announced, request, binary).await;
     }
     let (data, batch_size) = match decode_input(&loaded.model, &mut request, binary) {
         Ok(input) => input,
@@ -740,7 +739,7 @@ async fn infer(
             return busy_response();
         }
     };
-    let output = match run_inference(&state, &loaded, arrival, data, batch_size, permit).await {
+    let output = match run_inference(&state, &loaded, announced, data, batch_size, permit).await {
         Ok(Ok(output)) => output,
         Ok(Err(e)) => {
             let status = match e {
