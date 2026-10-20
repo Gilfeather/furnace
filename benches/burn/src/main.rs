@@ -181,7 +181,8 @@ impl Input {
 
 enum Net {
     Digits(DigitNet),
-    Resnet18(ResNet18),
+    // Boxed: twice the size of the next largest variant
+    Resnet18(Box<ResNet18>),
     Encoder(TextEncoder),
     Echo,
 }
@@ -190,7 +191,7 @@ impl Net {
     fn new(which: Which, device: &Device) -> Self {
         match which {
             Which::Digits => Self::Digits(DigitNet::new(device)),
-            Which::Resnet18 => Self::Resnet18(ResNet18::new(device)),
+            Which::Resnet18 => Self::Resnet18(Box::new(ResNet18::new(device))),
             Which::Encoder => Self::Encoder(TextEncoder::new(device)),
             Which::Echo => Self::Echo,
         }
@@ -312,16 +313,20 @@ impl HandWritten {
         let (input, batch) = match self.which.image_shape() {
             Some(shape) => {
                 let values: Vec<f32> = body
-                    .chunks_exact(4)
-                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b))
                     .collect();
                 let batch = values.len() / shape.iter().product::<usize>();
                 (Input::Images(values), batch)
             }
             None => {
                 let mut ids: Vec<i64> = body
-                    .chunks_exact(8)
-                    .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|b| i64::from_le_bytes(*b))
                     .collect();
                 let mask = ids.split_off(ids.len() / 2);
                 let batch = ids.len() / TextEncoder::SEQ;
