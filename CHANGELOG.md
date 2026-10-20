@@ -9,7 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 The server runs on the nervous system: every model is a neuron, every route a receptor.
 
+### Added
+- `Server::try_router()`: the router, or an error for a server with nothing to serve, as
+  `serve()` gives.
+- `tls::MAX_HANDSHAKES` (1024): TLS handshakes in flight per listener. Past it the listener
+  stops accepting until one ends, so clients that connect and never send a ClientHello cannot
+  hold an unbounded number of tasks and sockets.
+
 ### Changed
+- `/predict`, v2 over HTTP and v2 over gRPC share one inference path: the concurrency slot,
+  the timeout, the latency of a success and the request counters are taken in one place, and
+  one mapping turns an error into an HTTP status and `code`. What changes on the wire:
+  - v2 error responses carry the `code` `/predict` gives for the same error
+    (`INPUT_VALIDATION_FAILED`, `INVALID_INPUT_VALUE`, `INFERENCE_FAILED`,
+    `INFERENCE_TIMEOUT`, `SERVER_BUSY`; `MODEL_NOT_FOUND` for an unknown model or version)
+    instead of one picked from the status (`INVALID_REQUEST` for a 500, `NOT_FOUND`).
+  - A model error that blames the request (`ModelError::InvalidArgument` too) is a 400
+    `INVALID_INPUT_VALUE` on every route, as `FurnaceError::is_client_error` says.
+  - gRPC: a model whose pathway is full is `RESOURCE_EXHAUSTED` (was `INTERNAL`), and the
+    timeout and panic messages are the HTTP ones.
+  - Named tensors are decoded by one function for v2 JSON and gRPC; a raw tensor of the wrong
+    size reads "Input 'x' has N bytes of raw data; shape [..] of FP32 needs M" on both (v2 said
+    "binary_data_size is .. bytes", gRPC "raw_input_contents has .. bytes"), and v2's
+    "binary_data_size is N bytes but M are left in the body" when the body is short.
+- A streaming OpenAI request answers its status after the engine's first event, so an engine
+  that refuses only once it has looked at the request (`Event::Error` in place of `Started`,
+  e.g. a prompt too long for the context) gets its 400 instead of an error payload after a
+  200; a stream whose first event does not come within `--request-timeout-ms` is a `504`.
+- `Server::router()` on a server with nothing to serve logs an error and serves no model
+  (`404 MODEL_NOT_FOUND`) instead of panicking; `router_with_models` with no model likewise,
+  and `start_server_with_models` with none returns an error.
+- The fast JSON parser of `/predict` leaves numbers past `f32`'s range to serde_json, so it
+  never accepts what the fallback would answer differently; both end as a 400.
+- A Ctrl-C or SIGTERM handler that cannot be installed is logged, and the server keeps
+  serving, instead of a panic in the signal task.
+- Per request: `/predict`'s binary decoder reads the one header it needs instead of copying
+  them all, a JSON batch response is written from the output buffer without a `Vec` per item,
+  binary response headers are built without intermediate strings, and the `request` span
+  borrows its fields instead of formatting them.
 - `/predict`, `/models/{model}/predict`, v2 over HTTP and gRPC, and the OpenAI routes run on
   the fabric: each model is `in:{model}` → `model:{model}` → `serve:respond`, each LLM a brain
   `llm:{llm}` behind `in:{llm}`, all listed in `GET /nerve` with measured latencies. With
@@ -64,6 +101,12 @@ The server runs on the nervous system: every model is a neuron, every route a re
 - Chat template rendering and tokenization no longer run on the async runtime.
 - A rate limit without API keys logs a warning when the router may be served without
   `ClientAddr`, in which case every client shares one budget.
+- docs/openapi.json lists the OpenAI routes, `GET /nerve/effectors/{name}/events`, the
+  `llm` and `nerve` fields of `/metrics`, and every error `code`; a test derives the expected
+  routes from the router's own list and the codes from the server's. docs/API.md documents
+  `furnace_build_info{version}` and `furnace_model_info{model, backend}` (it said
+  `furnace_build_info{version, model, backend}`), the missing error codes, and that 401 and 429
+  are counted only in `rejected_unauthorized` and `rejected_rate_limited`.
 
 ## [0.10.0] - 2026-10-20
 

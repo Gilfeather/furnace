@@ -1046,3 +1046,9 @@ renaming `receptor::Channel`/`effector::Channel`, `Sse`, `nerve::Reply`, `access
 `Neuron::metrics` (4.5); `ActError`, `wire::Error`, `tls::Error` enums and
 `EngineError::Failed(BoxError)` (5.5, 4.5); nerve latency on `telemetry::Histogram` (2.4);
 `Firing::Compute` for brains (9.1); `FabricBuilder::efferent(Handle)` (7.8).
+From the 12.1 checklist: the concurrency limit's JSON field `max_concurrent_inferences` renamed
+to `max_concurrent_requests`, the name the flag, the config and Prometheus use (12.1 item 12;
+the private field already took it); `Server::router` and `router_with_models` returning
+`Result<Router>` (item 10; today `Server::try_router` gives the error and `router()` serves
+nothing instead of panicking); `quiet` vs `quiet_by_*` in the nerve JSON and the three `Reply`
+types (item 12, nerve side).

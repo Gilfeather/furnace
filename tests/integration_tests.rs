@@ -257,38 +257,87 @@ async fn test_concurrent_requests() {
     }
 }
 
+/// Echoes its input; an input of ones waits until `release` is set, so a test decides when the
+/// model answers instead of racing it
+#[derive(Debug)]
+struct Held {
+    release: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    entered: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl furnace::BurnModel for Held {
+    fn name(&self) -> &str {
+        "held"
+    }
+    fn backend(&self) -> furnace::BackendKind {
+        furnace::BackendKind::Cpu
+    }
+    fn inputs(&self) -> Vec<furnace::IoSpec> {
+        vec![furnace::IoSpec::fp32("input", &[4])]
+    }
+    fn outputs(&self) -> Vec<furnace::IoSpec> {
+        vec![furnace::IoSpec::fp32("output", &[4])]
+    }
+    fn run(&self, inputs: Vec<furnace::HostTensor>) -> furnace::Result<Vec<furnace::HostTensor>> {
+        use std::sync::atomic::Ordering;
+        if matches!(&inputs[0].values, furnace::Values::F32(v) if v.iter().all(|x| *x == 1.0)) {
+            self.entered.store(true, Ordering::SeqCst);
+            while !self.release.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        Ok(inputs)
+    }
+}
+
+/// With its one slot held by a request the model has not answered, the server refuses the next
+/// request with 503 and serves again once the slot is free; nothing races
 #[tokio::test]
 async fn test_backpressure_returns_503() {
-    let base_url = spawn_server(ServerConfig {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let release = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(AtomicBool::new(false));
+    let model = furnace::Model::new(
+        Box::new(Held {
+            release: release.clone(),
+            entered: entered.clone(),
+        }),
+        "held",
+        0,
+    );
+    let config = ServerConfig {
         max_concurrent_requests: 1,
         ..ServerConfig::default()
-    })
-    .await;
+    };
+    let app = router(model, &config);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let predict = move |value: f32| {
+        client()
+            .post(format!("http://{addr}/predict"))
+            .json(&json!({ "input": vec![value; 4] }))
+            .send()
+    };
 
-    // Fire several requests at once against a single inference slot
-    let handles: Vec<_> = (0..6)
-        .map(|_| {
-            let url = format!("{base_url}/predict");
-            tokio::spawn(async move {
-                client()
-                    .post(url)
-                    .json(&json!({ "inputs": [image(0.5), image(0.5), image(0.5), image(0.5)] }))
-                    .send()
-                    .await
-                    .unwrap()
-                    .status()
-                    .as_u16()
-            })
-        })
-        .collect();
-
-    let mut statuses = Vec::new();
-    for handle in handles {
-        statuses.push(handle.await.unwrap());
+    let held = tokio::spawn(predict(1.0));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !entered.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < deadline,
+            "the first request never reached the model"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
-    assert!(statuses.contains(&200), "statuses: {statuses:?}");
-    assert!(statuses.contains(&503), "statuses: {statuses:?}");
-    assert!(statuses.iter().all(|s| *s == 200 || *s == 503));
+    let refused = predict(0.5).await.unwrap();
+    assert_eq!(refused.status().as_u16(), 503);
+    let error: Value = refused.json().await.unwrap();
+    assert_eq!(error["code"], "SERVER_BUSY");
+
+    release.store(true, Ordering::SeqCst);
+    assert_eq!(held.await.unwrap().unwrap().status().as_u16(), 200);
+    assert_eq!(predict(0.5).await.unwrap().status().as_u16(), 200);
 }
 
 /// A distinct, non-constant image per `seed`, so mixed-up outputs would show

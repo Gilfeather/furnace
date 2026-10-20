@@ -272,7 +272,9 @@ pub enum Event {
         /// Tokens generated, the end-of-sequence token not counted
         completion_tokens: usize,
     },
-    /// Generation failed after `Started`; nothing follows
+    /// Generation failed; nothing follows. As the first event, in place of `Started`, it is a
+    /// refusal the engine could only make once it looked at the request (a prompt too long
+    /// for the context, say), and the HTTP routes answer it with its status instead of a 200.
     Error(EngineError),
 }
 

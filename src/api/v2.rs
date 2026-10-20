@@ -20,6 +20,7 @@ use axum::extract::Path;
 use axum::http::header::CONTENT_LENGTH;
 use serde::de::{DeserializeSeed, SeqAccess};
 
+use super::infer::{decode_raw, encode_raw, values_datatype};
 use super::*;
 
 /// Name of the model's input tensor in v2 metadata and requests
@@ -32,26 +33,8 @@ pub const MODEL_VERSION: &str = "1";
 pub const INFERENCE_HEADER_CONTENT_LENGTH: HeaderName =
     HeaderName::from_static("inference-header-content-length");
 
-/// The v2 routes, wired to the shared server state
-pub(super) fn routes(state: AppState) -> Router<AppState> {
-    let infer_route = post(infer).layer(middleware::from_fn_with_state(state, count_requests));
-    Router::new()
-        .route("/v2", get(server_metadata))
-        .route("/v2/health/live", get(live))
-        .route("/v2/health/ready", get(ready))
-        .route("/v2/models/{model}", get(model_metadata))
-        .route("/v2/models/{model}/versions/{version}", get(model_metadata))
-        .route("/v2/models/{model}/ready", get(model_ready))
-        .route(
-            "/v2/models/{model}/versions/{version}/ready",
-            get(model_ready),
-        )
-        .route("/v2/models/{model}/infer", infer_route.clone())
-        .route("/v2/models/{model}/versions/{version}/infer", infer_route)
-}
-
 #[derive(Debug, Deserialize)]
-struct ModelPath {
+pub(super) struct ModelPath {
     model: String,
     version: Option<String>,
 }
@@ -80,7 +63,7 @@ pub struct ModelMetadata {
     pub outputs: Vec<TensorMetadata>,
 }
 
-async fn server_metadata() -> Json<ServerMetadata> {
+pub(super) async fn server_metadata() -> Json<ServerMetadata> {
     Json(ServerMetadata {
         name: "furnace".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -88,11 +71,11 @@ async fn server_metadata() -> Json<ServerMetadata> {
     })
 }
 
-async fn live() -> StatusCode {
+pub(super) async fn live() -> StatusCode {
     StatusCode::OK
 }
 
-async fn ready(State(state): State<AppState>) -> StatusCode {
+pub(super) async fn ready(State(state): State<AppState>) -> StatusCode {
     if state.ready() {
         StatusCode::OK
     } else {
@@ -105,8 +88,14 @@ fn check_model(
     state: &ServerState,
     path: &ModelPath,
 ) -> std::result::Result<Arc<ModelSlot>, Box<Response>> {
-    resolve_model(state, &path.model, path.version.as_deref().unwrap_or(""))
-        .map_err(|message| Box::new(v2_error(StatusCode::NOT_FOUND, &message)))
+    resolve_model(state, &path.model, path.version.as_deref().unwrap_or("")).map_err(|message| {
+        Box::new(create_error_response(
+            StatusCode::NOT_FOUND,
+            Code::ModelNotFound,
+            &message,
+            None,
+        ))
+    })
 }
 
 /// The served model named `model` (an empty `version` means any), or why there is none.
@@ -130,14 +119,9 @@ pub(super) fn resolve_model(
     Ok(slot.clone())
 }
 
-async fn model_metadata(State(state): State<AppState>, Path(path): Path<ModelPath>) -> Response {
-    let slot = match check_model(&state, &path) {
-        Ok(slot) => slot,
-        Err(response) => return *response,
-    };
-    let loaded = slot.get();
-    let info = loaded.model.get_info();
-    let metadata = |tensors: &[crate::tensor::TensorInfo]| {
+/// A model's metadata, for HTTP and (converted) for gRPC
+pub(super) fn metadata_of(info: &ModelInfo) -> ModelMetadata {
+    let tensors = |tensors: &[crate::tensor::TensorInfo]| {
         tensors
             .iter()
             .map(|t| TensorMetadata {
@@ -147,17 +131,29 @@ async fn model_metadata(State(state): State<AppState>, Path(path): Path<ModelPat
             })
             .collect()
     };
-    Json(ModelMetadata {
+    ModelMetadata {
         name: info.name.clone(),
         versions: vec![MODEL_VERSION.to_string()],
         platform: format!("furnace_{}", info.model_type),
-        inputs: metadata(&info.inputs),
-        outputs: metadata(&info.outputs),
-    })
-    .into_response()
+        inputs: tensors(&info.inputs),
+        outputs: tensors(&info.outputs),
+    }
 }
 
-async fn model_ready(State(state): State<AppState>, Path(path): Path<ModelPath>) -> Response {
+pub(super) async fn model_metadata(
+    State(state): State<AppState>,
+    Path(path): Path<ModelPath>,
+) -> Response {
+    match check_model(&state, &path) {
+        Ok(slot) => Json(metadata_of(slot.get().model.get_info())).into_response(),
+        Err(response) => *response,
+    }
+}
+
+pub(super) async fn model_ready(
+    State(state): State<AppState>,
+    Path(path): Path<ModelPath>,
+) -> Response {
     match check_model(&state, &path) {
         Ok(slot) if slot.get().ready() => StatusCode::OK.into_response(),
         Ok(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -165,15 +161,10 @@ async fn model_ready(State(state): State<AppState>, Path(path): Path<ModelPath>)
     }
 }
 
-/// A v2 error: `{"error": "..."}` (plus Furnace's `code`, `details` and `timestamp`, which v2
-/// clients ignore)
-fn v2_error(status: StatusCode, message: &str) -> Response {
-    let code = match status {
-        StatusCode::NOT_FOUND => "NOT_FOUND",
-        StatusCode::SERVICE_UNAVAILABLE => "SERVER_BUSY",
-        _ => "INVALID_REQUEST",
-    };
-    create_error_response(status, code, message, None)
+/// A request v2 cannot serve: `{"error": "..."}` (plus Furnace's `code`, `details` and
+/// `timestamp`, which v2 clients ignore)
+fn invalid(message: &str) -> Response {
+    create_error_response(StatusCode::BAD_REQUEST, Code::InvalidRequest, message, None)
 }
 
 #[derive(Debug, Deserialize)]
@@ -339,53 +330,6 @@ impl<'de> Visitor<'de> for FlattenInts<'_> {
         Ok(())
     }
 }
-
-/// Raw little-endian tensor bytes as values: `INT32` widens to `i64`
-pub(super) fn decode_raw(datatype: DataType, bytes: &[u8]) -> Values {
-    match datatype {
-        DataType::Fp32 => Values::F32(
-            bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|b| f32::from_le_bytes(*b))
-                .collect(),
-        ),
-        DataType::Int64 => Values::I64(
-            bytes
-                .as_chunks::<8>()
-                .0
-                .iter()
-                .map(|b| i64::from_le_bytes(*b))
-                .collect(),
-        ),
-        DataType::Int32 => Values::I64(
-            bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|b| i64::from(i32::from_le_bytes(*b)))
-                .collect(),
-        ),
-    }
-}
-
-/// Values as raw little-endian bytes
-pub(super) fn encode_raw(values: &Values) -> Vec<u8> {
-    match values {
-        Values::F32(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
-        Values::I64(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
-    }
-}
-
-/// The wire datatype of an output's values
-pub(super) fn values_datatype(values: &Values) -> DataType {
-    match values {
-        Values::F32(_) => DataType::Fp32,
-        Values::I64(_) => DataType::Int64,
-    }
-}
-
 /// Where a request's tensor matches the model's input: its index, and the datatype it was sent
 /// as. Shared with the gRPC transport.
 pub(super) fn match_input(
@@ -469,40 +413,56 @@ pub(super) fn select_outputs<'a>(
     })
 }
 
-/// The request's tensors, in the order of the model's inputs
-fn decode_named_inputs(
+/// Where a request tensor's values are
+pub(super) enum Source<'a> {
+    /// Raw little-endian bytes: binary tensor data, or gRPC's `raw_input_contents`
+    Raw(&'a [u8]),
+    /// Values decoded already: gRPC's typed `contents`
+    #[cfg(feature = "grpc")]
+    Values(Values),
+    /// JSON `data`, decoded once the datatype is known
+    Json(&'a serde_json::value::RawValue),
+}
+
+/// One tensor of a request, as both protocols carry it
+pub(super) struct RequestTensor<'a> {
+    pub(super) name: &'a str,
+    pub(super) datatype: &'a str,
+    pub(super) shape: &'a [i64],
+    pub(super) source: Source<'a>,
+}
+
+/// A request's tensors, checked against the model and in the order of its inputs: the one
+/// decoder of named tensors, for v2 over HTTP and over gRPC
+pub(super) fn assemble_inputs<'a>(
     model: &Model,
-    request: &mut InferRequest,
-    binary: &[u8],
+    tensors: impl IntoIterator<Item = RequestTensor<'a>>,
 ) -> std::result::Result<Vec<HostTensor>, String> {
-    let mut tensors: Vec<Option<HostTensor>> = vec![None; model.inputs().len()];
-    // Binary data of the inputs follows the JSON in the order the inputs are listed
-    let mut offset = 0;
-    for input in &mut request.inputs {
-        let (index, wire) = match_input(model, &input.name, &input.datatype)?;
-        if tensors[index].is_some() {
-            return Err(format!("Input '{}' is given twice", input.name));
+    let mut assembled: Vec<Option<HostTensor>> = vec![None; model.inputs().len()];
+    for tensor in tensors {
+        let name = tensor.name;
+        let (index, wire) = match_input(model, name, tensor.datatype)?;
+        if assembled[index].is_some() {
+            return Err(format!("Input '{name}' is given twice"));
         }
-        let shape = request_shape(model, index, &input.shape)?;
+        let shape = request_shape(model, index, tensor.shape)?;
         let elements: usize = shape.iter().product();
-        let values = match (input.parameters.binary_data_size, input.data.take()) {
-            (Some(size), _) => {
-                let end = offset + size;
-                if size != elements * wire.size() || end > binary.len() {
+        let values = match tensor.source {
+            Source::Raw(bytes) => {
+                if bytes.len() != elements * wire.size() {
                     return Err(format!(
-                        "Input '{}': binary_data_size is {size} bytes; shape {:?} of {} needs {}                          and {} are left in the body",
-                        input.name,
-                        input.shape,
+                        "Input '{name}' has {} bytes of raw data; shape {:?} of {} needs {}",
+                        bytes.len(),
+                        tensor.shape,
                         wire.v2_name(),
-                        elements * wire.size(),
-                        binary.len() - offset.min(binary.len())
+                        elements * wire.size()
                     ));
                 }
-                let values = decode_raw(wire, &binary[offset..end]);
-                offset = end;
-                values
+                decode_raw(wire, bytes)
             }
-            (None, Some(raw)) => {
+            #[cfg(feature = "grpc")]
+            Source::Values(values) => values,
+            Source::Json(raw) => {
                 let values = if wire == DataType::Fp32 {
                     serde_json::from_str::<TensorData32>(raw.get()).map(|d| Values::F32(d.0))
                 } else {
@@ -512,18 +472,48 @@ fn decode_named_inputs(
                         .deserialize(&mut deserializer)
                         .map(|()| Values::I64(ints))
                 };
-                let values =
-                    values.map_err(|e| format!("Input '{}': invalid data: {e}", input.name))?;
-                if values.len() != elements {
+                values.map_err(|e| format!("Input '{name}': invalid data: {e}"))?
+            }
+        };
+        if values.len() != elements {
+            return Err(format!(
+                "Input '{name}' has shape {:?} ({elements} elements) but {} values",
+                tensor.shape,
+                values.len()
+            ));
+        }
+        assembled[index] = Some(HostTensor { shape, values });
+    }
+    assembled
+        .into_iter()
+        .zip(model.inputs())
+        .map(|(tensor, spec)| tensor.ok_or_else(|| format!("Missing input '{}'", spec.name)))
+        .collect()
+}
+
+/// The request's tensors: binary data follows the JSON in the order the inputs are listed
+fn decode_named_inputs(
+    model: &Model,
+    request: &InferRequest,
+    binary: &[u8],
+) -> std::result::Result<Vec<HostTensor>, String> {
+    let mut offset = 0;
+    let mut tensors = Vec::with_capacity(request.inputs.len());
+    for input in &request.inputs {
+        let source = match (input.parameters.binary_data_size, &input.data) {
+            (Some(size), _) => {
+                let left = binary.len() - offset;
+                if size > left {
                     return Err(format!(
-                        "Input '{}' has shape {:?} ({elements} elements) but {} values",
-                        input.name,
-                        input.shape,
-                        values.len()
+                        "Input '{}': binary_data_size is {size} bytes but {left} are left in \
+                         the body",
+                        input.name
                     ));
                 }
-                values
+                offset += size;
+                Source::Raw(&binary[offset - size..offset])
             }
+            (None, Some(raw)) => Source::Json(raw),
             (None, None) => {
                 return Err(format!(
                     "Input '{}' has neither data nor binary_data_size",
@@ -531,13 +521,14 @@ fn decode_named_inputs(
                 ));
             }
         };
-        tensors[index] = Some(HostTensor { shape, values });
+        tensors.push(RequestTensor {
+            name: &input.name,
+            datatype: &input.datatype,
+            shape: &input.shape,
+            source,
+        });
     }
-    tensors
-        .into_iter()
-        .zip(model.inputs())
-        .map(|(tensor, spec)| tensor.ok_or_else(|| format!("Missing input '{}'", spec.name)))
-        .collect()
+    assemble_inputs(model, tensors)
 }
 
 /// Inference for a model of named tensors
@@ -546,13 +537,13 @@ async fn infer_named(
     slot: &ModelSlot,
     loaded: &Loaded,
     announced: Option<crate::nerve::Announced<'_>>,
-    mut request: InferRequest,
+    request: InferRequest,
     binary: &[u8],
 ) -> Response {
     let model = &loaded.model;
-    let inputs = match decode_named_inputs(model, &mut request, binary) {
+    let inputs = match decode_named_inputs(model, &request, binary) {
         Ok(inputs) => inputs,
-        Err(message) => return v2_error(StatusCode::BAD_REQUEST, &message),
+        Err(message) => return invalid(&message),
     };
     let all_binary = request.parameters.binary_data_output == Some(true);
     let requested = request
@@ -562,33 +553,13 @@ async fn infer_named(
         .map(|o| (o.name.as_str(), o.parameters.binary_data == Some(true)));
     let selected = match select_outputs(model, requested, all_binary) {
         Ok(selected) => selected,
-        Err(message) => return v2_error(StatusCode::BAD_REQUEST, &message),
+        Err(message) => return invalid(&message),
     };
 
-    let start_time = Instant::now();
-    let permit = match state.inference_slots.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            warn!("All inference slots busy, rejecting request");
-            return busy_response();
-        }
+    let mut outputs = match state.infer(slot, loaded, announced, inputs).await {
+        Ok(outputs) => outputs,
+        Err(e) => return e.into_response(),
     };
-    let mut outputs = match run_general(state, loaded, announced, inputs, permit).await {
-        Ok(Ok(outputs)) => outputs,
-        Ok(Err(e)) => {
-            let status = match e {
-                FurnaceError::Model(
-                    ModelError::InputValidation { .. }
-                    | ModelError::InvalidDataType(_)
-                    | ModelError::InvalidInput(_),
-                ) => StatusCode::BAD_REQUEST,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            return v2_error(status, &e.to_string());
-        }
-        Err(response) => return *response,
-    };
-    state.observe_inference(slot, start_time.elapsed());
 
     let mut raw = Vec::new();
     let mut tensors = Vec::with_capacity(selected.len());
@@ -651,7 +622,7 @@ fn binary_response(header: &InferResponse, raw: Vec<u8>) -> Response {
         .into_response()
 }
 
-async fn infer(
+pub(super) async fn infer(
     State(state): State<AppState>,
     Path(path): Path<ModelPath>,
     request: Request,
@@ -672,57 +643,50 @@ async fn infer(
         {
             Some(n) => Some(n),
             None => {
-                return v2_error(
-                    StatusCode::BAD_REQUEST,
-                    "Inference-Header-Content-Length must be a non-negative integer",
-                );
+                return invalid("Inference-Header-Content-Length must be a non-negative integer");
             }
         },
     };
     let body = match Bytes::from_request(request, &state).await {
         Ok(body) => body,
-        Err(rejection) => return v2_error(rejection.status(), &rejection.body_text()),
+        Err(rejection) => {
+            return create_error_response(
+                rejection.status(),
+                Code::InvalidRequest,
+                &rejection.body_text(),
+                None,
+            );
+        }
     };
     let (json, binary) = match header_len {
         None => (&body[..], &[][..]),
         Some(n) if n <= body.len() => body.split_at(n),
         Some(n) => {
-            return v2_error(
-                StatusCode::BAD_REQUEST,
-                &format!(
-                    "Inference-Header-Content-Length is {n} but the body has {} bytes",
-                    body.len()
-                ),
-            );
+            return invalid(&format!(
+                "Inference-Header-Content-Length is {n} but the body has {} bytes",
+                body.len()
+            ));
         }
     };
 
     let mut request: InferRequest = match serde_json::from_slice(json) {
         Ok(request) => request,
-        Err(e) => {
-            return v2_error(
-                StatusCode::BAD_REQUEST,
-                &format!("Invalid inference request: {e}"),
-            );
-        }
+        Err(e) => return invalid(&format!("Invalid inference request: {e}")),
     };
     if !loaded.model.is_simple() {
         return infer_named(&state, &slot, &loaded, announced, request, binary).await;
     }
     let (data, batch_size) = match decode_input(&loaded.model, &mut request, binary) {
         Ok(input) => input,
-        Err(message) => return v2_error(StatusCode::BAD_REQUEST, &message),
+        Err(message) => return invalid(&message),
     };
     if let Some(outputs) = &request.outputs
         && let Some(unknown) = outputs.iter().find(|o| o.name != OUTPUT_NAME)
     {
-        return v2_error(
-            StatusCode::BAD_REQUEST,
-            &format!(
-                "Unknown output '{}'; the model's output is '{OUTPUT_NAME}'",
-                unknown.name
-            ),
-        );
+        return invalid(&format!(
+            "Unknown output '{}'; the model's output is '{OUTPUT_NAME}'",
+            unknown.name
+        ));
     }
     let binary_output = request.parameters.binary_data_output == Some(true)
         || request
@@ -731,30 +695,13 @@ async fn infer(
             .flatten()
             .any(|o| o.parameters.binary_data == Some(true));
 
-    let start_time = Instant::now();
-    let permit = match state.inference_slots.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            warn!("All inference slots busy, rejecting request");
-            return busy_response();
-        }
+    let output = match state
+        .infer_flat(&slot, &loaded, announced, data, batch_size)
+        .await
+    {
+        Ok(output) => output,
+        Err(e) => return e.into_response(),
     };
-    let output = match run_inference(&state, &loaded, announced, data, batch_size, permit).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => {
-            let status = match e {
-                FurnaceError::Model(
-                    ModelError::InputValidation { .. }
-                    | ModelError::InvalidDataType(_)
-                    | ModelError::InvalidInput(_),
-                ) => StatusCode::BAD_REQUEST,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            return v2_error(status, &e.to_string());
-        }
-        Err(response) => return *response,
-    };
-    state.observe_inference(&slot, start_time.elapsed());
 
     let info = loaded.model.get_info();
     let shape: Vec<usize> = std::iter::once(batch_size)
@@ -777,7 +724,7 @@ async fn infer(
     }
 
     // Binary tensor data: the JSON header, then the output's raw little-endian bytes
-    let raw = encode_raw(&Values::F32(output));
+    let raw = f32s_to_le(&output);
     let header = response(
         None,
         Some(serde_json::json!({ "binary_data_size": raw.len() })),
@@ -821,8 +768,11 @@ pub(super) fn check_input(
             expected.join(", ")
         ));
     };
-    check_batch_len(batch_size)
-        .map_err(|_| format!("Batch size {batch_size} is outside 1..={MAX_BATCH_SIZE}"))?;
+    if !(1..=MAX_BATCH_SIZE).contains(&batch_size) {
+        return Err(format!(
+            "Batch size {batch_size} is outside 1..={MAX_BATCH_SIZE}"
+        ));
+    }
     Ok(batch_size)
 }
 
@@ -852,12 +802,7 @@ fn decode_input(
                     binary.len()
                 ));
             }
-            binary[..size]
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|b| f32::from_le_bytes(*b))
-                .collect()
+            f32s_from_le(&binary[..size])
         }
         (None, Some(raw)) => {
             let TensorData32(values) =

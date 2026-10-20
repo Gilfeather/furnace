@@ -140,10 +140,11 @@ impl LlmState {
 
 /// The routes, for the server's router (any state: they carry their own)
 pub(crate) fn routes<S: Clone + Send + Sync + 'static>(state: Arc<LlmState>) -> Router<S> {
+    let [chat, text, models] = crate::api::LLM_PATHS;
     Router::new()
-        .route("/v1/chat/completions", post(chat_completions))
-        .route("/v1/completions", post(completions))
-        .route("/v1/models", get(list_models))
+        .route(chat, post(chat_completions))
+        .route(text, post(completions))
+        .route(models, get(list_models))
         .with_state(state)
 }
 
@@ -490,7 +491,7 @@ async fn generate(
             return engine_error_response(&e, kind);
         }
     };
-    let tracked = Tracked::new(events, served.metrics.clone(), received);
+    let mut tracked = Tracked::new(events, served.metrics.clone(), received);
     let reply = Reply {
         kind,
         id: completion_id(kind),
@@ -498,9 +499,30 @@ async fn generate(
         model: served.engine.name().to_string(),
     };
     if delivery.stream {
+        // The status goes out with the first chunk, so it waits for the engine's first event:
+        // an engine that refuses only once it has looked at the request (a prompt too long for
+        // the context, say) gets its 4xx, not an error payload after a 200
+        let first = match state.timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, tracked.next()).await {
+                Ok(first) => first,
+                Err(_) => return timeout_response(timeout),
+            },
+            None => tracked.next().await,
+        };
+        let first = match first {
+            Some(Event::Error(e)) => {
+                if matches!(e, EngineError::Busy(_)) {
+                    served.metrics.reject();
+                }
+                return engine_error_response(&e, kind);
+            }
+            None => return engine_error_response(&ended_early(), kind),
+            Some(first) => first,
+        };
         stream(
             reply,
             tracked,
+            first,
             delivery.include_usage,
             state.timeout,
             permit,
@@ -686,8 +708,8 @@ impl Streamed {
                 self.end();
             }
             None => {
-                let e = EngineError::Failed("the engine ended the request early".to_string());
-                self.pending.push_back(error_body(&e).to_string());
+                self.pending
+                    .push_back(error_body(&ended_early()).to_string());
                 self.end();
             }
         }
@@ -707,11 +729,13 @@ impl Streamed {
     }
 }
 
-/// Server-sent events: chunks as the engine produces them, then `[DONE]`. Even an error after
-/// the stream started ends with `[DONE]`, after an error payload, as vLLM does.
+/// Server-sent events: chunks as the engine produces them, from its `first` event on, then
+/// `[DONE]`. Even an error after the stream started ends with `[DONE]`, after an error payload,
+/// as vLLM does.
 fn stream(
     reply: Reply,
     tracked: Tracked,
+    first: Event,
     include_usage: bool,
     idle: Option<Duration>,
     permit: OwnedSemaphorePermit,
@@ -736,6 +760,7 @@ fn stream(
         );
         streamed.pending.push_back(chunk);
     }
+    streamed.on(Some(first));
     let events = futures_util::stream::unfold(streamed, |mut streamed| async move {
         loop {
             if let Some(data) = streamed.pending.pop_front() {
@@ -776,10 +801,7 @@ async fn collect(reply: Reply, mut tracked: Tracked, _permit: OwnedSemaphorePerm
                 completion_tokens,
             }) => break (reason, completion_tokens),
             Some(Event::Error(e)) => return engine_error_response(&e, reply.kind),
-            None => {
-                let e = EngineError::Failed("the engine ended the request early".to_string());
-                return engine_error_response(&e, reply.kind);
-            }
+            None => return engine_error_response(&ended_early(), reply.kind),
         }
     };
     let choice = match reply.kind {
@@ -880,6 +902,11 @@ fn classify(e: &EngineError) -> (StatusCode, &'static str, Option<&'static str>)
         EngineError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid_request_error", None),
         EngineError::Failed(_) => (StatusCode::INTERNAL_SERVER_ERROR, "server_error", None),
     }
+}
+
+/// An engine that dropped a request without `Finished` or `Error`
+fn ended_early() -> EngineError {
+    EngineError::Failed("the engine ended the request early".to_string())
 }
 
 fn error_body(e: &EngineError) -> serde_json::Value {

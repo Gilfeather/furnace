@@ -10,12 +10,13 @@ use std::net::SocketAddr;
 
 use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status};
 
+use super::infer::{InferError, encode_raw, grpc_status, values_datatype};
 use super::v2::{
-    INPUT_NAME, MODEL_VERSION, OUTPUT_NAME, check_input, decode_raw, encode_raw, match_input,
-    request_shape, resolve_model, select_outputs, values_datatype,
+    INPUT_NAME, MODEL_VERSION, OUTPUT_NAME, RequestTensor, Source, assemble_inputs, check_input,
+    metadata_of, resolve_model, select_outputs,
 };
 use super::*;
-use crate::tensor::{DataType, HostTensor, Values};
+use crate::tensor::{DataType, Values};
 
 /// Types and service generated from proto/open_inference_grpc.proto
 pub mod pb {
@@ -93,7 +94,7 @@ impl Service {
     /// `x-api-key: <key>` metadata
     fn admit<T>(&self, request: &GrpcRequest<T>) -> std::result::Result<(), Status> {
         let metadata = |name| request.metadata().get(name).and_then(|v| v.to_str().ok());
-        let key = presented_key(metadata("authorization"), metadata("x-api-key"));
+        let key = presented_key(metadata("authorization"), metadata(API_KEY_HEADER));
         let ip = request.remote_addr().map(|addr| addr.ip());
         self.state
             .access
@@ -115,6 +116,12 @@ impl Service {
                     ))
                 }
             })
+    }
+
+    /// The model a request names, or `NOT_FOUND`
+    fn model(&self, name: &str, version: &str) -> std::result::Result<Arc<ModelSlot>, Status> {
+        resolve_model(&self.state, name, version)
+            .map_err(|message| grpc_status(StatusCode::NOT_FOUND, message))
     }
 }
 
@@ -142,8 +149,7 @@ impl GrpcInferenceService for Service {
     ) -> std::result::Result<GrpcResponse<pb::ModelReadyResponse>, Status> {
         self.admit(&request)?;
         let request = request.into_inner();
-        let slot = resolve_model(&self.state, &request.name, &request.version)
-            .map_err(Status::not_found)?;
+        let slot = self.model(&request.name, &request.version)?;
         Ok(GrpcResponse::new(pb::ModelReadyResponse {
             ready: slot.get().ready(),
         }))
@@ -167,26 +173,24 @@ impl GrpcInferenceService for Service {
     ) -> std::result::Result<GrpcResponse<pb::ModelMetadataResponse>, Status> {
         self.admit(&request)?;
         let request = request.into_inner();
-        let slot = resolve_model(&self.state, &request.name, &request.version)
-            .map_err(Status::not_found)?;
-        let loaded = slot.get();
-        let info = loaded.model.get_info();
-        let metadata = |tensors: &[crate::tensor::TensorInfo]| {
+        let slot = self.model(&request.name, &request.version)?;
+        let metadata = metadata_of(slot.get().model.get_info());
+        let tensors = |tensors: Vec<super::v2::TensorMetadata>| {
             tensors
-                .iter()
+                .into_iter()
                 .map(|t| TensorMetadata {
-                    name: t.name.clone(),
-                    datatype: t.datatype.clone(),
-                    shape: t.shape.clone(),
+                    name: t.name,
+                    datatype: t.datatype,
+                    shape: t.shape,
                 })
                 .collect()
         };
         Ok(GrpcResponse::new(pb::ModelMetadataResponse {
-            name: info.name.clone(),
-            versions: vec![MODEL_VERSION.to_string()],
-            platform: format!("furnace_{}", info.model_type),
-            inputs: metadata(&info.inputs),
-            outputs: metadata(&info.outputs),
+            name: metadata.name,
+            versions: metadata.versions,
+            platform: metadata.platform,
+            inputs: tensors(metadata.inputs),
+            outputs: tensors(metadata.outputs),
             properties: Default::default(),
         }))
     }
@@ -198,40 +202,65 @@ impl GrpcInferenceService for Service {
         self.admit(&request)?;
         let state = &self.state;
         let start = Instant::now();
-        state.total_requests.fetch_add(1, Ordering::Relaxed);
         let result = infer(state, request.into_inner()).await;
-        state.request_latency.observe(start.elapsed());
-        if let Err(status) = &result {
-            state.total_errors.fetch_add(1, Ordering::Relaxed);
-            if status.code() == tonic::Code::ResourceExhausted {
-                state.rejected_busy.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        result.map(GrpcResponse::new)
+        state.count_request(
+            start.elapsed(),
+            result.is_err(),
+            matches!(result, Err(Failed::Infer(InferError::Busy))),
+        );
+        result.map(GrpcResponse::new).map_err(Failed::into_status)
     }
+}
+
+/// Why an inference over gRPC got no answer: a request that does not fit, or the shared
+/// inference path's refusal
+#[derive(Debug)]
+enum Failed {
+    Request(Status),
+    Infer(InferError),
+}
+
+impl Failed {
+    fn into_status(self) -> Status {
+        match self {
+            Self::Request(status) => status,
+            Self::Infer(e) => e.into_status(),
+        }
+    }
+}
+
+impl From<InferError> for Failed {
+    fn from(e: InferError) -> Self {
+        Self::Infer(e)
+    }
+}
+
+/// A request that does not fit the model
+fn invalid(message: String) -> Failed {
+    Failed::Request(grpc_status(StatusCode::BAD_REQUEST, message))
 }
 
 async fn infer(
     state: &ServerState,
     mut request: pb::ModelInferRequest,
-) -> std::result::Result<pb::ModelInferResponse, Status> {
+) -> std::result::Result<pb::ModelInferResponse, Failed> {
     let slot = resolve_model(state, &request.model_name, &request.model_version)
-        .map_err(Status::not_found)?;
+        .map_err(|message| Failed::Request(grpc_status(StatusCode::NOT_FOUND, message)))?;
     let loaded = slot.get();
     let announced = state.serving.announce(&slot.name);
     if !loaded.model.is_simple() {
         return infer_named(state, &slot, &loaded, announced, request).await;
     }
     let [input] = request.inputs.as_mut_slice() else {
-        return Err(Status::invalid_argument(format!(
+        return Err(invalid(format!(
             "Expected exactly one input ('{INPUT_NAME}'), got {}",
             request.inputs.len()
         )));
     };
-    let batch_size = check_input(&loaded.model, &input.name, &input.datatype, &input.shape)
-        .map_err(Status::invalid_argument)?;
+    let batch_size =
+        check_input(&loaded.model, &input.name, &input.datatype, &input.shape).map_err(invalid)?;
     if let Some(unknown) = request.outputs.iter().find(|o| o.name != OUTPUT_NAME) {
-        return Err(Status::invalid_argument(format!(
+        return Err(invalid(format!(
             "Unknown output '{}'; the model's output is '{OUTPUT_NAME}'",
             unknown.name
         )));
@@ -241,18 +270,14 @@ async fn infer(
     let data = match request.raw_input_contents.first() {
         Some(raw) => {
             if raw.len() != elements * size_of::<f32>() {
-                return Err(Status::invalid_argument(format!(
-                    "raw_input_contents has {} bytes; shape {:?} needs {}",
+                return Err(invalid(format!(
+                    "Input '{INPUT_NAME}' has {} bytes of raw data; shape {:?} of FP32 needs {}",
                     raw.len(),
                     input.shape,
                     elements * size_of::<f32>()
                 )));
             }
-            raw.as_chunks::<4>()
-                .0
-                .iter()
-                .map(|b| f32::from_le_bytes(*b))
-                .collect()
+            f32s_from_le(raw)
         }
         None => {
             let values = input
@@ -261,7 +286,7 @@ async fn infer(
                 .map(|contents| contents.fp32_contents)
                 .unwrap_or_default();
             if values.len() != elements {
-                return Err(Status::invalid_argument(format!(
+                return Err(invalid(format!(
                     "Input shape {:?} has {elements} elements, fp32_contents has {}",
                     input.shape,
                     values.len()
@@ -271,26 +296,13 @@ async fn infer(
         }
     };
 
-    let start = Instant::now();
-    let permit = state
-        .inference_slots
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| Status::resource_exhausted("Too many concurrent requests, retry later"))?;
-    let output = run_inference(state, &loaded, announced, data, batch_size, permit)
-        .await
-        .map_err(|response| response_status(&response))?
-        .map_err(error_status)?;
-    state.observe_inference(&slot, start.elapsed());
-
+    let output = state
+        .infer_flat(&slot, &loaded, announced, data, batch_size)
+        .await?;
     let info = loaded.model.get_info();
     let shape = std::iter::once(batch_size as i64)
         .chain(info.output_spec.shape.iter().map(|&d| d as i64))
         .collect();
-    let mut raw = Vec::with_capacity(output.len() * size_of::<f32>());
-    for value in &output {
-        raw.extend_from_slice(&value.to_le_bytes());
-    }
     Ok(pb::ModelInferResponse {
         model_name: info.name.clone(),
         model_version: MODEL_VERSION.to_string(),
@@ -303,29 +315,8 @@ async fn infer(
             parameters: Default::default(),
             contents: None,
         }],
-        raw_output_contents: vec![raw],
+        raw_output_contents: vec![f32s_to_le(&output)],
     })
-}
-
-/// The gRPC status for a failed inference
-fn error_status(e: FurnaceError) -> Status {
-    match e {
-        FurnaceError::Model(
-            ModelError::InputValidation { .. }
-            | ModelError::InvalidDataType(_)
-            | ModelError::InvalidInput(_),
-        ) => Status::invalid_argument(e.to_string()),
-        _ => Status::internal(e.to_string()),
-    }
-}
-
-/// The gRPC status for an HTTP error response of the shared inference path
-fn response_status(response: &Response) -> Status {
-    if response.status() == StatusCode::GATEWAY_TIMEOUT {
-        Status::deadline_exceeded("Inference exceeded the timeout")
-    } else {
-        Status::internal("Inference failed")
-    }
 }
 
 /// Inference for a model of named tensors: `raw_input_contents` (one per input, as
@@ -336,90 +327,47 @@ async fn infer_named(
     loaded: &Loaded,
     announced: Option<crate::nerve::Announced<'_>>,
     mut request: pb::ModelInferRequest,
-) -> std::result::Result<pb::ModelInferResponse, Status> {
+) -> std::result::Result<pb::ModelInferResponse, Failed> {
     let model = &loaded.model;
-    let mut tensors: Vec<Option<HostTensor>> = vec![None; model.inputs().len()];
     let raw_inputs = std::mem::take(&mut request.raw_input_contents);
     if !raw_inputs.is_empty() && raw_inputs.len() != request.inputs.len() {
-        return Err(Status::invalid_argument(format!(
+        return Err(invalid(format!(
             "{} raw_input_contents for {} inputs",
             raw_inputs.len(),
             request.inputs.len()
         )));
     }
-    for (i, input) in request.inputs.iter_mut().enumerate() {
-        let (index, wire) =
-            match_input(model, &input.name, &input.datatype).map_err(Status::invalid_argument)?;
-        if tensors[index].is_some() {
-            return Err(Status::invalid_argument(format!(
-                "Input '{}' is given twice",
-                input.name
-            )));
-        }
-        let shape = request_shape(model, index, &input.shape).map_err(Status::invalid_argument)?;
-        let elements: usize = shape.iter().product();
-        let values = match raw_inputs.get(i) {
-            Some(raw) => {
-                if raw.len() != elements * wire.size() {
-                    return Err(Status::invalid_argument(format!(
-                        "Input '{}': raw_input_contents has {} bytes; shape {:?} of {} needs {}",
-                        input.name,
-                        raw.len(),
-                        input.shape,
-                        wire.v2_name(),
-                        elements * wire.size()
-                    )));
-                }
-                decode_raw(wire, raw)
-            }
+    let tensors = request.inputs.iter_mut().enumerate().map(|(i, input)| {
+        let source = match raw_inputs.get(i) {
+            Some(raw) => Source::Raw(raw),
             None => {
                 let contents = input.contents.take().unwrap_or_default();
-                let values = match wire {
-                    DataType::Fp32 => Values::F32(contents.fp32_contents),
-                    DataType::Int64 => Values::I64(contents.int64_contents),
-                    DataType::Int32 => {
+                // The typed field that matches the datatype; a mismatch is refused by name
+                Source::Values(match DataType::from_v2_name(&input.datatype) {
+                    Some(DataType::Int64) => Values::I64(contents.int64_contents),
+                    Some(DataType::Int32) => {
                         Values::I64(contents.int_contents.into_iter().map(i64::from).collect())
                     }
-                };
-                if values.len() != elements {
-                    return Err(Status::invalid_argument(format!(
-                        "Input '{}' has shape {:?} ({elements} elements) but {} values",
-                        input.name,
-                        input.shape,
-                        values.len()
-                    )));
-                }
-                values
+                    _ => Values::F32(contents.fp32_contents),
+                })
             }
         };
-        tensors[index] = Some(HostTensor { shape, values });
-    }
-    let inputs = tensors
-        .into_iter()
-        .zip(model.inputs())
-        .map(|(tensor, spec)| {
-            tensor.ok_or_else(|| Status::invalid_argument(format!("Missing input '{}'", spec.name)))
-        })
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        RequestTensor {
+            name: &input.name,
+            datatype: &input.datatype,
+            shape: &input.shape,
+            source,
+        }
+    });
+    let inputs = assemble_inputs(model, tensors).map_err(invalid)?;
     let selected = select_outputs(
         model,
         request.outputs.iter().map(|o| (o.name.as_str(), true)),
         true,
     )
-    .map_err(Status::invalid_argument)?;
+    .map_err(invalid)?;
 
-    let start = Instant::now();
-    let permit = state
-        .inference_slots
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| Status::resource_exhausted("Too many concurrent requests, retry later"))?;
-    let outputs = run_general(state, loaded, announced, inputs, permit)
-        .await
-        .map_err(|response| response_status(&response))?
-        .map_err(error_status)?;
-    state.observe_inference(slot, start.elapsed());
-
+    let outputs = state.infer(slot, loaded, announced, inputs).await?;
     let mut tensors = Vec::with_capacity(selected.len());
     let mut raw = Vec::with_capacity(selected.len());
     for (index, _) in selected {
@@ -444,7 +392,7 @@ async fn infer_named(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::tests::test_app_state;
     use super::pb::grpc_inference_service_client::GrpcInferenceServiceClient;
     use super::pb::model_infer_request::{InferInputTensor, InferRequestedOutputTensor};
@@ -456,7 +404,9 @@ mod tests {
         client_for(test_app_state()).await
     }
 
-    async fn client_for(state: AppState) -> GrpcInferenceServiceClient<tonic::transport::Channel> {
+    pub(crate) async fn client_for(
+        state: AppState,
+    ) -> GrpcInferenceServiceClient<tonic::transport::Channel> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(
@@ -564,7 +514,7 @@ mod tests {
         assert_eq!(response.outputs.len(), 2);
         assert_eq!(response.outputs[1].datatype, "INT64");
         assert_eq!(
-            super::super::v2::decode_raw(DataType::Int64, &response.raw_output_contents[1]),
+            super::super::infer::decode_raw(DataType::Int64, &response.raw_output_contents[1]),
             Values::I64(vec![10, 26])
         );
 
@@ -604,7 +554,7 @@ mod tests {
         assert_eq!(response.outputs.len(), 1);
         assert_eq!(response.outputs[0].shape, [1, 4]);
         assert_eq!(
-            super::super::v2::decode_raw(DataType::Fp32, &response.raw_output_contents[0]),
+            super::super::infer::decode_raw(DataType::Fp32, &response.raw_output_contents[0]),
             Values::F32(vec![3.0; 4])
         );
 
@@ -674,7 +624,7 @@ mod tests {
         assert!(refused);
     }
 
-    fn request(
+    pub(crate) fn request(
         shape: Vec<i64>,
         raw: Option<Vec<f32>>,
         fp32: Option<Vec<f32>>,

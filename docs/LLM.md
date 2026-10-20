@@ -83,7 +83,10 @@ The crate documentation of `furnace::llm` has a complete example: a Burn model s
 
 Engines that schedule themselves implement `LlmEngine` instead: a request goes in, a stream of
 events (`Started`, `Text`, then `Finished` or `Error`) comes out, and dropping the stream
-cancels the request. Furnace's scheduler then stays out of the way.
+cancels the request. An engine that can refuse a request only once it has looked at it (say, it
+tokenizes on its own threads and finds the prompt too long) sends `Error` in place of `Started`:
+a stream's status waits for the first event, so that refusal is still a 400, not an error after
+a 200. Furnace's scheduler then stays out of the way.
 
 ## The API
 

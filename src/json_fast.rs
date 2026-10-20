@@ -4,8 +4,9 @@
 //! A ResNet-18 image is 150,528 numbers. serde_json parses each through its general machinery
 //! into an `f64`; here the numbers are found with a byte scan, parsed straight to `f32` by
 //! `fast-float2`, and, for large arrays, in parallel chunks. Anything else (other keys, other
-//! value types, whitespace or number forms this scanner does not take) returns `None`, and the
-//! caller falls back to serde_json, which then also produces the error messages.
+//! value types, whitespace or number forms this scanner does not take, numbers past `f32`'s
+//! range) returns `None`, and the caller falls back to serde_json, which then also produces the
+//! error messages.
 
 use rayon::prelude::*;
 
@@ -163,9 +164,11 @@ fn parse_list(text: &[u8], out: &mut Vec<f32>, empty_ok: bool) -> bool {
         let Some(len) = json_number_len(&text[i..]) else {
             return false;
         };
+        // A number past f32's range comes back infinite: leave it to serde_json and the model's
+        // checks, so this path never accepts what the fallback would answer otherwise
         match fast_float2::parse::<f32, _>(&text[i..i + len]) {
-            Ok(value) => out.push(value),
-            Err(_) => return false,
+            Ok(value) if value.is_finite() => out.push(value),
+            _ => return false,
         }
         i += len;
         skip_ws(&mut i);
@@ -284,6 +287,10 @@ mod tests {
             "{\"input\": [1 2]}",
             "{\"input\": [1]",
             "{\"input\": [1]} x",
+            "{\"input\": [1e39]}",
+            "{\"input\": [-1e39]}",
+            "{\"input\": [1e400]}",
+            "{\"inputs\": [[1], [1e400]]}",
             "{\"other\": [1]}",
             "[1, 2]",
             "",
