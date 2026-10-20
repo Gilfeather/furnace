@@ -38,8 +38,11 @@ pub use timer::Timer;
 pub mod kinds {
     /// [`Feature::sketch`](super::Feature::sketch): a hash of bytes
     pub const BYTES: u16 = 1;
+    /// A sketch of a text line ([`Lines`](super::Lines))
     pub const TEXT: u16 = 2;
+    /// A timer's tick, or its one fixed feature ([`Timer`](super::Timer))
     pub const TIMER: u16 = 3;
+    /// A sketch of an upstream event's data ([`Sse`](super::Sse))
     pub const SSE: u16 = 4;
 }
 
@@ -108,19 +111,26 @@ pub trait Receptor: Neuron {
 pub struct HttpMount {
     /// An axum route path, e.g. `/events`
     pub path: String,
+    /// The HTTP method the route answers
     pub method: HttpMethod,
 }
 
+/// The HTTP method a mounted receptor answers
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HttpMethod {
+    /// `GET`
     Get,
+    /// `POST`
     Post,
 }
 
 /// What an HTTP receptor sees of a request
 pub struct Ingest<'a> {
+    /// The request body, whole
     pub body: Bytes,
+    /// The `Content-Type` header, if any and valid text
     pub content_type: Option<&'a str>,
+    /// All the request's headers
     pub headers: &'a axum::http::HeaderMap,
 }
 
@@ -135,11 +145,13 @@ pub struct UrgencyRule {
 }
 
 impl UrgencyRule {
+    /// No deadline: signals are not urgent
     pub const NONE: Self = Self {
         deadline: None,
         intervals: None,
     };
 
+    /// Every signal wants an action within `deadline`
     pub fn within(deadline: Duration) -> Self {
         Self {
             deadline: Some(deadline),
@@ -184,6 +196,7 @@ impl Default for RateMeter {
 }
 
 impl RateMeter {
+    /// No arrivals yet: rate 0
     pub fn new() -> Self {
         Self {
             last: AtomicU64::new(0),
@@ -214,6 +227,7 @@ impl RateMeter {
         }
     }
 
+    /// The rate so far, in per second, without recording an arrival (0 before two)
     pub fn rate(&self) -> f32 {
         let interval = f64::from_bits(self.interval.load(Ordering::Relaxed));
         if interval > 0.0 {

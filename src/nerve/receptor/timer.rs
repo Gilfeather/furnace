@@ -16,6 +16,7 @@ pub struct Timer {
 }
 
 impl Timer {
+    /// One tick every `period` (at least 10 µs), the first one `period` after the start
     pub fn new(name: &str, period: Duration) -> Self {
         Self {
             source: Source::new(name),
@@ -24,6 +25,7 @@ impl Timer {
         }
     }
 
+    /// How each tick's urgency is stamped
     pub fn urgency(mut self, rule: UrgencyRule) -> Self {
         self.source.rule = rule;
         self

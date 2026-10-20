@@ -21,6 +21,7 @@ pub struct FileAppend {
 type Line = (String, tokio::sync::oneshot::Sender<std::io::Result<()>>);
 
 impl FileAppend {
+    /// Append to `path`, created if missing
     pub fn new(name: &str, path: impl Into<std::path::PathBuf>) -> Self {
         Self {
             name: name.to_string(),

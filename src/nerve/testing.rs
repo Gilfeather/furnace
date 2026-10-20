@@ -3,8 +3,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::fabric::{Fabric, FnNeuron};
-use super::neuron::{Firing, Mechanisms, Neuron, NeuronKind};
+use super::fabric::Fabric;
+use super::neuron::{Firing, FnNeuron, Mechanisms, Neuron, NeuronKind};
 use super::receptor::Receptor;
 use super::signal::{Feature, NeuronId, Payload, Signal};
 

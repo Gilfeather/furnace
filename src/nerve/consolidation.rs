@@ -101,6 +101,7 @@ const TOP: usize = 8;
 pub struct Cause {
     /// The memory's key for the signal
     pub key: Feature,
+    /// The signal's id
     pub id: SignalId,
     /// When the receptor saw the stimulus
     pub at: Instant,
@@ -116,10 +117,16 @@ pub enum Recalled {
     /// Ask the brain
     Miss,
     /// Fire these; with `shadow`, also send the signal to the brain to check
-    Hit { fire: Vec<Signal>, shadow: bool },
+    Hit {
+        /// The remembered decision's signals
+        fire: Vec<Signal>,
+        /// Whether this answer is a shadow check
+        shadow: bool,
+    },
 }
 
 impl Recalled {
+    /// Whether an engram answered
     pub fn is_hit(&self) -> bool {
         matches!(self, Self::Hit { .. })
     }
@@ -241,41 +248,49 @@ impl Consolidation {
         Self::default()
     }
 
+    /// Effectors whose commands may be answered from an engram
     pub fn effectors<S: Into<String>>(mut self, names: impl IntoIterator<Item = S>) -> Self {
         self.effectors = names.into_iter().map(Into::into).collect();
         self
     }
 
+    /// Agreeing brain decisions in a row before consolidating, at least 1
     pub fn after(mut self, n: u32) -> Self {
         self.after = n.max(1);
         self
     }
 
+    /// Fraction of reflex answers also checked by the brain, clamped to 0..=1
     pub fn shadow(mut self, fraction: f64) -> Self {
         self.shadow = fraction.clamp(0.0, 1.0);
         self
     }
 
+    /// Answers of a new reflex that are always checked
     pub fn first_shadows(mut self, n: u32) -> Self {
         self.first_shadows = n;
         self
     }
 
+    /// How long an unseen engram is kept
     pub fn forget_after(mut self, ttl: Duration) -> Self {
         self.forget_after = ttl;
         self
     }
 
+    /// Effector failures in a row that dissolve an engram, at least 1
     pub fn failures(mut self, k: u32) -> Self {
         self.failures = k.max(1);
         self
     }
 
+    /// Top-level argument fields ignored when comparing decisions
     pub fn volatile<S: Into<String>>(mut self, fields: impl IntoIterator<Item = S>) -> Self {
         self.volatile = fields.into_iter().map(Into::into).collect();
         self
     }
 
+    /// Engrams remembered at once, at least 4, rounded up to a multiple of 4
     pub fn capacity(mut self, n: usize) -> Self {
         self.capacity = n.max(WAYS);
         self
@@ -409,6 +424,7 @@ pub struct ConsolidationMetrics {
     pub recorded: u64,
     /// Engrams in the store now, and of those consolidated
     pub engrams: u64,
+    /// Of the engrams, those consolidated
     pub reflexes: u64,
     /// `brain / signals`
     pub brain_fraction: f64,
@@ -418,6 +434,7 @@ pub struct ConsolidationMetrics {
     pub timeline: Vec<f64>,
     /// Signal-to-decision time through the brain (p50), and what the hits saved at that
     pub brain_p50_ms: Option<f64>,
+    /// Brain time the hits saved, at the p50: `hits * brain_p50_ms`
     pub brain_time_saved_ms: f64,
 }
 
@@ -535,6 +552,7 @@ struct Shared {
 pub struct EngramStore(Arc<Shared>);
 
 impl EngramStore {
+    /// An empty store under `policy`
     pub fn new(policy: Consolidation) -> Self {
         let sets = policy.capacity.div_ceil(WAYS).max(1);
         Self(Arc::new(Shared {
@@ -560,6 +578,7 @@ impl EngramStore {
         }))
     }
 
+    /// The policy the store was made with
     pub fn policy(&self) -> &Consolidation {
         &self.0.policy
     }
@@ -616,6 +635,7 @@ impl EngramStore {
             })
     }
 
+    /// The counters and rates now
     pub fn snapshot(&self) -> ConsolidationMetrics {
         let p50 = self.0.latency.p50();
         let store = self.lock();
@@ -1065,10 +1085,12 @@ pub struct Recall {
 }
 
 impl Recall {
+    /// A recall neuron named `name`, over a clone of `memory`
     pub fn new(name: &str, memory: &(impl Memory + Clone)) -> Self {
         Self::shared(name, Arc::new(memory.clone()))
     }
 
+    /// A recall neuron named `name`, over a memory already shared
     pub fn shared(name: &str, memory: Arc<dyn Memory>) -> Self {
         Self {
             name: name.to_string(),
@@ -1114,10 +1136,12 @@ pub struct Record<N> {
 }
 
 impl<N: Neuron> Record<N> {
+    /// `brain`, its decisions recorded in a clone of `memory`
     pub fn new(brain: N, memory: &(impl Memory + Clone)) -> Self {
         Self::shared(brain, Arc::new(memory.clone()))
     }
 
+    /// `brain`, its decisions recorded in a memory already shared
     pub fn shared(brain: N, memory: Arc<dyn Memory>) -> Self {
         Self { brain, memory }
     }
@@ -1215,10 +1239,12 @@ pub struct Inhibit {
 }
 
 impl Inhibit {
+    /// An inhibition neuron named `name`, over a clone of `memory`
     pub fn new(name: &str, memory: &(impl Memory + Clone)) -> Self {
         Self::shared(name, Arc::new(memory.clone()))
     }
 
+    /// An inhibition neuron named `name`, over a memory already shared
     pub fn shared(name: &str, memory: Arc<dyn Memory>) -> Self {
         Self {
             name: name.to_string(),
@@ -1286,10 +1312,12 @@ pub struct Watched<A> {
 }
 
 impl<A: Act> Watched<A> {
+    /// `act`, its outcomes reported to a clone of `memory`
     pub fn new(act: A, memory: &(impl Memory + Clone)) -> Self {
         Self::shared(act, Arc::new(memory.clone()))
     }
 
+    /// `act`, its outcomes reported to a memory already shared
     pub fn shared(act: A, memory: Arc<dyn Memory>) -> Self {
         Self { act, memory }
     }

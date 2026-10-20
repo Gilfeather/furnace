@@ -93,6 +93,7 @@ const RETIRED_SHOWN: usize = 16;
 pub struct ExpectConfig {
     /// Effectors an expectation's own commands may go to; nothing else
     pub effectors: Vec<String>,
+    /// How signals are read into templates and fields
     pub extraction: Extraction,
     /// Fraction of absorbed signals also sent to the brain as a shadow check
     pub shadow: f64,
@@ -130,55 +131,66 @@ impl Default for ExpectConfig {
 }
 
 impl ExpectConfig {
+    /// The defaults: no effector allowed for an expectation's own commands
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Effectors an expectation's own commands may go to
     pub fn effectors<S: Into<String>>(mut self, names: impl IntoIterator<Item = S>) -> Self {
         self.effectors = names.into_iter().map(Into::into).collect();
         self
     }
 
+    /// How signals are read
     pub fn extraction(mut self, how: Extraction) -> Self {
         self.extraction = how;
         self
     }
 
+    /// Fraction of absorbed signals checked by the brain, clamped to 0..=1
     pub fn shadow(mut self, fraction: f64) -> Self {
         self.shadow = fraction.clamp(0.0, 1.0);
         self
     }
 
+    /// First matches of an expectation that are all checked
     pub fn young(mut self, matches: u64) -> Self {
         self.young = matches;
         self
     }
 
+    /// Wrong shadow verdicts that retire an expectation, at least 1
     pub fn retire_after(mut self, wrong: u64) -> Self {
         self.retire_after = wrong.max(1);
         self
     }
 
+    /// Expectations installed and waiting for approval, at most
     pub fn max(mut self, n: usize) -> Self {
         self.max = n;
         self
     }
 
+    /// Writes through the `expect` effector per minute, at most
     pub fn writes_per_minute(mut self, n: usize) -> Self {
         self.writes_per_minute = n;
         self
     }
 
+    /// Whether new absorbing expectations from the brain wait for the operator
     pub fn approval(mut self, on: bool) -> Self {
         self.approval = on;
         self
     }
 
+    /// How long an unmatched expectation lives, unless it sets its own `ttl_s`
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = ttl;
         self
     }
 
+    /// Recent signals of the same template sent with a surprise
     pub fn context(mut self, n: usize) -> Self {
         self.context = n;
         self
@@ -202,19 +214,24 @@ pub enum Reason {
 /// One broken expectation in a surprise
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Broken {
+    /// The broken expectation's id
     pub expectation: String,
+    /// Its kind, as [`Kind::name`](language::Kind::name) writes it
     pub kind: &'static str,
     /// What was seen: a value, a count, a gap in milliseconds
     pub observed: Value,
+    /// What the expectation allows: a value, a bound, a period
     pub expected: Value,
 }
 
 /// What reaches the brain: the payload of a surprise signal, as JSON under `"surprise"`
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Surprise {
+    /// Why the signal goes to the brain
     pub reason: Reason,
     /// The receptor's expectations neuron
     pub at: String,
+    /// The expectations it broke (empty unless a violation or an absence)
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub broken: Vec<Broken>,
     /// For a shadow check: the expectation that absorbed it
@@ -232,27 +249,41 @@ pub struct Surprise {
 /// Counters of an [`Expectations`] neuron
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct ExpectMetrics {
+    /// Signals seen
     pub signals: u64,
     /// Matched and absorbed
     pub absorbed: u64,
     /// Matched, and acted on by the rule's commands
     pub acted: u64,
+    /// Signals no expectation covers
     pub unexpected: u64,
+    /// Violations, by the broken expectation's kind
     pub violations: BTreeMap<&'static str, u64>,
+    /// Expected signals that did not come
     pub absences: u64,
     /// Signals sent to the brain: surprises and shadow checks
     pub surprises: u64,
+    /// Of the surprises, shadow checks
     pub shadows: u64,
+    /// Shadow verdicts saying the absorption was wrong
     pub shadow_wrong: u64,
+    /// Violations the brain answered as normal
     pub false_alarms: u64,
     /// Parameters moved by `learn`
     pub learned: u64,
+    /// Expectations installed new (replacements not counted)
     pub installed: u64,
+    /// Expectations replaced
     pub replaced: u64,
+    /// Expectations retired: by the brain, by the operator, by wrong verdicts or by a changed dependency
     pub retired: u64,
+    /// Expectations expired after their ttl without a match
     pub expired: u64,
+    /// Writes refused
     pub refused: u64,
+    /// Expectations installed now
     pub active: u64,
+    /// Expectations waiting for approval now
     pub pending_approval: u64,
     /// `(unexpected + violations + absences) / signals`
     pub surprise_rate: f64,
@@ -533,6 +564,7 @@ enum Verdict {
 }
 
 impl Expectations {
+    /// An expectations neuron named `name`, with nothing installed
     pub fn new(name: &str, config: ExpectConfig) -> Self {
         Self(Arc::new(Inner {
             name: name.to_string(),
@@ -552,6 +584,7 @@ impl Expectations {
         }
     }
 
+    /// The policy it was made with
     pub fn config(&self) -> &ExpectConfig {
         &self.0.config
     }
@@ -621,6 +654,7 @@ impl Expectations {
         self.lock().pending_approval.keys().cloned().collect()
     }
 
+    /// The installed expectation `id`
     pub fn get(&self, id: &str) -> Option<Expectation> {
         self.lock().installed.get(id).map(|i| i.expectation.clone())
     }
@@ -1070,6 +1104,7 @@ impl Expectations {
         Ok(())
     }
 
+    /// The counters now
     pub fn snapshot(&self) -> ExpectMetrics {
         let state = self.lock();
         let c = &state.counts;

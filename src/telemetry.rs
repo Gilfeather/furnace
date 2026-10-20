@@ -4,7 +4,7 @@
 //! every request, and give both the Prometheus `_bucket`/`_sum`/`_count` series and estimated
 //! percentiles for the JSON metrics.
 
-use std::fmt::Write as _;
+use std::fmt::{Display, Write as _};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -119,8 +119,7 @@ impl Histogram {
 
     /// Append this histogram as Prometheus `_bucket`, `_sum` and `_count` series
     pub fn render(&self, out: &mut String, name: &str, help: &str) {
-        let _ = writeln!(out, "# HELP {name} {help}");
-        let _ = writeln!(out, "# TYPE {name} histogram");
+        render_family(out, name, "histogram", help);
         self.render_series(out, name, "");
     }
 
@@ -129,13 +128,6 @@ impl Histogram {
     pub fn render_series(&self, out: &mut String, name: &str, labels: &str) {
         let (counts, sum) = self.snapshot();
         let sep = if labels.is_empty() { "" } else { "," };
-        let braces = |l: &str| {
-            if l.is_empty() {
-                String::new()
-            } else {
-                format!("{{{l}}}")
-            }
-        };
         let mut cumulative = 0;
         for (i, count) in counts.iter().enumerate() {
             cumulative += count;
@@ -147,16 +139,32 @@ impl Histogram {
                 "{name}_bucket{{{labels}{sep}le=\"{le}\"}} {cumulative}"
             );
         }
-        let _ = writeln!(out, "{name}_sum{} {sum}", braces(labels));
-        let _ = writeln!(out, "{name}_count{} {cumulative}", braces(labels));
+        render_labelled(out, &format!("{name}_sum"), labels, sum);
+        render_labelled(out, &format!("{name}_count"), labels, cumulative);
     }
 }
 
 /// Append one counter or gauge in the Prometheus text format
 pub fn render_value(out: &mut String, name: &str, kind: &str, help: &str, value: impl ToString) {
+    render_family(out, name, kind, help);
+    render_labelled(out, name, "", value.to_string());
+}
+
+/// Append the `HELP` and `TYPE` lines of a family (`kind` is `counter`, `gauge`, ...), for
+/// the samples [`render_labelled`] writes after them
+pub fn render_family(out: &mut String, name: &str, kind: &str, help: &str) {
     let _ = writeln!(out, "# HELP {name} {help}");
     let _ = writeln!(out, "# TYPE {name} {kind}");
-    let _ = writeln!(out, "{name} {}", value.to_string());
+}
+
+/// Append one sample, `name{labels} value`; `labels` is written as given (`a="x",b="y"`,
+/// values escaped with [`label`]), and an empty one leaves out the braces
+pub fn render_labelled(out: &mut String, name: &str, labels: &str, value: impl Display) {
+    if labels.is_empty() {
+        let _ = writeln!(out, "{name} {value}");
+    } else {
+        let _ = writeln!(out, "{name}{{{labels}}} {value}");
+    }
 }
 
 /// Escape a Prometheus label value

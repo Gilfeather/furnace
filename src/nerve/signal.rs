@@ -19,6 +19,7 @@ impl NeuronId {
     /// A signal that no neuron has stamped yet
     pub(crate) const NONE: Self = Self(u32::MAX);
 
+    /// The index as a `usize`, for slices of neurons
     pub fn index(self) -> usize {
         self.0 as usize
     }
@@ -35,6 +36,7 @@ impl fmt::Display for NeuronId {
 pub struct PathwayId(pub(crate) u32);
 
 impl PathwayId {
+    /// The index as a `usize`, for slices of pathways
     pub fn index(self) -> usize {
         self.0 as usize
     }
@@ -61,7 +63,9 @@ impl SignalId {
 /// feature.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Feature {
+    /// Tells sketches of different origins apart (1 for [`Feature::sketch`])
     pub kind: u16,
+    /// The 64-bit summary itself
     pub sketch: u64,
 }
 
@@ -70,6 +74,7 @@ impl Feature {
     /// for it would attenuate everything
     pub const NONE: Self = Self { kind: 0, sketch: 0 };
 
+    /// A feature from a kind and a sketch of your own
     pub const fn new(kind: u16, sketch: u64) -> Self {
         Self { kind, sketch }
     }
@@ -85,10 +90,12 @@ impl Feature {
         Self::new(kind, sketch64(bytes))
     }
 
+    /// The same sketch under another `kind`
     pub fn with_kind(self, kind: u16) -> Self {
         Self { kind, ..self }
     }
 
+    /// Whether this is [`Feature::NONE`]
     pub fn is_none(self) -> bool {
         self == Self::NONE
     }
@@ -127,6 +134,7 @@ pub struct Urgency {
 }
 
 impl Urgency {
+    /// No deadline and no known rate
     pub const NONE: Self = Self {
         deadline: None,
         rate: 0.0,
@@ -140,6 +148,7 @@ impl Urgency {
         }
     }
 
+    /// An action is wanted by `deadline`
     pub fn at(deadline: Instant) -> Self {
         Self {
             deadline: Some(deadline),
@@ -147,6 +156,7 @@ impl Urgency {
         }
     }
 
+    /// The same urgency with this rate
     pub fn with_rate(self, rate: f32) -> Self {
         Self { rate, ..self }
     }
@@ -169,6 +179,7 @@ pub struct Command {
 }
 
 impl Command {
+    /// A command for the effector registered as `effector`
     pub fn new(effector: &str, args: serde_json::Value) -> Self {
         Self {
             effector: effector.to_string(),
@@ -181,12 +192,18 @@ impl Command {
 /// usually never looks at it.
 #[derive(Clone, Debug, Default)]
 pub enum Payload {
+    /// Nothing: the signal is its feature alone
     #[default]
     None,
+    /// Raw bytes
     Bytes(Bytes),
+    /// UTF-8 text
     Text(Arc<str>),
+    /// A JSON value
     Json(Arc<serde_json::Value>),
+    /// Tensors, for a model
     Tensors(Arc<Vec<HostTensor>>),
+    /// A command for an effector
     Command(Arc<Command>),
     /// A request for an LLM to generate (feature `llm`): what the OpenAI routes send the
     /// brain
@@ -195,22 +212,27 @@ pub enum Payload {
 }
 
 impl Payload {
+    /// A text payload
     pub fn text(s: &str) -> Self {
         Self::Text(Arc::from(s))
     }
 
+    /// A bytes payload
     pub fn bytes(b: impl Into<Bytes>) -> Self {
         Self::Bytes(b.into())
     }
 
+    /// A JSON payload
     pub fn json(v: serde_json::Value) -> Self {
         Self::Json(Arc::new(v))
     }
 
+    /// A command payload
     pub fn command(c: Command) -> Self {
         Self::Command(Arc::new(c))
     }
 
+    /// A tensors payload
     pub fn tensors(t: Vec<HostTensor>) -> Self {
         Self::Tensors(Arc::new(t))
     }
@@ -224,6 +246,7 @@ impl Payload {
         }
     }
 
+    /// The bytes, for `Bytes` and for `Text` as UTF-8
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             Self::Bytes(b) => Some(b),
@@ -232,6 +255,7 @@ impl Payload {
         }
     }
 
+    /// The command, for `Command`
     pub fn as_command(&self) -> Option<&Command> {
         match self {
             Self::Command(c) => Some(c),
@@ -239,6 +263,12 @@ impl Payload {
         }
     }
 
+    /// Whether this payload is a command for `effector`
+    pub fn commands(&self, effector: &str) -> bool {
+        self.as_command().is_some_and(|c| c.effector == effector)
+    }
+
+    /// The tensors, for `Tensors`
     pub fn as_tensors(&self) -> Option<&[HostTensor]> {
         match self {
             Self::Tensors(t) => Some(t),
@@ -284,6 +314,7 @@ impl Payload {
         }
     }
 
+    /// The variant's name, lowercase (`"text"`, `"command"`, ...)
     pub fn kind(&self) -> &'static str {
         match self {
             Self::None => "none",
@@ -353,6 +384,7 @@ impl Trace {
         self.len as usize + self.overflow as usize
     }
 
+    /// Whether no neuron has been passed yet
     pub fn is_empty(&self) -> bool {
         self.len == 0 && self.overflow == 0
     }
@@ -367,6 +399,7 @@ impl Trace {
         self.queued
     }
 
+    /// The last neuron recorded in [`Trace::hops`]
     pub fn last(&self) -> Option<NeuronId> {
         self.hops().last().copied()
     }
@@ -378,8 +411,11 @@ pub enum Answer {
     /// An HTTP response, as the [`Respond`](super::effector::Respond) effector makes it for
     /// the HTTP receptor
     Http {
+        /// HTTP status code
         status: u16,
+        /// The `Content-Type` header
         content_type: String,
+        /// The response body
         body: Bytes,
     },
     /// Tensors, for a protocol that encodes them itself (the server's `/predict`, the
@@ -399,6 +435,7 @@ pub enum Answer {
 }
 
 impl Answer {
+    /// A `text/plain` response
     pub fn text(status: u16, body: &str) -> Self {
         Self::Http {
             status,
@@ -407,6 +444,7 @@ impl Answer {
         }
     }
 
+    /// An `application/json` response
     pub fn json(status: u16, value: &serde_json::Value) -> Self {
         Self::Http {
             status,
@@ -415,6 +453,7 @@ impl Answer {
         }
     }
 
+    /// A response with a content type of your own
     pub fn bytes(status: u16, content_type: &str, body: Bytes) -> Self {
         Self::Http {
             status,
@@ -423,6 +462,7 @@ impl Answer {
         }
     }
 
+    /// The chain failed with `error`
     pub fn failed(error: crate::error::FurnaceError) -> Self {
         Self::Failed(Box::new(error))
     }
@@ -483,6 +523,7 @@ impl Reply {
         sender.is_some_and(|s| s.send(answer).is_ok())
     }
 
+    /// Whether the request still waits and no answer was sent yet
     pub fn is_open(&self) -> bool {
         self.0
             .sender
@@ -506,16 +547,21 @@ impl Reply {
 /// an effector can be traced back to the stimulus that caused it.
 #[derive(Clone, Debug)]
 pub struct Signal {
+    /// Shared by every signal derived from the same stimulus
     pub id: SignalId,
     /// The receptor that made it
     pub origin: NeuronId,
     /// When the receptor saw the stimulus: stimulus-to-action latencies count from here
     pub at: Instant,
+    /// When an action is due; pathway selection reads it
     pub urgency: Urgency,
+    /// What the receptor extracted; habituation and thresholds look at it
     pub feature: Feature,
     /// Strength after attenuation, 0..=1. Below a neuron's threshold, nothing fires.
     pub intensity: f32,
+    /// The raw input, shared and never copied
     pub payload: Payload,
+    /// The neurons it has passed through
     pub trace: Trace,
     /// The way back to the request that started the chain, if any
     pub reply: Option<Reply>,
@@ -537,21 +583,25 @@ impl Signal {
         }
     }
 
+    /// The same signal with this urgency
     pub fn with_urgency(mut self, urgency: Urgency) -> Self {
         self.urgency = urgency;
         self
     }
 
+    /// The same signal with this intensity, 0..=1
     pub fn with_intensity(mut self, intensity: f32) -> Self {
         self.intensity = intensity;
         self
     }
 
+    /// The same signal with this feature
     pub fn with_feature(mut self, feature: Feature) -> Self {
         self.feature = feature;
         self
     }
 
+    /// The same signal carrying a way back to the request
     pub fn with_reply(mut self, reply: Reply) -> Self {
         self.reply = Some(reply);
         self

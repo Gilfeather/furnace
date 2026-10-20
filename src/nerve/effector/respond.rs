@@ -18,6 +18,7 @@ pub struct Respond {
 }
 
 impl Respond {
+    /// Registered as `name`, the effector commands address
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),

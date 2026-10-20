@@ -8,7 +8,9 @@ use crate::nerve::signal::{Command, Signal};
 /// What a [`Channel`] effector hands to your code
 #[derive(Debug, Clone)]
 pub struct Delivery {
+    /// What to do
     pub command: Command,
+    /// The signal that carried it
     pub signal: Signal,
 }
 
@@ -20,6 +22,8 @@ pub struct Channel {
 }
 
 impl Channel {
+    /// Named `name`, holding up to `capacity` deliveries (at least 1); your code keeps the
+    /// receiver
     pub fn new(name: &str, capacity: usize) -> (Self, mpsc::Receiver<Delivery>) {
         let (sender, receiver) = mpsc::sync_channel(capacity.max(1));
         (

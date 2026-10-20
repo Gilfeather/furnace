@@ -25,6 +25,7 @@ pub struct Lines {
 }
 
 impl Lines {
+    /// Read lines from the process's stdin
     pub fn stdin(name: &str) -> Self {
         Self {
             source: Source::new(name),
@@ -48,6 +49,7 @@ impl Lines {
         }
     }
 
+    /// How each line's urgency is stamped
     pub fn urgency(mut self, rule: UrgencyRule) -> Self {
         self.source.rule = rule;
         self

@@ -29,6 +29,7 @@ impl Sse {
         self.sender.subscribe()
     }
 
+    /// Subscribers connected now
     pub fn subscribers(&self) -> usize {
         self.sender.receiver_count()
     }

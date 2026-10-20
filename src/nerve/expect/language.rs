@@ -32,6 +32,7 @@ impl Selector {
         self.template.is_none() && self.fields.is_empty()
     }
 
+    /// Whether `observed` is selected
     pub fn matches(&self, observed: &Observation) -> bool {
         if let Some(t) = self.template_key()
             && observed.template != Some(t)
@@ -79,22 +80,39 @@ pub enum Kind {
     Match,
     /// Matching signals per `window_ms` stay within `[min, max]`
     Rate {
+        /// The window, in milliseconds
         window_ms: u64,
+        /// Fewest signals per window, 0 by default
         #[serde(default)]
         min: u64,
+        /// Most signals per window, unbounded by default
         #[serde(default = "unbounded")]
         max: u64,
     },
     /// One matching signal at least every `period_ms`, give or take `tolerance_ms`
     Every {
+        /// The expected gap between signals, in milliseconds
         period_ms: u64,
+        /// Allowed deviation from `period_ms`, in milliseconds, 0 by default
         #[serde(default)]
         tolerance_ms: u64,
     },
     /// The numeric `field` of every matching signal stays within `[min, max]`
-    Range { field: String, min: f64, max: f64 },
+    Range {
+        /// The field's name
+        field: String,
+        /// Lowest value allowed
+        min: f64,
+        /// Highest value allowed
+        max: f64,
+    },
     /// A matching signal is followed by one matching `then` within `within_ms`
-    Then { then: Selector, within_ms: u64 },
+    Then {
+        /// The signals that must follow
+        then: Selector,
+        /// How soon they must, in milliseconds
+        within_ms: u64,
+    },
     /// No matching signal at all
     Never,
 }
@@ -104,6 +122,7 @@ fn unbounded() -> u64 {
 }
 
 impl Kind {
+    /// The kind as written in an expectation: `"rate"`, `"never"`, ...
     pub fn name(&self) -> &'static str {
         match self {
             Self::Match => "match",
@@ -167,15 +186,21 @@ pub type Learn = BTreeMap<String, [f64; 2]>;
 /// One expectation, as a brain writes it. Unknown fields are refused ([`Expectation::parse`]).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Expectation {
+    /// Unique among a neuron's expectations; a write with the same id replaces it
     pub id: String,
+    /// Which signals it is about; none: every signal
     #[serde(default)]
     pub selector: Selector,
+    /// What holds, flattened into the expectation (`"kind": "rate"`, ...)
     #[serde(flatten)]
     pub kind: Kind,
+    /// What a matching signal that keeps it does
     #[serde(default)]
     pub on_match: OnMatch,
+    /// What breaking it does
     #[serde(default)]
     pub on_violation: OnViolation,
+    /// Parameters the periphery may tune within the brain's bounds
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub learn: Learn,
     /// Forgotten after this long without a match; none: the store's default

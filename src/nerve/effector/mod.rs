@@ -37,6 +37,7 @@ use serde::Serialize;
 use super::latency::LatencyEstimate;
 use super::neuron::{Cx, Firing, Neuron, NeuronKind};
 use super::signal::{Command, Signal};
+use crate::telemetry::{render_family, render_labelled};
 
 pub use channel::{Channel, Delivery};
 pub use file_append::FileAppend;
@@ -50,7 +51,9 @@ pub use webhook::Webhook;
 /// Why an act failed, and whether trying again could help
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActError {
+    /// What went wrong, for the log
     pub message: String,
+    /// Whether a retry could succeed
     pub retry: bool,
 }
 
@@ -72,20 +75,25 @@ impl ActError {
     }
 }
 
+/// An act still in progress on the motor side's runtime
 pub type ActFuture = Pin<Box<dyn Future<Output = Result<(), ActError>> + Send + 'static>>;
 
 /// What an act returns: done at once (an answer, a channel send, a file write) or still
 /// going on the motor side's runtime (a socket, a process)
 pub enum Action {
+    /// Finished, with its outcome
     Done(Result<(), ActError>),
+    /// Still going; the effector awaits it on the motor side
     Pending(ActFuture),
 }
 
 impl Action {
+    /// Done, successfully
     pub fn ok() -> Self {
         Self::Done(Ok(()))
     }
 
+    /// Still going: `future` finishes the act
     pub fn pending(future: impl Future<Output = Result<(), ActError>> + Send + 'static) -> Self {
         Self::Pending(Box::pin(future))
     }
@@ -94,6 +102,7 @@ impl Action {
 /// The thing an effector does. Implement this for your own device or service; the
 /// [`Effector`] around it supplies the loop.
 pub trait Act: Send + Sync + 'static {
+    /// The effector's name, as commands address it
     fn name(&self) -> &str;
 
     /// Do it. Called again, with the same command, on a retry.
@@ -102,6 +111,7 @@ pub trait Act: Send + Sync + 'static {
     /// Warm up (open the connection) on `runtime`; must not block
     fn prepare(&self, _runtime: &tokio::runtime::Handle) {}
 
+    /// Anything `GET /nerve` should show about the act (its target, its settings)
     fn describe(&self) -> serde_json::Value {
         serde_json::Value::Null
     }
@@ -139,14 +149,17 @@ pub struct EffectorMetrics {
     pub acted: u64,
     /// Commands that failed for good (after their retries)
     pub failed: u64,
+    /// Retries, each counted once
     pub retries: u64,
     /// Dropped while the circuit was open
     pub dropped_open: u64,
     /// Dropped by the rate limit
     pub dropped_rate: u64,
+    /// Ignored in the refractory period
     pub quiet_refractory: u64,
     /// Commands in progress on the motor side
     pub inflight: u64,
+    /// Where the circuit breaker stands
     pub breaker: BreakerState,
     /// Of successful commands, from the effector's call to the world's acknowledgement
     pub latency: super::latency::LatencySnapshot,
@@ -261,6 +274,7 @@ impl Effector {
         self.configure(|i| i.refractory = Some(period))
     }
 
+    /// The counters, latency and breaker state as of now
     pub fn metrics(&self) -> EffectorMetrics {
         let c = &self.inner.counters;
         let load = |a: &AtomicU64| a.load(Ordering::Relaxed);
@@ -379,7 +393,6 @@ impl Neuron for Effector {
     }
 
     fn render_prometheus(&self, out: &mut String, labels: &str) {
-        use std::fmt::Write as _;
         let m = Effector::metrics(self);
         for (name, value) in [
             ("acted", m.acted),
@@ -389,27 +402,25 @@ impl Neuron for Effector {
             ("dropped_rate", m.dropped_rate),
             ("quiet_refractory", m.quiet_refractory),
         ] {
-            let _ = writeln!(
+            render_labelled(
                 out,
-                "furnace_nerve_effector_{name}_total{{{labels}}} {value}"
+                &format!("furnace_nerve_effector_{name}_total"),
+                labels,
+                value,
             );
         }
-        let _ = writeln!(
+        render_labelled(out, "furnace_nerve_effector_inflight", labels, m.inflight);
+        render_labelled(
             out,
-            "furnace_nerve_effector_inflight{{{labels}}} {}",
-            m.inflight
-        );
-        let _ = writeln!(
-            out,
-            "furnace_nerve_effector_circuit_open{{{labels}}} {}",
-            u8::from(m.breaker != BreakerState::Closed)
+            "furnace_nerve_effector_circuit_open",
+            labels,
+            u8::from(m.breaker != BreakerState::Closed),
         );
     }
 }
 
 /// The names of the Prometheus families effectors write, for `/metrics`' HELP lines
 pub(crate) fn render_prometheus_help(out: &mut String) {
-    use std::fmt::Write as _;
     for (name, help) in [
         ("acted_total", "Commands the effector carried out"),
         ("failed_total", "Commands that failed after their retries"),
@@ -424,14 +435,23 @@ pub(crate) fn render_prometheus_help(out: &mut String) {
             "Commands ignored in the refractory period",
         ),
     ] {
-        let _ = writeln!(
+        render_family(
             out,
-            "# HELP furnace_nerve_effector_{name} {help}\n# TYPE furnace_nerve_effector_{name} counter"
+            &format!("furnace_nerve_effector_{name}"),
+            "counter",
+            help,
         );
     }
-    let _ = writeln!(
+    render_family(
         out,
-        "# HELP furnace_nerve_effector_inflight Commands in progress\n# TYPE furnace_nerve_effector_inflight gauge\n\
-         # HELP furnace_nerve_effector_circuit_open 1 while the effector's circuit breaker is open or half open\n# TYPE furnace_nerve_effector_circuit_open gauge"
+        "furnace_nerve_effector_inflight",
+        "gauge",
+        "Commands in progress",
+    );
+    render_family(
+        out,
+        "furnace_nerve_effector_circuit_open",
+        "gauge",
+        "1 while the effector's circuit breaker is open or half open",
     );
 }

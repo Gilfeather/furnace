@@ -24,7 +24,8 @@
 //! ```no_run
 //! use std::time::Duration;
 //! use furnace::nerve::{
-//!     effector, receptor, Fabric, Firing, FnNeuron, Habituation, Mechanisms, Summation,
+//!     effector, receptor, Fabric, Firing, FnNeuron, Habituation, Mechanisms, NeuronKind,
+//!     Summation,
 //! };
 //!
 //! let mut fabric = Fabric::builder();
@@ -50,16 +51,29 @@
 //!     effector::Effector::new(effector::Webhook::new("alert", "http://127.0.0.1:9000/hook")),
 //!     Mechanisms::NONE.refractory(Duration::from_millis(100)),
 //! );
+//! // The brain: slow, so it sits behind a queue that sums a window of signals into one
+//! // firing (a closure here; `brain::Llm` or `brain::ModelNeuron` in practice)
+//! let brain = fabric.neuron(
+//!     FnNeuron::reflex("brain", |signal, _cx| {
+//!         let text = signal.payload.as_text().unwrap_or_default().to_string();
+//!         Firing::one(signal.command("alert", serde_json::json!({"text": text})))
+//!     })
+//!     .with_kind(NeuronKind::Brain),
+//!     Mechanisms::NONE,
+//! );
 //! fabric.reflex(events, classify, 1.0);
 //! fabric.reflex(classify, alert, 1.0);
-//! // ... and a deliberative pathway from `classify` to a Brain, with Summation::default()
-//! let _ = Summation::default();
+//! // A command takes the pathway to the effector it names; any other signal the heaviest
+//! // pathway fast enough for its deadline: the brain's, as long as it keeps up
+//! fabric.deliberative(classify, brain, 2.0, Summation::default());
 //! let fabric = fabric.build();
 //! # let _ = fabric;
 //! ```
 //!
 //! See [docs/NERVE.md](https://github.com/Gilfeather/furnace/blob/main/docs/NERVE.md) for
 //! the concepts, the demo and the measurements.
+
+#![warn(missing_docs)]
 
 pub mod brain;
 pub mod consolidation;
@@ -78,14 +92,14 @@ mod testing;
 pub mod wire;
 
 pub use fabric::{
-    Announced, Fabric, FabricBuilder, FnNeuron, MAX_HOPS, Outcome, Pathway, PathwayKind, Summation,
+    Announced, Fabric, FabricBuilder, MAX_HOPS, Outcome, Pathway, PathwayKind, Summation,
 };
 pub use http::{OUTCOME_HEADER, SIGNAL_HEADER};
 pub use latency::{LatencyEstimate, LatencySnapshot};
 pub use metrics::{
     ArcMetrics, Description, NerveMetrics, NeuronDescription, NeuronMetrics, PathwayMetrics,
 };
-pub use neuron::{Cx, Firing, Habituation, Mechanisms, Neuron, NeuronKind, Quiet};
+pub use neuron::{Cx, Firing, FnNeuron, Habituation, Mechanisms, Neuron, NeuronKind, Quiet};
 pub use receptor::{Afferent, Receptor};
 pub use signal::{
     Answer, Command, Feature, NeuronId, PathwayId, Payload, Reply, Signal, SignalId, TRACE_HOPS,

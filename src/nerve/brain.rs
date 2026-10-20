@@ -235,6 +235,7 @@ mod llm {
             self
         }
 
+        /// How to sample the reply (by default greedy, at most 256 tokens)
         pub fn params(mut self, params: SamplingParams) -> Self {
             self.params = params;
             self

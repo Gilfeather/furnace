@@ -115,6 +115,10 @@ The server runs on the nervous system: every model is a neuron, every route a re
   `models/` created later is picked up after `touch build.rs`.
 - `tokio-stream` is part of the `grpc` feature (was `tls`); `tower` is no longer a
   dependency of the library.
+- Prometheus: the `kind` label of `furnace_nerve_pathway_signals_total` is lowercase
+  (`reflex`, `deliberative`), as in the JSON metrics and as the neurons' `kind` label already
+  was; it was `Reflex` and `Deliberative`. Queries that match the old values need updating.
+  The rest of the `furnace_nerve_*` text is unchanged byte for byte.
 
 ### Removed
 - `ApiError::{InvalidRequest, JsonParsing, ModelNotLoaded}` and
