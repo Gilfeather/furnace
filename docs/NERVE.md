@@ -106,61 +106,106 @@ Server-Sent-Events push.
 
 ## The API
 
+`use furnace::nerve::prelude::*` brings what building a fabric takes. The smallest fabric
+that does something, a reflex arc (receive, decide in process, act):
+
+```rust
+use furnace::nerve::prelude::*;
+use furnace::Server;
+use serde_json::json;
+
+let mut b = Fabric::builder();
+let events = b.receptor(Http::new("events", "/events").text()); // POST /events
+let triage = b.neuron(FnNeuron::reflex("triage", |signal, _| {
+    let text = signal.payload.as_text()?;
+    text.contains("ALERT").then(|| signal.command("alarm", json!({"text": text})))
+}));
+b.effector(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")?);
+b.reflex(events, triage);
+Server::new().port(3000).nerve(b).serve().await?;
+```
+
+The other common shape sends what comes in to the brain, which decides what to do:
+
+```rust
+let mut b = Fabric::builder();
+let events = b.receptor(Http::new("events", "/events").text());
+// Any LlmEngine (a Scheduled Burn model, the candle adapter, a mock). Its answer is parsed as
+// commands: {"effector": "...", "args": {...}}, arrays of them, or tool calls.
+let brain = b.neuron(Llm::new("brain", engine));
+b.deliberative(events, brain);
+b.effector(Webhook::new("page", "http://127.0.0.1:9000/page")?);
+b.effector(FileAppend::new("log", "journal.log"));
+Server::new().port(3000).nerve(b).serve().await?;
+```
+
+What the builder does for you:
+
+- `receptor`, `neuron` and `effector` add a neuron and return its id. `effector` takes an
+  act (`Webhook`, `Process`, `FileAppend`, `Respond`, `ChannelOut`, `SseOut`, or your own
+  `Act`) with the default local loop, or an `Effector` you configured
+  (`Effector::new(act).refractory(..)`).
+- A command reaches the effector it names from any neuron, with or without a pathway to it:
+  `reflex` and `deliberative` are for signals that are not commands yet.
+- Neurons have no mechanisms until `b.gate(id, Mechanisms::NONE.threshold(..).habituation(..))`
+  gives them some, so nothing is dropped that you did not ask to drop. Habituation attenuates
+  a repeat; the threshold is where it dies.
+- `reflex` pathways weigh 1 and `deliberative` ones 2, so a signal goes to the brain whenever
+  its deadline allows it and takes the reflex arc when it does not. `.weight(w)` and
+  `.summation(Summation::default().max_batch(16))` change a pathway as it is added.
+- A reflex closure returns a `Firing`, a `Signal` (fire it), an `Option<Signal>` (fire it or
+  stay quiet) or a `Vec<Signal>`.
+
+Both together, with habituation at the receptor and a deadline that keeps alerts off the
+brain's pathway:
+
 ```rust
 use std::time::Duration;
-use furnace::nerve::brain::Llm;
-use furnace::nerve::effector::{Effector, FileAppend, Respond, Webhook};
-use furnace::nerve::receptor::Http;
-use furnace::nerve::{Fabric, Firing, FnNeuron, Habituation, Mechanisms, Summation, Urgency};
+use furnace::nerve::prelude::*;
 use furnace::Server;
+use serde_json::json;
 
 let mut b = Fabric::builder();
 
 // A receptor: POST /events. The feature is a 64-bit sketch of the body; repeats habituate
 // here and never reach anything.
-let events = b.receptor(
-    Http::new("events", "/events").text(),
-    Mechanisms::NONE
-        .threshold(0.6)
-        .habituation(Habituation::new(Duration::from_secs(30))),
+let events = b.receptor(Http::new("events", "/events").text());
+b.gate(
+    events,
+    Mechanisms::NONE.threshold(0.6).habituation(Habituation::new(Duration::from_secs(30))),
 );
 
 // A reflex: in process, no blocking. Alerts become commands with a 2 ms deadline, which the
 // brain's pathway (hundreds of milliseconds) can never meet; the rest pass on.
-let triage = b.neuron(
-    FnNeuron::reflex("triage", |signal, _cx| {
-        if signal.payload.as_text().is_some_and(|t| t.contains("ALERT")) {
-            Firing::Fire(vec![
-                signal
-                    .command("alarm", serde_json::json!({"text": signal.payload.as_text()}))
-                    .with_urgency(Urgency::within(Duration::from_millis(2))),
-                signal.command("respond", serde_json::json!({"status": 200, "body": "alarm"})),
-            ])
-        } else {
-            Firing::one(signal)
-        }
-    }),
-    Mechanisms::NONE,
-);
-
-// The brain: any LlmEngine (a Scheduled Burn model, the candle adapter, a mock). Its answer
-// is parsed as commands: {"effector": "...", "args": {...}}, arrays of them, or tool calls.
-let brain = b.neuron(Llm::new("brain", engine), Mechanisms::NONE);
+let triage = b.neuron(FnNeuron::reflex("triage", |signal, _| {
+    if signal.payload.as_text().is_some_and(|t| t.contains("ALERT")) {
+        vec![
+            signal
+                .command("alarm", json!({"text": signal.payload.as_text()}))
+                .with_urgency(Urgency::within(Duration::from_millis(2))),
+            signal.command("respond", json!({"status": 200, "body": "alarm"})),
+        ]
+    } else {
+        vec![signal]
+    }
+}));
+let brain = b.neuron(Llm::new("brain", engine));
 
 // Effectors, by name, each with its local loop
-let alarm = b.neuron(
+let alarm = b.effector(
     Effector::new(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")?)
         .refractory(Duration::from_millis(100)),
-    Mechanisms::NONE,
 );
-b.neuron(Effector::new(Webhook::new("webhook", "http://127.0.0.1:9000/hook")?), Mechanisms::NONE);
-b.neuron(Effector::new(FileAppend::new("log", "journal.log")), Mechanisms::NONE);
-b.neuron(Effector::new(Respond::new("respond")), Mechanisms::NONE);
+b.effector(Webhook::new("webhook", "http://127.0.0.1:9000/hook")?);
+b.effector(FileAppend::new("log", "journal.log"));
+b.effector(Respond::new("respond"));
 
-// Pathways: the brain's weighs more, so it wins whenever the deadline allows it
-b.reflex(events, triage, 1.0);
-b.reflex(triage, alarm, 1.0);
-b.deliberative(triage, brain, 2.0, Summation::default());
+// Pathways: the brain's weighs more, so it wins whenever the deadline allows it. The reflex
+// pathway to the alarm is optional (the command would find it); declared, it has its own
+// measured latency in `GET /nerve`.
+b.reflex(events, triage);
+b.reflex(triage, alarm);
+b.deliberative(triage, brain);
 
 Server::new().port(3000).nerve(b).serve().await?;
 ```

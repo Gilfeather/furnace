@@ -60,7 +60,7 @@ impl Lines {
     }
 
     /// Make the signal for one line
-    pub fn line_signal(rule: UrgencyRule, meter: &RateMeter, line: &str) -> Signal {
+    pub(crate) fn line_signal(rule: UrgencyRule, meter: &RateMeter, line: &str) -> Signal {
         let now = Instant::now();
         let mut signal = Signal::new(
             Feature::sketch_as(kinds::TEXT, line.as_bytes()),

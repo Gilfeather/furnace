@@ -35,29 +35,27 @@ fn next(channel: &mpsc::Receiver<Delivery>) -> Delivery {
 /// pushes a command to SSE subscribers
 fn demo() -> Demo {
     let mut b = Fabric::builder();
-    let events = b.receptor(
-        Http::new("events", "/events").text(),
+    let events = b.receptor(Http::new("events", "/events").text());
+    b.gate(
+        events,
         Mechanisms::NONE
             .threshold(0.6)
             .habituation(Habituation::new(Duration::from_secs(60))),
     );
-    let classify = b.neuron(
-        FnNeuron::reflex("classify", |signal, _| {
-            let text = signal.payload.as_text().unwrap_or_default();
-            if text.contains("ALERT") {
-                Firing::Fire(vec![
-                    signal.command("alarm", serde_json::json!({"text": text})),
-                    signal.command(
-                        "respond",
-                        serde_json::json!({"status": 200, "body": "alarm raised"}),
-                    ),
-                ])
-            } else {
-                Firing::one(signal)
-            }
-        }),
-        Mechanisms::NONE,
-    );
+    let classify = b.neuron(FnNeuron::reflex("classify", |signal, _| {
+        let text = signal.payload.as_text().unwrap_or_default();
+        if text.contains("ALERT") {
+            Firing::Fire(vec![
+                signal.command("alarm", serde_json::json!({"text": text})),
+                signal.command(
+                    "respond",
+                    serde_json::json!({"status": 200, "body": "alarm raised"}),
+                ),
+            ])
+        } else {
+            Firing::one(signal)
+        }
+    }));
     let brain = b.neuron(
         FnNeuron::reflex("brain", |signal, _| {
             let text = signal.payload.as_text().unwrap_or_default().to_string();
@@ -70,22 +68,17 @@ fn demo() -> Demo {
             ])
         })
         .with_kind(NeuronKind::Brain),
-        Mechanisms::NONE,
     );
     let (alarm, alarms) = ChannelOut::new("alarm", 16);
-    let alarm = b.neuron(Effector::new(alarm), Mechanisms::NONE);
-    b.neuron(Effector::new(Respond::new("respond")), Mechanisms::NONE);
+    let alarm = b.effector(alarm);
+    b.effector(Respond::new("respond"));
     let (journal, journal_lines) = ChannelOut::new("journal", 16);
-    b.neuron(Effector::new(journal), Mechanisms::NONE);
-    b.neuron(Effector::new(SseOut::new("push", 16)), Mechanisms::NONE);
-    b.reflex(events, classify, 1.0);
-    b.reflex(classify, alarm, 1.0);
-    b.deliberative(
-        classify,
-        brain,
-        2.0,
-        Summation::default().window(Duration::from_millis(1)),
-    );
+    b.effector(journal);
+    b.effector(SseOut::new("push", 16));
+    b.reflex(events, classify);
+    b.reflex(classify, alarm);
+    b.deliberative(classify, brain)
+        .summation(Summation::default().window(Duration::from_millis(1)));
     let app = Server::new().nerve(b).router().unwrap();
     Demo {
         app,
@@ -298,34 +291,31 @@ async fn a_server_may_serve_a_fabric_alone() {
 /// `Respond` has acted on it.
 fn queued_answers() -> (Router, Effector, mpsc::Receiver<Delivery>) {
     let mut b = Fabric::builder();
-    let later = b.receptor(Http::new("later", "/later").text(), Mechanisms::NONE);
+    let later = b.receptor(Http::new("later", "/later").text());
     let now = b.receptor(
         Http::new("now", "/now")
             .text()
             .respond_within(Duration::from_secs(5)),
-        Mechanisms::NONE,
     );
-    let answer = b.neuron(
-        FnNeuron::reflex("answer", |signal, _| {
-            let text = signal.payload.as_text().unwrap_or_default().to_string();
-            Firing::Fire(vec![
-                signal.command(
-                    "respond",
-                    serde_json::json!({"status": 200, "body": format!("answered {text}")}),
-                ),
-                signal.command("answered", serde_json::json!(text)),
-            ])
-        }),
-        Mechanisms::NONE,
-    );
+    let answer = b.neuron(FnNeuron::reflex("answer", |signal, _| {
+        let text = signal.payload.as_text().unwrap_or_default().to_string();
+        Firing::Fire(vec![
+            signal.command(
+                "respond",
+                serde_json::json!({"status": 200, "body": format!("answered {text}")}),
+            ),
+            signal.command("answered", serde_json::json!(text)),
+        ])
+    }));
     let respond = Effector::new(Respond::new("respond"));
-    let id = b.neuron(respond.clone(), Mechanisms::NONE);
+    let id = b.neuron(respond.clone());
     for receptor in [later, now] {
-        b.deliberative(receptor, answer, 1.0, Summation::default());
+        b.deliberative(receptor, answer);
     }
     let (answered, answers) = ChannelOut::new("answered", 16);
-    let answered = b.neuron(Effector::new(answered), Mechanisms::NONE);
-    b.reflex(answer, id, 1.0).reflex(answer, answered, 1.0);
+    let answered = b.effector(answered);
+    b.reflex(answer, id);
+    b.reflex(answer, answered);
     (Server::new().nerve(b).router().unwrap(), respond, answers)
 }
 
@@ -354,34 +344,31 @@ async fn an_answer_later_than_respond_within_is_not_waited_for() {
         Http::new("soon", "/soon")
             .text()
             .respond_within(Duration::from_millis(1)),
-        Mechanisms::NONE,
     );
     // The answer is held until the test lets it go, long after the request gave up waiting
     let (release, released) = mpsc::channel::<()>();
     let released = std::sync::Mutex::new(released);
-    let answer = b.neuron(
-        FnNeuron::reflex("answer", move |signal, _| {
-            released
-                .lock()
-                .unwrap()
-                .recv_timeout(Duration::from_secs(10))
-                .expect("released within 10 s");
-            Firing::Fire(vec![
-                signal.command(
-                    "respond",
-                    serde_json::json!({"status": 200, "body": "late"}),
-                ),
-                signal.command("answered", serde_json::Value::Null),
-            ])
-        }),
-        Mechanisms::NONE,
-    );
+    let answer = b.neuron(FnNeuron::reflex("answer", move |signal, _| {
+        released
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(10))
+            .expect("released within 10 s");
+        Firing::Fire(vec![
+            signal.command(
+                "respond",
+                serde_json::json!({"status": 200, "body": "late"}),
+            ),
+            signal.command("answered", serde_json::Value::Null),
+        ])
+    }));
     let respond = Effector::new(Respond::new("respond"));
-    let id = b.neuron(respond.clone(), Mechanisms::NONE);
+    let id = b.neuron(respond.clone());
     let (answered, answers) = ChannelOut::new("answered", 16);
-    let answered = b.neuron(Effector::new(answered), Mechanisms::NONE);
-    b.deliberative(soon, answer, 1.0, Summation::default());
-    b.reflex(answer, id, 1.0).reflex(answer, answered, 1.0);
+    let answered = b.effector(answered);
+    b.deliberative(soon, answer);
+    b.reflex(answer, id);
+    b.reflex(answer, answered);
     let app = Server::new().nerve(b).router().unwrap();
 
     let (status, outcome, body) = post(&app, "/soon", "x").await;

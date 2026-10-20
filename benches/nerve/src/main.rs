@@ -41,7 +41,7 @@ use furnace::nerve::effector::{ChannelOut, Effector, Respond, Webhook};
 use furnace::nerve::receptor::{ChannelIn, Http};
 use furnace::nerve::{
     Fabric, Feature, Firing, FnNeuron, Habituation, Mechanisms, NeuronKind, Payload, Signal,
-    Summation, Urgency, sketch64,
+    Urgency,
 };
 use furnace_bench_common::{
     fail, free_port, furnace_version, memory, percentile, python, stop, wait_until_healthy,
@@ -123,7 +123,7 @@ impl Table {
 
 /// The hand-written triage: sketch, habituate, classify
 fn triage(table: &Mutex<Table>, body: &[u8]) -> Verdict {
-    let sketch = sketch64(body);
+    let sketch = Feature::sketch(body).sketch;
     let attenuation = table.lock().unwrap().attenuation(sketch, Instant::now());
     if 1.0 - attenuation < THRESHOLD {
         return Verdict::Quiet;
@@ -163,38 +163,36 @@ impl Demo {
 }
 
 fn demo_fabric(
-    receptor: impl FnOnce(&mut furnace::nerve::FabricBuilder, Mechanisms) -> furnace::nerve::NeuronId,
+    receptor: impl FnOnce(&mut furnace::nerve::FabricBuilder) -> furnace::nerve::NeuronId,
     alarm: Effector,
     respond: bool,
 ) -> Demo {
     let mut b = Fabric::builder();
-    let r = receptor(
-        &mut b,
+    let r = receptor(&mut b);
+    b.gate(
+        r,
         Mechanisms::NONE
             .threshold(THRESHOLD)
             .habituation(Habituation::new(TAU).capacity(1024)),
     );
-    let triage = b.neuron(
-        FnNeuron::reflex("triage", move |signal, _| {
-            if signal.payload.as_text().is_some_and(is_alert) {
-                let mut fired = vec![
-                    signal
-                        .command("alarm", serde_json::json!({"alarm": true}))
-                        .with_urgency(Urgency::within(Duration::from_millis(2))),
-                ];
-                if respond {
-                    fired.push(signal.command(
-                        "respond",
-                        serde_json::json!({"status": 200, "body": "alarm"}),
-                    ));
-                }
-                Firing::Fire(fired)
-            } else {
-                Firing::one(signal)
+    let triage = b.neuron(FnNeuron::reflex("triage", move |signal, _| {
+        if signal.payload.as_text().is_some_and(is_alert) {
+            let mut fired = vec![
+                signal
+                    .command("alarm", serde_json::json!({"alarm": true}))
+                    .with_urgency(Urgency::within(Duration::from_millis(2))),
+            ];
+            if respond {
+                fired.push(signal.command(
+                    "respond",
+                    serde_json::json!({"status": 200, "body": "alarm"}),
+                ));
             }
-        }),
-        Mechanisms::NONE,
-    );
+            Firing::Fire(fired)
+        } else {
+            Firing::one(signal)
+        }
+    }));
     let brain_hits = Arc::new(AtomicU64::new(0));
     let hits = brain_hits.clone();
     let brain = b.neuron(
@@ -203,15 +201,14 @@ fn demo_fabric(
             Firing::Fire(Vec::new())
         })
         .with_kind(NeuronKind::Brain),
-        Mechanisms::NONE,
     );
-    let alarm = b.neuron(alarm, Mechanisms::NONE);
+    let alarm = b.neuron(alarm);
     if respond {
-        b.neuron(Effector::new(Respond::new("respond")), Mechanisms::NONE);
+        b.effector(Respond::new("respond"));
     }
-    b.reflex(r, triage, 1.0);
-    b.reflex(triage, alarm, 1.0);
-    b.deliberative(triage, brain, 2.0, Summation::default());
+    b.reflex(r, triage);
+    b.reflex(triage, alarm);
+    b.deliberative(triage, brain);
     Demo {
         builder: b,
         brain_hits,
@@ -235,14 +232,12 @@ struct Hop {
 fn bench_hop() -> Hop {
     let mut b = Fabric::builder();
     let pass = |name: String| FnNeuron::reflex(&name, |s, _| Firing::one(s));
-    let first = b.neuron(
-        FnNeuron::reflex("in", |s, _| Firing::one(s)).with_kind(NeuronKind::Receptor),
-        Mechanisms::NONE,
-    );
+    let first =
+        b.neuron(FnNeuron::reflex("in", |s, _| Firing::one(s)).with_kind(NeuronKind::Receptor));
     let mut previous = first;
     for i in 1..HOPS {
-        let next = b.neuron(pass(format!("hop{i}")), Mechanisms::NONE);
-        b.reflex(previous, next, 1.0);
+        let next = b.neuron(pass(format!("hop{i}")));
+        b.reflex(previous, next);
         previous = next;
     }
     let fabric = b.build().expect("the fabric");
@@ -298,12 +293,7 @@ struct Arc_ {
 fn bench_arc() -> Arc_ {
     let (channel, receiver) = ChannelOut::new("alarm", 4096);
     let (receptor, sender) = ChannelIn::new("in", 16);
-    let demo = demo_fabric(
-        |b, mechanisms| b.receptor(receptor, mechanisms),
-        Effector::new(channel),
-        false,
-    )
-    .build();
+    let demo = demo_fabric(|b| b.receptor(receptor), Effector::new(channel), false).build();
     demo.fabric.start();
     // Alerts only: every stimulus is meant to reach the effector; repeats die at the gate
     let text = |i: usize| format!("ALERT {}", i % 50_000);
@@ -387,12 +377,7 @@ struct BrainFraction {
 fn bench_brain() -> BrainFraction {
     let (channel, _receiver) = ChannelOut::new("alarm", 4096);
     let (receptor, sender) = ChannelIn::new("in", 16);
-    let demo = demo_fabric(
-        |b, mechanisms| b.receptor(receptor, mechanisms),
-        Effector::new(channel),
-        false,
-    )
-    .build();
+    let demo = demo_fabric(|b| b.receptor(receptor), Effector::new(channel), false).build();
     demo.fabric.start();
     let mut at = Vec::new();
     let mut repeats = 0;
@@ -437,12 +422,7 @@ fn bench_memory() -> Memory {
     let base = memory::of_process(std::process::id()).private_mb;
     let (channel, receiver) = ChannelOut::new("alarm", 4096);
     let (receptor, sender) = ChannelIn::new("in", 16);
-    let demo = demo_fabric(
-        |b, mechanisms| b.receptor(receptor, mechanisms),
-        Effector::new(channel),
-        false,
-    )
-    .build();
+    let demo = demo_fabric(|b| b.receptor(receptor), Effector::new(channel), false).build();
     demo.fabric.start();
     std::thread::sleep(Duration::from_millis(100));
     let built = memory::of_process(std::process::id()).private_mb;
@@ -587,7 +567,7 @@ async fn bench_webhook() -> WebhookLatency {
     // Through the fabric: channel receptor → triage → webhook effector, one at a time
     let (receptor, sender) = ChannelIn::new("in", 16);
     let demo = demo_fabric(
-        |b, mechanisms| b.receptor(receptor, mechanisms),
+        |b| b.receptor(receptor),
         Effector::new(
             Webhook::new("alarm", &format!("http://127.0.0.1:{port}/hook")).expect("the hook"),
         )
@@ -659,7 +639,7 @@ async fn serve(kind: &str, port: u16) {
         "furnace" => {
             let (channel, _receiver) = ChannelOut::new("alarm", 4096);
             let demo = demo_fabric(
-                |b, mechanisms| b.receptor(Http::new("events", "/events").text(), mechanisms),
+                |b| b.receptor(Http::new("events", "/events").text()),
                 Effector::new(channel),
                 true,
             );

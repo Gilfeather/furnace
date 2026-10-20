@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::fabric::Fabric;
-use super::neuron::{Firing, FnNeuron, Mechanisms, Neuron, NeuronKind};
+use super::neuron::{Firing, FnNeuron, Neuron, NeuronKind};
 use super::receptor::Receptor;
 use super::signal::{Feature, NeuronId, Payload, Signal};
 
@@ -25,9 +25,9 @@ pub(crate) fn pass(name: &str) -> impl Neuron {
 /// A fabric where a receptor `in` reaches `neuron` through a reflex; stimulate the id returned
 pub(crate) fn fabric_with(neuron: impl Neuron) -> (Fabric, NeuronId) {
     let mut b = Fabric::builder();
-    let r = b.neuron(pass("in"), Mechanisms::NONE);
-    let n = b.neuron(neuron, Mechanisms::NONE);
-    b.reflex(r, n, 1.0);
+    let r = b.neuron(pass("in"));
+    let n = b.neuron(neuron);
+    b.reflex(r, n);
     (b.build().unwrap(), r)
 }
 
@@ -37,7 +37,7 @@ pub(crate) fn fabric_with_receptor<R: Receptor>(
 ) -> (Fabric, NeuronId, Arc<Mutex<Vec<Signal>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mut b = Fabric::builder();
-    let r = b.receptor(receptor, Mechanisms::NONE);
+    let r = b.receptor(receptor);
     let sink = {
         let seen = seen.clone();
         b.neuron(
@@ -46,10 +46,9 @@ pub(crate) fn fabric_with_receptor<R: Receptor>(
                 Firing::Quiet
             })
             .with_kind(NeuronKind::Effector),
-            Mechanisms::NONE,
         )
     };
-    b.reflex(r, sink, 1.0);
+    b.reflex(r, sink);
     let fabric = b.build().unwrap();
     fabric.start();
     (fabric, r, seen)

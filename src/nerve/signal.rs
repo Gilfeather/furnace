@@ -33,11 +33,11 @@ impl fmt::Display for NeuronId {
 
 /// A pathway's index in its fabric
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PathwayId(pub(crate) u32);
+pub(crate) struct PathwayId(pub(crate) u32);
 
 impl PathwayId {
     /// The index as a `usize`, for slices of pathways
-    pub fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self.0 as usize
     }
 }
@@ -104,7 +104,7 @@ impl Feature {
 /// A fast, non-cryptographic 64-bit hash (multiply-xorshift over 8-byte words). The sketch
 /// has to be cheap: it is computed once per input at the receptor and then compared in
 /// nanoseconds by every habituation table on the way.
-pub fn sketch64(bytes: &[u8]) -> u64 {
+pub(crate) fn sketch64(bytes: &[u8]) -> u64 {
     const K: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut h = (bytes.len() as u64).wrapping_mul(K) ^ 0x2545_F491_4F6C_DD1D;
     let (chunks, rest) = bytes.as_chunks::<8>();
@@ -330,7 +330,7 @@ impl Payload {
 }
 
 /// Most hops a trace records inline; longer chains count the rest
-pub const TRACE_HOPS: usize = 8;
+pub(crate) const TRACE_HOPS: usize = 8;
 
 /// Where a signal has been: the neurons that fired it on, in order, without an allocation
 #[derive(Clone, Copy, Debug)]
@@ -374,7 +374,7 @@ impl Trace {
         self.queued = true;
     }
 
-    /// The neurons passed so far (the first [`TRACE_HOPS`])
+    /// The neurons passed so far (the first 8)
     pub fn hops(&self) -> &[NeuronId] {
         &self.hops[..self.len as usize]
     }
