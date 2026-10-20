@@ -58,7 +58,7 @@ impl Webhook {
     ///
     /// # Panics
     ///
-    /// Once the webhook is shared: configure it before handing it to an [`Effector`].
+    /// Once the webhook is shared: configure it before handing it to an [`Effector`](super::Effector).
     pub fn header(mut self, name: &str, value: &str) -> Self {
         Arc::get_mut(&mut self.shared)
             .expect("configured before use")
