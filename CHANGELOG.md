@@ -40,8 +40,22 @@ The server runs on the nervous system: every model is a neuron, every route a re
 - TLS: a PKCS#8 private key the server does not take is named by its algorithm, read from the
   key ("RSA keys are not supported", "unsupported EC key curve 1.3.132.0.35"), instead of
   "unsupported PKCS#8 key (RSA?)".
+- Build output: no `onnx feature not enabled` warning for `default-features = false` builds,
+  and no warning for a checkout without `models/` (only for a `FURNACE_MODELS_DIR` that does
+  not exist). The build script no longer reruns on every build when `models/` is missing; a
+  `models/` created later is picked up after `touch build.rs`.
+- `tokio-stream` is part of the `grpc` feature (was `tls`); `tower` is no longer a
+  dependency of the library.
+
+### Removed
+- `ApiError::{InvalidRequest, JsonParsing, ModelNotLoaded}` and
+  `CliError::{MissingArgument, InvalidModelPath}`: nothing constructed them.
+- `FurnaceError` no longer implements axum's `IntoResponse`; no handler returned it, and its
+  codes disagreed with the ones the routes send.
 
 ### Fixed
+- An ONNX file named after a reserved Rust keyword (`final.onnx`, `override.onnx`, ...)
+  generates `model_final` instead of a module that does not compile.
 - A batch size a fixed-batch graph cannot run is a `400` on `/predict` too (was `500` with a
   doubled message).
 - Warming up a simple model with a fixed batch runs that batch (was always 1).

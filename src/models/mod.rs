@@ -1,7 +1,7 @@
 // Built-in models generated from ONNX files in models/ by build.rs (burn-onnx).
 //
 // build.rs reads each graph's input and output shapes and writes a registry
-// (`$OUT_DIR/models/registry.rs`) that invokes `built_in_model!` once per model, so any
+// (`$OUT_DIR/models/registry.rs`) that invokes `built_in_models!` with every model, so any
 // supported ONNX file in models/ is servable without hand-written code.
 //
 // The model *architecture* is compiled into the binary; the weights live in a separate
@@ -55,14 +55,18 @@ pub fn missing_input(expected: usize) -> FurnaceError {
     ModelError::InferenceFailed(format!("the model takes {expected} inputs")).into()
 }
 
-/// Defines module `$module` with the burn-onnx code generated for one model and a `Served`
-/// wrapper implementing [`BurnModel`]. The registry adds `Served::INPUTS`, `Served::OUTPUTS` and
-/// `Served::run_generated`, which calls the generated `forward`.
-#[allow(unused_macros)] // builds without models
-macro_rules! built_in_model {
-    ($module:ident, $name:literal, $file:literal, $fixed_batch:expr) => {
-        pub mod $module {
-            #[allow(clippy::all, unused)]
+/// Defines `MODELS` and, per model, module `$module` with the burn-onnx code generated for it
+/// and a `Served` wrapper implementing [`BurnModel`]. The registry invokes it once, with every
+/// model (or none), and adds `Served::INPUTS`, `Served::OUTPUTS` and `Served::run_generated`,
+/// which calls the generated `forward`.
+macro_rules! built_in_models {
+    ($($module:ident, $name:literal, $file:literal, $fixed_batch:expr;)*) => {
+        /// Models compiled into this binary, sorted by name
+        pub static MODELS: &[ModelEntry] = &[$($module::ENTRY),*];
+
+        $(pub mod $module {
+            // burn-onnx marks the lints its code trips (`unused_variables`, `let_and_return`,
+            // ...) itself; ResNet-18 and MNIST compile clean under clippy with nothing added
             mod generated {
                 include!(concat!(env!("OUT_DIR"), $file));
             }
@@ -150,11 +154,15 @@ macro_rules! built_in_model {
                     $fixed_batch
                 }
             }
-        }
+        })*
     };
 }
 
+#[cfg(feature = "onnx")]
 include!(concat!(env!("OUT_DIR"), "/models/registry.rs"));
+// No built-in models without the `onnx` feature
+#[cfg(not(feature = "onnx"))]
+built_in_models! {}
 
 /// Where to look for a built-in model's weights when `--weights` is not given, in order:
 /// next to the executable (release archives), `models/` in the working directory, and the
@@ -299,23 +307,22 @@ impl BuiltInModel {
     }
 }
 
-fn normalize_name(name: &str) -> String {
-    name.chars()
-        .filter(|c| !matches!(c, '-' | '_' | '.'))
-        .flat_map(char::to_lowercase)
-        .collect()
+// Shared with build/spec.rs, which drops models whose names collide once normalized
+include!("name.rs");
+
+/// The build script's registry code, for its unit tests
+#[cfg(test)]
+mod build_script {
+    #[path = "../../../build/render.rs"]
+    pub mod render;
+    #[path = "../../../build/spec.rs"]
+    pub mod spec;
 }
 
 #[cfg(test)]
-#[path = "../../build/registry.rs"]
-mod build_registry;
-
-#[cfg(test)]
 mod tests {
-    use super::build_registry::{
-        Elem, Io, IoDesc, IoType, dedup, model_spec, normalize_name as build_normalize,
-        render_registry,
-    };
+    use super::build_script::render::{Elem, IoDesc, render_registry};
+    use super::build_script::spec::{Io, IoType, dedup, model_spec};
     use super::*;
 
     fn tensor(name: &str, elem: Elem, dims: &[Option<usize>]) -> Io {
@@ -442,6 +449,7 @@ mod tests {
         assert_eq!(module("MobileNet-V2.opt"), "mobilenet_v2_opt");
         assert_eq!(module("18layers"), "model_18layers");
         assert_eq!(module("type"), "model_type");
+        assert_eq!(module("final"), "model_final");
     }
 
     #[test]
@@ -457,12 +465,12 @@ mod tests {
 
     #[test]
     fn registry_source() {
-        assert!(render_registry(&[]).contains("pub static MODELS: &[ModelEntry] = &[];"));
+        assert!(render_registry(&[]).contains("built_in_models! {\n}"));
 
         let (inputs, outputs) = image_classifier();
         let source = render_registry(&[model_spec("my-net", &inputs, &outputs).unwrap()]);
         assert!(
-            source.contains(r#"built_in_model!(my_net, "my-net", "/models/my-net.rs", None);"#),
+            source.contains(r#"    my_net, "my-net", "/models/my-net.rs", None;"#),
             "{source}"
         );
         // A simple model keeps the names input and output
@@ -474,12 +482,11 @@ mod tests {
             source.contains("let out0 = self.model.forward(in0);"),
             "{source}"
         );
-        assert!(source.contains("my_net::ENTRY,"), "{source}");
 
         let (inputs, outputs) = bert();
         let source = render_registry(&[model_spec("bert", &inputs, &outputs).unwrap()]);
         assert!(
-            source.contains(r#"built_in_model!(bert, "bert", "/models/bert.rs", None);"#),
+            source.contains(r#"    bert, "bert", "/models/bert.rs", None;"#),
             "{source}"
         );
         assert!(
@@ -504,13 +511,6 @@ mod tests {
             source.contains(r#"name: "input_ids", dtype: DataType::Int64, shape: &[Some(256)]"#),
             "{source}"
         );
-    }
-
-    #[test]
-    fn name_normalization_matches_build_script() {
-        for name in ["ResNet-18", "mobilenet_v2.opt", "MNIST"] {
-            assert_eq!(normalize_name(name), build_normalize(name));
-        }
     }
 
     #[test]

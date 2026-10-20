@@ -1,9 +1,8 @@
-// Turning ONNX graph I/O into the built-in model registry.
+// Writing the built-in model registry that src/models/mod.rs includes.
 //
-// Used by build.rs (which reads the graph with onnx-ir) and unit-tested from src/models/mod.rs.
-// Kept free of onnx-ir types so the tests don't need the build-time dependencies.
+// Used by build.rs in every configuration (without `onnx` the registry is empty) and
+// unit-tested from src/models/mod.rs. Reading graphs into `ModelSpec`s is build/spec.rs.
 
-use std::collections::HashSet;
 use std::fmt::Write;
 
 /// Element types the server can feed to and read from a model
@@ -12,21 +11,6 @@ pub enum Elem {
     F32,
     I64,
     I32,
-}
-
-/// A graph input or output, as far as the registry cares
-#[derive(Debug, Clone, PartialEq)]
-pub enum IoType {
-    /// A tensor; `None` dims are symbolic (unknown until runtime)
-    Tensor(Elem, Vec<Option<usize>>),
-    /// Anything else, described for the warning (e.g. "Bool tensor", "shape")
-    Other(String),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Io {
-    pub name: String,
-    pub ty: IoType,
 }
 
 /// An input or output of a servable model
@@ -79,148 +63,34 @@ impl ModelSpec {
     }
 }
 
-/// Normalized form used to match `--model-name` against registry names:
-/// case-insensitive, ignoring `-`, `_` and `.` (so `resnet-18` finds `resnet18`).
-pub fn normalize_name(name: &str) -> String {
-    name.chars()
-        .filter(|c| !matches!(c, '-' | '_' | '.'))
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-/// A valid, non-keyword Rust identifier derived from a file stem
-pub fn rust_ident(name: &str) -> String {
-    const KEYWORDS: &[&str] = &[
-        "as", "async", "await", "box", "break", "const", "continue", "crate", "dyn", "else",
-        "enum", "extern", "false", "fn", "for", "gen", "if", "impl", "in", "let", "loop", "match",
-        "mod", "move", "mut", "pub", "ref", "return", "self", "static", "struct", "super", "trait",
-        "true", "try", "type", "unsafe", "use", "where", "while", "yield",
-    ];
-    let ident: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let needs_prefix = ident.is_empty()
-        || ident.starts_with(|c: char| c.is_ascii_digit())
-        || ident.chars().all(|c| c == '_')
-        || KEYWORDS.contains(&ident.as_str());
-    if needs_prefix {
-        format!("model_{ident}")
-    } else {
-        ident
-    }
-}
-
-/// Check that a graph can be served and describe its inputs and outputs.
-///
-/// Every input and output must be an `f32`, `int64` or `int32` tensor whose first dimension is
-/// the batch. Other dimensions may be open; requests then fix them. A static batch dimension on
-/// the first input is kept as [`ModelSpec::fixed_batch`]. Returns a human-readable reason when
-/// the model can't be served.
-pub fn model_spec(name: &str, inputs: &[Io], outputs: &[Io]) -> Result<ModelSpec, String> {
-    if inputs.is_empty() {
-        return Err("has no inputs".to_string());
-    }
-    if outputs.is_empty() {
-        return Err("has no outputs".to_string());
-    }
-    let describe = |args: &[Io], what| {
-        args.iter()
-            .map(|arg| describe(arg, what))
-            .collect::<Result<Vec<_>, _>>()
-    };
-    let fixed_batch = match &inputs[0].ty {
-        IoType::Tensor(_, dims) => dims.first().copied().flatten().filter(|&n| n > 0),
-        IoType::Other(_) => None,
-    };
-    Ok(ModelSpec {
-        name: name.to_string(),
-        module: rust_ident(name),
-        inputs: describe(inputs, "input")?,
-        outputs: describe(outputs, "output")?,
-        fixed_batch,
-    })
-}
-
-fn describe(arg: &Io, what: &str) -> Result<IoDesc, String> {
-    let (elem, dims) = match &arg.ty {
-        IoType::Tensor(elem, dims) => (*elem, dims),
-        IoType::Other(ty) => {
-            return Err(format!(
-                "{what} '{}' is a {ty}; only f32, int64 and int32 tensors are supported",
-                arg.name
-            ));
-        }
-    };
-    if dims.is_empty() {
-        return Err(format!(
-            "{what} '{}' is a scalar; a batch dimension is required",
-            arg.name
-        ));
-    }
-    Ok(IoDesc {
-        name: arg.name.clone(),
-        elem,
-        item: dims[1..].iter().map(|d| d.filter(|&d| d > 0)).collect(),
-    })
-}
-
-/// Drop specs whose name collides with an earlier one after normalization.
-/// Returns the kept specs and a warning per dropped one.
-pub fn dedup(specs: Vec<ModelSpec>) -> (Vec<ModelSpec>, Vec<String>) {
-    let mut seen = HashSet::new();
-    let mut modules = HashSet::new();
-    let mut warnings = Vec::new();
-    let mut kept = Vec::new();
-    for spec in specs {
-        if !seen.insert(normalize_name(&spec.name)) || !modules.insert(spec.module.clone()) {
-            warnings.push(format!(
-                "skipping model '{}': its name collides with another model in models/",
-                spec.name
-            ));
-            continue;
-        }
-        kept.push(spec);
-    }
-    (kept, warnings)
-}
-
 /// Source of `$OUT_DIR/models/registry.rs`, included by src/models/mod.rs.
 ///
-/// `built_in_model!` (defined in src/models/mod.rs) expands to a module holding the generated
-/// code and a wrapper implementing `BurnModel`. This file supplies the per-model facts, and
-/// for each model the code calling its generated `forward`, whose arguments and results follow
-/// the graph's inputs and outputs.
+/// `built_in_models!` (defined in src/models/mod.rs) expands to `MODELS` and, per model, a
+/// module holding the generated code and a wrapper implementing `BurnModel`. This file supplies
+/// the per-model facts, and for each model the code calling its generated `forward`, whose
+/// arguments and results follow the graph's inputs and outputs.
 pub fn render_registry(specs: &[ModelSpec]) -> String {
     let mut out = String::from("// @generated by build.rs from the ONNX files in models/\n\n");
     if !specs.is_empty() {
         out.push_str("use crate::tensor::HostTensor;\n\n");
     }
+    out.push_str("built_in_models! {\n");
     for spec in specs {
         writeln!(
             out,
-            "built_in_model!({module}, {name:?}, {file:?}, {batch:?});",
+            "    {module}, {name:?}, {file:?}, {batch:?};",
             module = spec.module,
             name = spec.name,
             file = format!("/models/{}.rs", spec.name),
             batch = spec.fixed_batch,
         )
         .unwrap();
+    }
+    out.push_str("}\n");
+    for spec in specs {
+        out.push('\n');
         render_io(&mut out, spec, spec.simple().is_some());
     }
-    out.push_str(
-        "\n/// Models compiled into this binary, sorted by name\npub static MODELS: &[ModelEntry] = &[",
-    );
-    for spec in specs {
-        write!(out, "\n    {}::ENTRY,", spec.module).unwrap();
-    }
-    out.push_str(if specs.is_empty() { "];\n" } else { "\n];\n" });
     out
 }
 
