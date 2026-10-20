@@ -313,10 +313,14 @@ include!("name.rs");
 /// The build script's registry code, for its unit tests
 #[cfg(test)]
 mod build_script {
-    #[path = "../../../build/render.rs"]
-    pub mod render;
-    #[path = "../../../build/spec.rs"]
-    pub mod spec;
+    // `include!` rather than `#[path]`: a `#[path]` inside an inline module is resolved through
+    // a `build_script/` directory that does not exist, which only Windows tolerates
+    pub mod render {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/build/render.rs"));
+    }
+    pub mod spec {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/build/spec.rs"));
+    }
 }
 
 #[cfg(test)]
