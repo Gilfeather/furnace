@@ -321,20 +321,19 @@ fn router(kind: &str, pace: Pace) -> Router {
         "furnace" => Server::new()
             .configure(|c| c.max_concurrent_requests = 10_000)
             .llm(PacedEngine { pace })
-            .router(),
+            .router()
+            .expect("a server with something to serve"),
         "scheduled" => {
             let engine = Scheduled::with_config(
                 BatchedMock { pace },
                 mock::byte_pipeline(),
-                SchedulerConfig {
-                    max_waiting: 10_000,
-                    ..SchedulerConfig::default()
-                },
+                SchedulerConfig::default().with_max_waiting(10_000),
             );
             Server::new()
                 .configure(|c| c.max_concurrent_requests = 10_000)
                 .llm(engine)
                 .router()
+                .expect("a server with something to serve")
         }
         "hand-written" => hand_written(pace),
         other => fail(&format!("unknown server {other}")),

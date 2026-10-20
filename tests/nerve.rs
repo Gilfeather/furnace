@@ -84,7 +84,7 @@ fn demo() -> Demo {
         2.0,
         Summation::default().window(Duration::from_millis(1)),
     );
-    let app = Server::new().nerve(b).router();
+    let app = Server::new().nerve(b).router().unwrap();
     Demo {
         app,
         alarms,
@@ -329,7 +329,7 @@ fn queued_answers() -> (Router, Effector) {
         b.deliberative(receptor, answer, 1.0, Summation::default());
     }
     b.reflex(answer, id, 1.0);
-    (Server::new().nerve(b).router(), respond)
+    (Server::new().nerve(b).router().unwrap(), respond)
 }
 
 #[tokio::test]

@@ -33,7 +33,7 @@ mod v2;
 
 use infer::{Code, f32s_from_le, f32s_to_le};
 
-use crate::access::{Access, RateLimit, Rejection, constant_time_eq, presented_key};
+use crate::access::{Access, ClientRateLimit, Rejection, constant_time_eq, presented_key};
 pub use crate::batching::BatchConfig;
 use crate::error::{ApiError, FurnaceError, ModelError, Result};
 use crate::model::{MAX_BATCH_SIZE, Model, ModelInfo, ModelStats};
@@ -199,6 +199,9 @@ pub struct MetricsResponse {
     pub rejected_rate_limited: u64,
     /// Requests queued for or running inference
     pub in_flight_inferences: usize,
+    /// `--max-concurrent-requests` (`furnace_max_concurrent_requests` in Prometheus)
+    pub max_concurrent_requests: usize,
+    /// The old name of `max_concurrent_requests`, the same value; removed in 0.12
     pub max_concurrent_inferences: usize,
     /// Requests that reached the model (successful or failed)
     pub total_inferences: u64,
@@ -321,7 +324,7 @@ pub struct ServerConfig {
     /// `Authorization: Bearer <key>` or `X-API-Key: <key>`
     pub api_keys: Vec<String>,
     /// Per-client rate limit; clients are their API key, or their IP address without keys
-    pub rate_limit: Option<RateLimit>,
+    pub rate_limit: Option<ClientRateLimit>,
     /// Serve HTTPS (and gRPC over TLS) instead of plain text; needs the `tls` feature
     pub tls: Option<TlsSettings>,
 }
@@ -527,9 +530,8 @@ impl Server {
         self
     }
 
-    /// The HTTP API as an axum router, to serve or mount yourself. A server with nothing to
-    /// serve logs an error and answers every model route with `404 MODEL_NOT_FOUND`;
-    /// [`try_router`](Self::try_router) refuses it instead, as [`serve`](Self::serve) does.
+    /// The HTTP API as an axum router, to serve or mount yourself, or an error for a server
+    /// with nothing to serve, as [`serve`](Self::serve) gives.
     ///
     /// A rate limit without API keys tells clients apart by their address, which axum knows
     /// only when the router is served with [`ClientAddr`] as connect info; otherwise every
@@ -545,18 +547,13 @@ impl Server {
     /// .await
     /// # }
     /// ```
-    pub fn router(self) -> Router {
-        if let Err(e) = check_contents(&self.contents) {
-            error!("{e}");
-        }
-        warn_if_limited_by_address(&self.config);
-        router_with_state(server_state(self.contents, &self.config), &self.config)
-    }
-
-    /// [`router`](Self::router), or an error for a server with nothing to serve
-    pub fn try_router(self) -> Result<Router> {
+    pub fn router(self) -> Result<Router> {
         check_contents(&self.contents)?;
-        Ok(self.router())
+        warn_if_limited_by_address(&self.config);
+        Ok(router_with_state(
+            server_state(self.contents, &self.config),
+            &self.config,
+        ))
     }
 
     /// Serve until Ctrl-C / SIGTERM
@@ -650,7 +647,7 @@ pub(crate) struct ServerState {
     models: Vec<Arc<ModelSlot>>,
     start_time: SystemTime,
     inference_slots: Arc<Semaphore>,
-    /// `--max-concurrent-requests`: `max_concurrent_inferences` in the JSON metrics,
+    /// `--max-concurrent-requests`: `max_concurrent_requests` in the JSON metrics,
     /// `furnace_max_concurrent_requests` in Prometheus
     max_concurrent_requests: usize,
     request_timeout: Option<Duration>,
@@ -699,13 +696,13 @@ impl ServerState {
 
 /// Build the application router with all middleware applied. Serve it with [`ClientAddr`]
 /// as connect info for a rate limit by address, as [`Server::router`] explains.
-pub fn router(model: Model, config: &ServerConfig) -> Router {
+pub fn router(model: Model, config: &ServerConfig) -> Result<Router> {
     router_with_models(vec![model.into()], config)
 }
 
-/// [`router`] for several models; the first is the default for `/predict`. Without any, as
-/// [`Server::router`].
-pub fn router_with_models(models: Vec<ServedModel>, config: &ServerConfig) -> Router {
+/// [`router`] for several models; the first is the default for `/predict`. Without any, an
+/// error, as from [`Server::router`].
+pub fn router_with_models(models: Vec<ServedModel>, config: &ServerConfig) -> Result<Router> {
     let mut server = Server::with_config(config.clone());
     server.contents = models.into();
     server.router()
@@ -1984,6 +1981,7 @@ fn json_metrics(state: &ServerState) -> MetricsResponse {
         rejected_unauthorized: state.rejected_unauthorized.load(Ordering::Relaxed),
         rejected_rate_limited: state.rejected_rate_limited.load(Ordering::Relaxed),
         in_flight_inferences: in_flight(state),
+        max_concurrent_requests: state.max_concurrent_requests,
         max_concurrent_inferences: state.max_concurrent_requests,
         total_inferences: stats.inference_count,
         total_batches: stats.batch_count,
@@ -2169,10 +2167,7 @@ async fn reload_model(
         }
         model.adopt_stats(&previous.model);
         let loaded = Loaded::new(model);
-        let warm_up = loaded
-            .model
-            .warm_up()
-            .map_err(ModelError::InferenceFailed)?;
+        let warm_up = loaded.model.warm_up()?;
         loaded.ready.store(true, Ordering::Release);
         Ok((loaded, warm_up.map_or(0.0, |d| d.as_secs_f64() * 1e3)))
     });
@@ -2245,7 +2240,7 @@ pub(crate) mod tests {
     }
 
     pub(super) fn test_app() -> Router {
-        router(dummy_model(), &ServerConfig::default())
+        router(dummy_model(), &ServerConfig::default()).unwrap()
     }
 
     #[cfg(feature = "grpc")]
@@ -2292,6 +2287,7 @@ pub(crate) mod tests {
         let app = test_app();
         let initial = get_metrics(app.clone()).await;
         assert_eq!(initial.total_requests, 0);
+        assert_eq!(initial.max_concurrent_requests, 100);
         assert_eq!(initial.max_concurrent_inferences, 100);
         assert!(initial.last_inference_at.is_none());
 
@@ -2316,7 +2312,7 @@ pub(crate) mod tests {
     }
 
     async fn concurrent_predictions(config: &ServerConfig) -> MetricsResponse {
-        let app = router(dummy_model(), config);
+        let app = router(dummy_model(), config).unwrap();
         let mut tasks = Vec::new();
         for i in 0..12 {
             let body = if i % 3 == 0 {
@@ -2380,7 +2376,7 @@ pub(crate) mod tests {
             max_body_bytes: 64,
             ..ServerConfig::default()
         };
-        let app = router(dummy_model(), &config);
+        let app = router(dummy_model(), &config).unwrap();
         let small = serde_json::json!({ "input": [0.5] }).to_string();
         let (status, _) = send(app.clone(), predict_request(small)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -2605,14 +2601,14 @@ pub(crate) mod tests {
     const TOKEN: &str = "0123456789abcdef-token";
     const API_KEY: &str = "api-key-0123456789";
 
-    fn guarded_app(api_keys: &[&str], rate_limit: Option<RateLimit>) -> Router {
+    fn guarded_app(api_keys: &[&str], rate_limit: Option<ClientRateLimit>) -> Router {
         let config = ServerConfig {
             api_keys: api_keys.iter().map(|k| k.to_string()).collect(),
             rate_limit,
             admin_token: Some(TOKEN.to_string()),
             ..ServerConfig::default()
         };
-        router(dummy_model(), &config)
+        router(dummy_model(), &config).unwrap()
     }
 
     fn with_header(mut request: Request<Body>, name: &'static str, value: &str) -> Request<Body> {
@@ -2681,7 +2677,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_rate_limit() {
-        let limit = RateLimit {
+        let limit = ClientRateLimit {
             per_second: 0.001,
             burst: 2,
         };
@@ -2757,7 +2753,7 @@ pub(crate) mod tests {
             admin_token: admin_token.map(str::to_string),
             ..ServerConfig::default()
         };
-        router_with_models(models, &config)
+        router_with_models(models, &config).unwrap()
     }
 
     fn reload_request(model: &str, token: Option<&str>, body: &str) -> Request<Body> {
@@ -2903,7 +2899,7 @@ pub(crate) mod tests {
             admin_token: Some(TOKEN.to_string()),
             ..ServerConfig::default()
         };
-        let app = router(dummy_model(), &config);
+        let app = router(dummy_model(), &config).unwrap();
         let (status, body) = send(app, reload_request("test_model", Some(TOKEN), "")).await;
         assert_eq!(status, StatusCode::CONFLICT);
         let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
@@ -2911,20 +2907,9 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn an_empty_server_is_an_error_or_serves_nothing() {
-        assert!(Server::new().try_router().is_err());
-        // router() does not panic: the model routes find no model
-        let app = Server::new().router();
-        let body = serde_json::json!({ "input": [0.5] }).to_string();
-        let (status, body) = send(app.clone(), predict_request(body)).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(error.code, "MODEL_NOT_FOUND");
-        let health = Request::builder()
-            .uri("/healthz")
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(send(app, health).await.0, StatusCode::OK);
+    async fn an_empty_server_is_an_error() {
+        assert!(Server::new().router().is_err());
+        assert!(router_with_models(Vec::new(), &ServerConfig::default()).is_err());
         // serve() and the start_server functions refuse it
         let refused = start_server_with_models(ServerConfig::default(), Vec::new()).await;
         assert!(refused.is_err());
@@ -3168,7 +3153,8 @@ pub(crate) mod tests {
         let app = router(
             Model::new(Box::new(dummy), "dummy", 0),
             &ServerConfig::default(),
-        );
+        )
+        .unwrap();
         let body =
             serde_json::json!({ "inputs": vec![vec![0.123_456_7f32; 150_528]; 2] }).to_string();
         assert!(body.len() > 2 * 1024 * 1024);
@@ -3182,7 +3168,7 @@ pub(crate) mod tests {
             max_body_bytes: 1024,
             ..ServerConfig::default()
         };
-        let app = router(dummy_model(), &config);
+        let app = router(dummy_model(), &config).unwrap();
         let body = serde_json::json!({ "input": vec![0.5; 784] }).to_string();
         let (status, _) = send(app, predict_request(body)).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
@@ -3231,7 +3217,7 @@ pub(crate) mod tests {
             "dummy",
             0,
         );
-        router(model, &config)
+        router(model, &config).unwrap()
     }
 
     /// A latch: closed until opened, then open for good
@@ -3552,7 +3538,7 @@ pub(crate) mod tests {
             max_concurrent_requests: 0,
             ..ServerConfig::default()
         };
-        let app = router(dummy_model(), &config);
+        let app = router(dummy_model(), &config).unwrap();
         let body = serde_json::json!({ "input": vec![0.5; 784] }).to_string();
         let (status, body) = send(app, predict_request(body)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -3795,7 +3781,7 @@ pub(crate) mod tests {
             max_body_bytes: 1024,
             ..ServerConfig::default()
         };
-        let app = router(dummy_model(), &config);
+        let app = router(dummy_model(), &config).unwrap();
         let (status, code) = error_code(app, binary_request(&[0.5; 784], None)).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(code, "INVALID_REQUEST");
@@ -3826,7 +3812,7 @@ pub(crate) mod tests {
 
         fn image_model_app(config: &ServerConfig) -> Router {
             let dummy = DummyModel::new("rgb".to_string(), vec![3, 16, 16], vec![10]);
-            router(Model::new(Box::new(dummy), "dummy", 0), config)
+            router(Model::new(Box::new(dummy), "dummy", 0), config).unwrap()
         }
 
         fn png(width: u32, height: u32) -> Vec<u8> {

@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
+use burn::tensor::Tensor;
 use furnace::llm::mock::{self, MockEngine, MockStepModel};
 use furnace::llm::{
     Event, FinishReason, GenerateRequest, LlmEngine, Message, SamplingParams, Scheduled,
     SchedulerConfig,
 };
-use furnace::model::DummyModel;
-use furnace::{Model, Server};
+use furnace::{BackendKind, Model, Server};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -23,7 +23,7 @@ fn scheduled(model: MockStepModel) -> Scheduled<MockStepModel> {
 }
 
 fn app_with(model: MockStepModel) -> axum::Router {
-    Server::new().llm(scheduled(model)).router()
+    Server::new().llm(scheduled(model)).router().unwrap()
 }
 
 fn app() -> axum::Router {
@@ -310,14 +310,16 @@ async fn max_tokens_ends_with_length() {
 #[tokio::test]
 async fn llms_and_tensor_models_share_one_server() {
     let app = Server::new()
-        .model(Model::new(
-            Box::new(DummyModel::new("digits".to_string(), vec![4], vec![2])),
-            "dummy",
-            0,
-        ))
+        .model(
+            Model::from_fn("digits", BackendKind::Cpu, &[4], &[2], |x: Tensor<2>| {
+                x.narrow(1, 0, 2)
+            })
+            .unwrap(),
+        )
         .llm(scheduled(MockStepModel::new("mock", REPLY)))
         .llm(MockEngine::new("other", &["a", "b"]))
-        .router();
+        .router()
+        .unwrap();
 
     let models = send(&app, get("/v1/models")).await.json();
     assert_eq!(models["object"], "list");
@@ -469,7 +471,8 @@ async fn the_concurrency_limit_answers_503() {
     let app = Server::new()
         .configure(|c| c.max_concurrent_requests = 1)
         .llm(MockEngine::new("mock", &["a"; 50]).piece_delay(Duration::from_millis(20)))
-        .router();
+        .router()
+        .unwrap();
     // The first stream holds the only slot while its body is open
     let open = app
         .clone()
@@ -502,12 +505,9 @@ async fn a_full_scheduler_answers_503() {
     let engine = Scheduled::with_config(
         model,
         mock::byte_pipeline(),
-        SchedulerConfig {
-            max_waiting: 1,
-            ..SchedulerConfig::default()
-        },
+        SchedulerConfig::default().with_max_waiting(1),
     );
-    let app = Server::new().llm(engine).router();
+    let app = Server::new().llm(engine).router().unwrap();
     let stream = || {
         app.clone()
             .oneshot(post("/v1/chat/completions", &chat(json!({"stream": true}))))
@@ -615,7 +615,7 @@ async fn a_client_disconnect_frees_the_sequence() {
 async fn an_engine_with_its_own_loop_is_cancelled_by_dropping_too() {
     let engine = MockEngine::new("mock", &["a"; 1000]).piece_delay(Duration::from_millis(10));
     let live = engine.live();
-    let app = Server::new().llm(engine).router();
+    let app = Server::new().llm(engine).router().unwrap();
     let response = app
         .clone()
         .oneshot(post("/v1/chat/completions", &chat(json!({"stream": true}))))
@@ -740,7 +740,8 @@ async fn api_keys_guard_the_llm_routes() {
     let app = Server::new()
         .configure(|c| c.api_keys = vec!["secret".to_string()])
         .llm(scheduled(MockStepModel::new("mock", REPLY)))
-        .router();
+        .router()
+        .unwrap();
     let refused = send(&app, post("/v1/chat/completions", &chat(json!({})))).await;
     assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
     let mut request = post("/v1/chat/completions", &chat(json!({})));
@@ -757,7 +758,8 @@ async fn an_answer_past_the_request_timeout_is_a_504() {
     let app = Server::new()
         .configure(|c| c.request_timeout = Some(Duration::from_millis(50)))
         .llm(engine)
-        .router();
+        .router()
+        .unwrap();
     let answer = send(&app, post("/v1/chat/completions", &chat(json!({})))).await;
     let error = assert_openai_error(&answer, StatusCode::GATEWAY_TIMEOUT, "server_error");
     assert_eq!(error["code"], "timeout");
@@ -772,7 +774,8 @@ async fn a_stream_that_stalls_ends_with_an_error_and_done() {
     let app = Server::new()
         .configure(|c| c.request_timeout = Some(Duration::from_millis(50)))
         .llm(engine)
-        .router();
+        .router()
+        .unwrap();
     let answer = send(
         &app,
         post("/v1/chat/completions", &chat(json!({"stream": true}))),
@@ -808,9 +811,7 @@ impl LlmEngine for FailsMidway {
         for event in [
             Event::Started { prompt_tokens: 1 },
             Event::Text("half".to_string()),
-            Event::Error(furnace::llm::EngineError::Failed(
-                "the model broke".to_string(),
-            )),
+            Event::Error(furnace::llm::EngineError::failed("the model broke")),
         ] {
             events.try_send(event).unwrap();
         }
@@ -820,7 +821,7 @@ impl LlmEngine for FailsMidway {
 
 #[tokio::test]
 async fn an_error_mid_stream_is_a_payload_then_done() {
-    let app = Server::new().llm(FailsMidway).router();
+    let app = Server::new().llm(FailsMidway).router().unwrap();
     let answer = send(
         &app,
         post("/v1/chat/completions", &chat(json!({"stream": true}))),
@@ -867,7 +868,7 @@ impl LlmEngine for RefusesLate {
 
 #[tokio::test]
 async fn a_refusal_as_the_first_event_is_a_400_even_when_streaming() {
-    let app = Server::new().llm(RefusesLate).router();
+    let app = Server::new().llm(RefusesLate).router().unwrap();
     for stream in [true, false] {
         let answer = send(
             &app,

@@ -70,8 +70,15 @@ pub trait StepModel: Send + Sync + fmt::Debug + 'static {
     }
 }
 
-/// How [`Scheduled`] runs a model
+/// How [`Scheduled`] runs a model. Fields may be added: start from the default and change what
+/// you need with the `with_*` methods.
+///
+/// ```
+/// # use furnace::llm::SchedulerConfig;
+/// let config = SchedulerConfig::default().with_workers(2).with_max_waiting(64);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct SchedulerConfig {
     /// Worker threads; each runs its own sequences. On a CPU, one worker usually suffices, since
     /// the model's kernels use every core already.
@@ -94,18 +101,38 @@ impl Default for SchedulerConfig {
     }
 }
 
+impl SchedulerConfig {
+    /// The same configuration with `workers` worker threads
+    pub fn with_workers(mut self, workers: usize) -> Self {
+        self.workers = workers;
+        self
+    }
+
+    /// The same configuration with room for `max_waiting` requests in the queue
+    pub fn with_max_waiting(mut self, max_waiting: usize) -> Self {
+        self.max_waiting = max_waiting;
+        self
+    }
+
+    /// The same configuration prefilling at most `tokens` prompt tokens between decode steps
+    pub fn with_max_prefill_tokens(mut self, tokens: usize) -> Self {
+        self.max_prefill_tokens = tokens;
+        self
+    }
+}
+
 /// Model time per step, from furnace's scheduler
 #[derive(Default)]
-pub struct SchedulerStats {
+pub struct SchedulerCounters {
     /// One prompt's prefill
     pub prefill: Histogram,
     /// One decode step: one call of `decode_batch`, over every running sequence of a worker
     pub decode_step: Histogram,
 }
 
-impl fmt::Debug for SchedulerStats {
+impl fmt::Debug for SchedulerCounters {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SchedulerStats")
+        f.debug_struct("SchedulerCounters")
             .field("prefill_ms", &self.prefill.percentiles_ms())
             .field("decode_step_ms", &self.decode_step.percentiles_ms())
             .finish()
@@ -117,7 +144,7 @@ enum Step {
     Started { prompt_tokens: usize },
     Token(u32),
     Done(FinishReason),
-    Failed(String),
+    Failed(BoxError),
 }
 
 /// A request waiting for a sequence slot
@@ -139,7 +166,7 @@ struct Shared<M: StepModel> {
     max_sequences: usize,
     max_prefill_tokens: usize,
     stop: AtomicBool,
-    stats: SchedulerStats,
+    stats: SchedulerCounters,
 }
 
 /// A [`StepModel`] served through furnace's scheduler, with a [`TextPipeline`] for the text: the
@@ -184,7 +211,7 @@ impl<M: StepModel> Scheduled<M> {
             wake: Condvar::new(),
             running: AtomicUsize::new(0),
             stop: AtomicBool::new(false),
-            stats: SchedulerStats::default(),
+            stats: SchedulerCounters::default(),
         });
         for i in 0..config.workers.max(1) {
             let shared = shared.clone();
@@ -289,7 +316,7 @@ impl<M: StepModel> LlmEngine for Scheduled<M> {
         Ok(receiver)
     }
 
-    fn scheduler_stats(&self) -> Option<&SchedulerStats> {
+    fn scheduler_stats(&self) -> Option<&SchedulerCounters> {
         Some(&self.shared.stats)
     }
 }
@@ -320,7 +347,7 @@ async fn relay(
                     Ok(None) => continue,
                     Err(e) => {
                         let _ = events
-                            .send(Event::Error(EngineError::Failed(format!(
+                            .send(Event::Error(EngineError::failed(format!(
                                 "detokenizing: {e}"
                             ))))
                             .await;
@@ -355,17 +382,13 @@ async fn relay(
                     .await;
                 return;
             }
-            Some(Step::Failed(message)) => {
-                let _ = events
-                    .send(Event::Error(EngineError::Failed(message)))
-                    .await;
+            Some(Step::Failed(error)) => {
+                let _ = events.send(Event::Error(EngineError::Failed(error))).await;
                 return;
             }
             None => {
                 let _ = events
-                    .send(Event::Error(EngineError::Failed(
-                        "the model stopped".to_string(),
-                    )))
+                    .send(Event::Error(EngineError::failed("the model stopped")))
                     .await;
                 return;
             }
@@ -411,12 +434,8 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// Only where panics unwind: a build with `panic = "abort"` (furnace's own release profile)
 /// stops the process instead. Where they do unwind, the model goes on serving after a panic,
 /// whatever state it was left in.
-fn guarded<T>(call: impl FnOnce() -> Result<T, BoxError>) -> Result<T, String> {
-    match catch_unwind(AssertUnwindSafe(call)) {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Err("the model panicked".to_string()),
-    }
+fn guarded<T>(call: impl FnOnce() -> Result<T, BoxError>) -> Result<T, BoxError> {
+    catch_unwind(AssertUnwindSafe(call)).unwrap_or_else(|_| Err("the model panicked".into()))
 }
 
 /// A worker's loop, until the engine is dropped
@@ -474,28 +493,31 @@ fn work<M: StepModel>(shared: &Arc<Shared<M>>) {
                 match catch_unwind(AssertUnwindSafe(|| {
                     shared.model.decode_batch(&mut sequences, &tokens)
                 })) {
-                    Ok(results) if results.len() == tokens.len() => results
-                        .into_iter()
-                        .map(|r| r.map_err(|e| e.to_string()))
-                        .collect(),
+                    Ok(results) if results.len() == tokens.len() => results,
                     Ok(results) => {
                         let message = format!(
                             "decode_batch returned {} results for {} sequences",
                             results.len(),
                             tokens.len()
                         );
-                        vec![Err(message); tokens.len()]
+                        tokens
+                            .iter()
+                            .map(|_| Err(message.as_str().into()))
+                            .collect()
                     }
-                    Err(_) => vec![Err("the model panicked".to_string()); tokens.len()],
+                    Err(_) => tokens
+                        .iter()
+                        .map(|_| Err("the model panicked".into()))
+                        .collect(),
                 }
             };
             shared.stats.decode_step.observe(start.elapsed());
             let mut results = results.into_iter();
             running.retain_mut(|r| match results.next() {
                 Some(Ok(Logits(mut logits))) => advance(shared, r, &mut logits),
-                Some(Err(message)) => {
-                    warn!("Decoding failed: {message}");
-                    let _ = r.steps.send(Step::Failed(message));
+                Some(Err(error)) => {
+                    warn!("Decoding failed: {error}");
+                    let _ = r.steps.send(Step::Failed(error));
                     false
                 }
                 None => false,
@@ -537,9 +559,9 @@ fn start<M: StepModel>(shared: &Shared<M>, job: Job, slot: Slot<M>) -> Option<Ru
     let begin = Instant::now();
     let (sequence, Logits(mut logits)) = match guarded(|| shared.model.prefill(&prompt)) {
         Ok(prefilled) => prefilled,
-        Err(message) => {
-            warn!("Prefill failed: {message}");
-            let _ = steps.send(Step::Failed(message));
+        Err(error) => {
+            warn!("Prefill failed: {error}");
+            let _ = steps.send(Step::Failed(error));
             return None;
         }
     };
@@ -722,8 +744,8 @@ mod tests {
         assert_eq!(text(&events), "h");
         assert_eq!(
             events.last(),
-            Some(&Event::Error(EngineError::Failed(
-                "decode_batch returned 0 results for 1 sequences".to_string()
+            Some(&Event::Error(EngineError::failed(
+                "decode_batch returned 0 results for 1 sequences"
             )))
         );
     }

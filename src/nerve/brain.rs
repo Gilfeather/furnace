@@ -180,7 +180,7 @@ pub use llm::Llm;
 #[cfg(feature = "llm")]
 mod llm {
     use super::*;
-    use crate::llm::{Event, GenerateRequest, Input, LlmEngine, Message, SamplingParams};
+    use crate::llm::{Event, GenerateRequest, LlmEngine, Message, Prompt, SamplingParams};
 
     /// The default system prompt; `{effectors}` is replaced by the effectors' names
     pub const SYSTEM_PROMPT: &str = "You are the brain of a nervous system. You see one signal \
@@ -251,9 +251,9 @@ mod llm {
             let system = self.system.replace("{effectors}", &effectors.join(", "));
             let user = (self.user)(signal);
             let input = if self.completion {
-                Input::Text(format!("{system}\n\n{user}\n"))
+                Prompt::Text(format!("{system}\n\n{user}\n"))
             } else {
-                Input::Chat(vec![
+                Prompt::Chat(vec![
                     Message::new("system", &system),
                     Message::new("user", &user),
                 ])

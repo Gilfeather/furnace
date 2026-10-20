@@ -24,7 +24,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::metrics::{self, EdgeMetrics, Tracked};
 use super::{
-    EngineError, Event, FinishReason, GenerateRequest, Input, LlmEngine, LlmMetrics, Message,
+    EngineError, Event, FinishReason, GenerateRequest, LlmEngine, LlmMetrics, Message, Prompt,
     SamplingParams,
 };
 
@@ -223,14 +223,15 @@ struct ContentPart {
 #[derive(Debug, Deserialize)]
 struct CompletionRequest {
     model: Option<String>,
-    prompt: Prompt,
+    prompt: WirePrompt,
     #[serde(flatten)]
     options: Options,
 }
 
+/// `prompt` of `/v1/completions`: a string, or a list of one
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum Prompt {
+enum WirePrompt {
     Text(String),
     Many(Vec<serde_json::Value>),
 }
@@ -411,7 +412,7 @@ async fn chat_completions(
         &state,
         Kind::Chat,
         request.model.as_deref(),
-        Input::Chat(messages),
+        Prompt::Chat(messages),
         request.options,
         received,
     )
@@ -429,8 +430,8 @@ async fn completions(
         Err(response) => return *response,
     };
     let prompt = match request.prompt {
-        Prompt::Text(text) => text,
-        Prompt::Many(mut prompts) => match (prompts.len(), prompts.pop()) {
+        WirePrompt::Text(text) => text,
+        WirePrompt::Many(mut prompts) => match (prompts.len(), prompts.pop()) {
             (1, Some(serde_json::Value::String(text))) => text,
             _ => {
                 return *invalid(
@@ -444,7 +445,7 @@ async fn completions(
         &state,
         Kind::Text,
         request.model.as_deref(),
-        Input::Text(prompt),
+        Prompt::Text(prompt),
         request.options,
         received,
     )
@@ -455,7 +456,7 @@ async fn generate(
     state: &LlmState,
     kind: Kind,
     model: Option<&str>,
-    input: Input,
+    input: Prompt,
     options: Options,
     received: Instant,
 ) -> Response {
@@ -906,7 +907,7 @@ fn classify(e: &EngineError) -> (StatusCode, &'static str, Option<&'static str>)
 
 /// An engine that dropped a request without `Finished` or `Error`
 fn ended_early() -> EngineError {
-    EngineError::Failed("the engine ended the request early".to_string())
+    EngineError::failed("the engine ended the request early")
 }
 
 fn error_body(e: &EngineError) -> serde_json::Value {

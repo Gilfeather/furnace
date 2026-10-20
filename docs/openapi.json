@@ -1477,6 +1477,7 @@
           "rejected_unauthorized",
           "rejected_rate_limited",
           "in_flight_inferences",
+          "max_concurrent_requests",
           "max_concurrent_inferences",
           "total_inferences",
           "total_batches",
@@ -1518,9 +1519,14 @@
             "type": "integer",
             "description": "Requests queued for or running inference"
           },
-          "max_concurrent_inferences": {
+          "max_concurrent_requests": {
             "type": "integer",
             "description": "--max-concurrent-requests (furnace_max_concurrent_requests in Prometheus)"
+          },
+          "max_concurrent_inferences": {
+            "type": "integer",
+            "deprecated": true,
+            "description": "The old name of max_concurrent_requests, the same value; removed in 0.12"
           },
           "total_inferences": {
             "type": "integer",

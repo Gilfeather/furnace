@@ -788,7 +788,8 @@ async fn overhead(which: Which, backend: BackendKind, n: usize, batching: &[Stri
                 }
             }
         })
-        .router();
+        .router()
+        .expect("a server with something to serve");
     let device = backend.device();
     let hand_written = Router::new()
         .route("/infer", post(hand_written_infer))

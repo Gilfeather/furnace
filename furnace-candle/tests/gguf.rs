@@ -134,7 +134,7 @@ fn llama_matches_candle() {
 /// furnace's scheduler and sampling, the answer back
 async fn serves_a_chat(variable: &str, knows_paris: bool) {
     let engine = Gguf::new(file(variable)).name("model").load().unwrap();
-    let app = Server::new().llm(engine).router();
+    let app = Server::new().llm(engine).router().unwrap();
     let body = serde_json::json!({
         "model": "model",
         "messages": [{"role": "user", "content": "What is the capital of France? One word."}],

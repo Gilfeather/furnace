@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::backend::BackendKind;
 use crate::burn_model::{BurnModelContainer, create_sample_model};
@@ -22,9 +22,13 @@ use crate::models::{BuiltInModel, resolve_weights};
 use crate::tensor::{DataType, HostTensor, IoSpec, TensorInfo, TensorSpec, Values};
 
 mod kinds;
+#[cfg(any(test, feature = "test-models"))]
+mod testing;
 
 use kinds::FnModel;
-pub use kinds::{DummyModel, DummyTensorsModel, MlpModel};
+pub use kinds::MlpModel;
+#[cfg(any(test, feature = "test-models"))]
+pub use testing::{DummyModel, DummyTensorsModel};
 
 /// Hard upper bound on the number of items in one inference batch
 pub const MAX_BATCH_SIZE: usize = 1000;
@@ -743,7 +747,7 @@ impl Model {
     ///
     /// A model with an input whose shape is only fixed per request cannot be warmed up without
     /// guessing it, and is skipped (`Ok(None)`).
-    pub fn warm_up(&self) -> std::result::Result<Option<std::time::Duration>, String> {
+    pub fn warm_up(&self) -> Result<Option<std::time::Duration>> {
         let start = Instant::now();
         // A graph with a fixed batch size runs only that many items at once
         let batch = self.inner.fixed_batch().unwrap_or(1);
@@ -765,7 +769,7 @@ impl Model {
         else {
             return Ok(None);
         };
-        self.inner.run(inputs).map_err(|e| e.to_string())?;
+        self.inner.run(inputs)?;
         Ok(Some(start.elapsed()))
     }
 
@@ -844,7 +848,15 @@ fn duplicate(error: &FurnaceError) -> FurnaceError {
     .into()
 }
 
-/// Load a file-based MLP model from `<path>.bpk` + `<path>.json` on the CPU backend
+/// The file name `load_model` replaces with a sample MLP with random weights when no such
+/// file exists
+const SAMPLE_MODEL: &str = "sample_model";
+
+/// Load a file-based MLP model from `<path>.bpk` + `<path>.json` on the CPU backend.
+///
+/// A path named `sample_model` with no files serves an MLP with random weights, with a warning
+/// (`cargo run --bin create_sample_model` writes real files there); any other missing path is
+/// an error.
 pub fn load_model(path: &Path) -> Result<Model> {
     load_model_with_backend(path, BackendKind::Cpu)
 }
@@ -860,14 +872,14 @@ pub fn load_model_with_backend(path: &Path, backend: BackendKind) -> Result<Mode
     };
     let weights_path = base.with_extension("bpk");
 
-    // A `sample` path without files on disk yields a freshly initialized sample model
+    // `sample_model` (what `create_sample_model` writes) without files on disk yields a freshly
+    // initialized MLP with random weights; any other missing path is an error
     if !weights_path.exists() {
-        let is_sample = base
-            .file_name()
-            .and_then(|s| s.to_str())
-            .is_some_and(|s| s.contains("sample"));
-        if is_sample {
-            info!("Creating sample MLP model");
+        if base.file_name().and_then(|s| s.to_str()) == Some(SAMPLE_MODEL) {
+            warn!(
+                "{} not found: serving a sample MLP with random weights",
+                weights_path.display()
+            );
             let container = create_sample_model()?;
             return Ok(Model::new(Box::new(MlpModel::new(container)), "mlp", 0));
         }
@@ -1271,6 +1283,20 @@ mod tests {
         let out = model.predict(vec![0.3; 784]).unwrap();
         assert_eq!(out.len(), 10);
         assert!(out.iter().any(|&v| v != out[0]));
+    }
+
+    #[test]
+    fn only_sample_model_itself_falls_back_to_random_weights() {
+        for missing in ["my_sample_model", "samples/net", "sample"] {
+            let result = load_model(Path::new(missing));
+            assert!(
+                matches!(
+                    result,
+                    Err(FurnaceError::Model(ModelError::FileNotFound(_)))
+                ),
+                "{missing}: {result:?}"
+            );
+        }
     }
 
     #[cfg(model_resnet18)]

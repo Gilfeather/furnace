@@ -45,7 +45,7 @@ use axum::Router;
 use axum::routing::post;
 use burn::tensor::{Tensor, TensorData};
 use furnace::llm::{
-    EngineError, Event, FinishReason, GenerateRequest, Input, LlmEngine, SamplingParams,
+    EngineError, Event, FinishReason, GenerateRequest, LlmEngine, Prompt, SamplingParams,
 };
 use furnace::nerve::brain::{Llm, ModelNeuron};
 use furnace::nerve::effector::{Effector, FileAppend, Process, Respond, Webhook};
@@ -87,8 +87,8 @@ impl LlmEngine for MockBrain {
         request: GenerateRequest,
     ) -> Result<tokio::sync::mpsc::Receiver<Event>, EngineError> {
         let text = match &request.input {
-            Input::Chat(messages) => messages.last().map(|m| m.content.clone()),
-            Input::Text(text) => Some(text.clone()),
+            Prompt::Chat(messages) => messages.last().map(|m| m.content.clone()),
+            Prompt::Text(text) => Some(text.clone()),
         }
         .unwrap_or_default();
         let answer = serde_json::json!([

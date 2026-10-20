@@ -155,7 +155,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    use crate::llm::{EngineError, Event, FinishReason, GenerateRequest, Input};
+    use crate::llm::{EngineError, Event, FinishReason, GenerateRequest, Prompt};
     use crate::nerve::effector::Effector;
     use crate::nerve::expect::{ExpectConfig, Expectations};
     use crate::nerve::{Feature, Firing, FnNeuron, Mechanisms, Payload, Summation};
@@ -199,7 +199,7 @@ mod tests {
             &self,
             request: GenerateRequest,
         ) -> Result<tokio::sync::mpsc::Receiver<Event>, EngineError> {
-            let Input::Chat(messages) = request.input else {
+            let Prompt::Chat(messages) = request.input else {
                 panic!("a chat");
             };
             let user = messages

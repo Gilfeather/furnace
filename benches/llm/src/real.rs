@@ -60,7 +60,8 @@ pub async fn serve_gguf(path: &Path, port: u16, sequences: usize) {
     let app = Server::new()
         .configure(|c| c.max_concurrent_requests = 10_000)
         .llm(engine)
-        .router();
+        .router()
+        .expect("a server with something to serve");
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .unwrap_or_else(|e| fail(&format!("cannot bind port {port}: {e}")));

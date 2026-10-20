@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::{
-    BoxError, EngineError, Event, FinishReason, GenerateRequest, Input, LlmEngine, Logits,
+    BoxError, EngineError, Event, FinishReason, GenerateRequest, LlmEngine, Logits, Prompt,
     StepModel, TextPipeline,
 };
 use crate::llm::pipeline::Tokenizer;
@@ -76,26 +76,31 @@ pub fn byte_pipeline() -> TextPipeline {
         .expect("the chat template is valid")
 }
 
-/// A count shared with the model: what is alive (requests, sequences), or decode calls
+/// A count shared with a mock model, readable after the model moved into an engine: what is
+/// alive (requests, sequences) or, for [`MockStepModel::decodes`], decode calls so far
 #[derive(Debug, Clone, Default)]
-pub struct Live(Arc<AtomicUsize>);
+pub struct SharedCount(Arc<AtomicUsize>);
 
-impl Live {
+/// The old name of [`SharedCount`]
+#[deprecated(since = "0.11.0", note = "renamed to `SharedCount`")]
+pub type Live = SharedCount;
+
+impl SharedCount {
     /// The count now
     pub fn get(&self) -> usize {
         self.0.load(Ordering::Acquire)
     }
 
-    fn guard(&self) -> LiveGuard {
+    fn guard(&self) -> CountGuard {
         self.0.fetch_add(1, Ordering::AcqRel);
-        LiveGuard(self.0.clone())
+        CountGuard(self.0.clone())
     }
 }
 
 #[derive(Debug)]
-struct LiveGuard(Arc<AtomicUsize>);
+struct CountGuard(Arc<AtomicUsize>);
 
-impl Drop for LiveGuard {
+impl Drop for CountGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
     }
@@ -112,15 +117,15 @@ pub struct MockStepModel {
     max_sequences: usize,
     prefill_delay: Duration,
     token_delay: Duration,
-    live: Live,
-    decodes: Live,
+    live: SharedCount,
+    decodes: SharedCount,
 }
 
 /// A [`MockStepModel`] sequence: how far into the reply it is
 #[derive(Debug)]
 pub struct MockSequence {
     position: usize,
-    _live: LiveGuard,
+    _live: CountGuard,
 }
 
 impl MockStepModel {
@@ -135,8 +140,8 @@ impl MockStepModel {
             max_sequences: 16,
             prefill_delay: Duration::ZERO,
             token_delay: Duration::ZERO,
-            live: Live::default(),
-            decodes: Live::default(),
+            live: SharedCount::default(),
+            decodes: SharedCount::default(),
         }
     }
 
@@ -165,13 +170,13 @@ impl MockStepModel {
     }
 
     /// The sequences alive, as a handle that outlives moving the model into an engine
-    pub fn live(&self) -> Live {
+    pub fn live(&self) -> SharedCount {
         self.live.clone()
     }
 
     /// Decode calls finished so far, as a handle like [`live`](Self::live): steps, counted
     /// without a clock
-    pub fn decodes(&self) -> Live {
+    pub fn decodes(&self) -> SharedCount {
         self.decodes.clone()
     }
 
@@ -224,7 +229,7 @@ pub struct MockEngine {
     first_delay: Duration,
     piece_delay: Duration,
     max_context: usize,
-    live: Live,
+    live: SharedCount,
 }
 
 impl MockEngine {
@@ -236,7 +241,7 @@ impl MockEngine {
             first_delay: Duration::ZERO,
             piece_delay: Duration::ZERO,
             max_context: 4096,
-            live: Live::default(),
+            live: SharedCount::default(),
         }
     }
 
@@ -253,7 +258,7 @@ impl MockEngine {
     }
 
     /// The generations running, as a handle that outlives moving the engine into a server
-    pub fn live(&self) -> Live {
+    pub fn live(&self) -> SharedCount {
         self.live.clone()
     }
 }
@@ -269,8 +274,8 @@ impl LlmEngine for MockEngine {
 
     fn generate(&self, request: GenerateRequest) -> Result<mpsc::Receiver<Event>, EngineError> {
         let prompt_tokens = match &request.input {
-            Input::Chat(messages) => messages.iter().map(|m| m.content.len()).sum(),
-            Input::Text(text) => text.len(),
+            Prompt::Chat(messages) => messages.iter().map(|m| m.content.len()).sum(),
+            Prompt::Text(text) => text.len(),
         };
         if prompt_tokens >= self.max_context {
             return Err(EngineError::TooLong {

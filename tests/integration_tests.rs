@@ -26,7 +26,7 @@ async fn spawn_model_server(name: &'static str, config: ServerConfig) -> String 
         .unwrap_or_else(|e| {
             panic!("{name} must be compiled in (place models/{name}.onnx before building): {e}")
         });
-    let app = router(model, &config);
+    let app = router(model, &config).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -310,7 +310,7 @@ async fn test_backpressure_returns_503() {
         max_concurrent_requests: 1,
         ..ServerConfig::default()
     };
-    let app = router(model, &config);
+    let app = router(model, &config).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -682,6 +682,8 @@ async fn test_cli_config_file_with_command_line_override() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     // From the file
+    assert_eq!(metrics["max_concurrent_requests"], 7);
+    // The old name, kept for 0.11
     assert_eq!(metrics["max_concurrent_inferences"], 7);
     let info: Value = client()
         .get(format!("{base_url}/model/info"))

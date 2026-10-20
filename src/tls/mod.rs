@@ -13,7 +13,7 @@ mod provider;
 
 use std::io;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
@@ -44,6 +44,65 @@ const ACCEPT_QUEUE: usize = 256;
 /// come after the handshake.
 pub const MAX_HANDSHAKES: usize = 1024;
 
+/// Why the certificate, key or client CA cannot be used. The underlying error is the
+/// [`source`](std::error::Error::source), boxed so that furnace's API does not depend on the
+/// TLS library's error types.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// A certificate file (`--tls-cert` or `--tls-client-ca`) cannot be read as PEM
+    #[error("{}: {source}", path.display())]
+    Certificate {
+        /// The file
+        path: PathBuf,
+        /// What went wrong
+        #[source]
+        source: BoxError,
+    },
+    /// A certificate file holds no certificate
+    #[error("{}: no PEM certificate", path.display())]
+    NoCertificate {
+        /// The file
+        path: PathBuf,
+    },
+    /// `--tls-key` holds no PEM private key
+    #[error("{}: no PEM private key ({source})", path.display())]
+    PrivateKey {
+        /// The file
+        path: PathBuf,
+        /// What went wrong
+        #[source]
+        source: BoxError,
+    },
+    /// A client CA certificate cannot be used to verify clients
+    #[error("{}: {source}", path.display())]
+    ClientCa {
+        /// The `--tls-client-ca` file
+        path: PathBuf,
+        /// What went wrong
+        #[source]
+        source: BoxError,
+    },
+    /// The certificate and key do not make a server configuration: the key is not one the
+    /// server takes (RSA, an unsupported curve) or does not match the certificate
+    #[error("{} and {}: {source}", cert.display(), key.display())]
+    CertificateAndKey {
+        /// `--tls-cert`
+        cert: PathBuf,
+        /// `--tls-key`
+        key: PathBuf,
+        /// What went wrong
+        #[source]
+        source: BoxError,
+    },
+    /// The TLS library refused the protocol versions; a bug rather than a configuration error
+    #[error("TLS setup: {0}")]
+    Setup(#[source] BoxError),
+}
+
+/// The error inside an [`Error`]
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
 /// Which protocols a listener offers through ALPN
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Protocols {
@@ -64,7 +123,7 @@ pub struct TlsConfigs {
 
 impl TlsConfigs {
     /// Load the certificate, key and client CA, or say what is wrong with them
-    pub fn load(settings: TlsSettings) -> Result<Arc<Self>, String> {
+    pub fn load(settings: TlsSettings) -> Result<Arc<Self>, Error> {
         let (http, grpc) = build(&settings)?;
         let loaded = newest_change(&settings);
         Ok(Arc::new(Self {
@@ -90,7 +149,7 @@ impl TlsConfigs {
 
     /// Reload if a file changed since the last load; returns whether it did. On error the
     /// previous configuration stays.
-    pub fn reload_if_changed(&self) -> Result<bool, String> {
+    pub fn reload_if_changed(&self) -> Result<bool, Error> {
         // One lock for the check and the update, held through the reload, so two callers
         // cannot both see the change and load it twice
         let mut loaded = self.loaded.lock().unwrap_or_else(|e| e.into_inner());
@@ -142,36 +201,40 @@ fn newest_change(settings: &TlsSettings) -> Option<SystemTime> {
 
 fn build(
     settings: &TlsSettings,
-) -> Result<(Arc<rustls::ServerConfig>, Arc<rustls::ServerConfig>), String> {
+) -> Result<(Arc<rustls::ServerConfig>, Arc<rustls::ServerConfig>), Error> {
     let certs = read_certs(&settings.cert)?;
-    let key = PrivateKeyDer::from_pem_file(&settings.key)
-        .map_err(|e| format!("{}: no PEM private key ({e})", settings.key.display()))?;
+    let key = PrivateKeyDer::from_pem_file(&settings.key).map_err(|e| Error::PrivateKey {
+        path: settings.key.clone(),
+        source: e.into(),
+    })?;
     let provider = Arc::new(provider::provider());
     let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Error::Setup(e.into()))?;
     let builder = match &settings.client_ca {
         None => builder.with_no_client_auth(),
         Some(ca) => {
+            let client_ca = |e: BoxError| Error::ClientCa {
+                path: ca.clone(),
+                source: e,
+            };
             let mut roots = rustls::RootCertStore::empty();
             for cert in read_certs(ca)? {
-                roots
-                    .add(cert)
-                    .map_err(|e| format!("{}: {e}", ca.display()))?;
+                roots.add(cert).map_err(|e| client_ca(e.into()))?;
             }
             let verifier = WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
                 .build()
-                .map_err(|e| format!("{}: {e}", ca.display()))?;
+                .map_err(|e| client_ca(e.into()))?;
             builder.with_client_cert_verifier(verifier)
         }
     };
-    let config = builder.with_single_cert(certs, key).map_err(|e| {
-        format!(
-            "{} and {}: {e}",
-            settings.cert.display(),
-            settings.key.display()
-        )
-    })?;
+    let config = builder
+        .with_single_cert(certs, key)
+        .map_err(|e| Error::CertificateAndKey {
+            cert: settings.cert.clone(),
+            key: settings.key.clone(),
+            source: e.into(),
+        })?;
     let mut http = config.clone();
     http.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     let mut grpc = config;
@@ -179,12 +242,17 @@ fn build(
     Ok((Arc::new(http), Arc::new(grpc)))
 }
 
-fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
+fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, Error> {
     let certs = CertificateDer::pem_file_iter(path)
         .and_then(|certs| certs.collect::<Result<Vec<_>, _>>())
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+        .map_err(|e| Error::Certificate {
+            path: path.to_path_buf(),
+            source: e.into(),
+        })?;
     if certs.is_empty() {
-        return Err(format!("{}: no PEM certificate", path.display()));
+        return Err(Error::NoCertificate {
+            path: path.to_path_buf(),
+        });
     }
     Ok(certs)
 }
@@ -403,7 +471,7 @@ pub(crate) mod tests {
             "dummy",
             0,
         );
-        let app = router(model, &ServerConfig::default());
+        let app = router(model, &ServerConfig::default()).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let listener = TlsListener::new(listener, configs).unwrap();
@@ -567,9 +635,9 @@ pub(crate) mod tests {
         let p384 = read_certs(&fixture("server-p384.crt")).unwrap().remove(0);
         assert_eq!(get_healthz(addr, &client(None)).await.unwrap().1, p256);
 
-        assert_eq!(configs.reload_if_changed(), Ok(false));
+        assert!(matches!(configs.reload_if_changed(), Ok(false)));
         install("server-p384");
-        assert_eq!(configs.reload_if_changed(), Ok(true));
+        assert!(matches!(configs.reload_if_changed(), Ok(true)));
         assert_eq!(get_healthz(addr, &client(None)).await.unwrap().1, p384);
 
         // A half-written renewal: the error is reported once and the certificate stays
@@ -577,8 +645,11 @@ pub(crate) mod tests {
         let file = std::fs::File::options().write(true).open(&key).unwrap();
         file.set_modified(SystemTime::now() + Duration::from_secs(3600))
             .unwrap();
-        assert!(configs.reload_if_changed().is_err());
-        assert_eq!(configs.reload_if_changed(), Ok(false));
+        assert!(matches!(
+            configs.reload_if_changed(),
+            Err(Error::PrivateKey { .. })
+        ));
+        assert!(matches!(configs.reload_if_changed(), Ok(false)));
         assert_eq!(get_healthz(addr, &client(None)).await.unwrap().1, p384);
     }
 
@@ -594,16 +665,18 @@ pub(crate) mod tests {
         assert!(load("server-p256.key").is_ok());
         assert!(load("server-p256-sec1.key").is_ok());
         let error = build(&settings("server-rsa", false)).err().unwrap();
+        assert!(matches!(error, Error::CertificateAndKey { .. }), "{error}");
+        let error = error.to_string();
         assert!(error.contains("RSA keys are not supported"), "{error}");
         assert!(error.contains("ECDSA"), "{error}");
-        let error = load("server-p521.key").err().unwrap();
+        let error = load("server-p521.key").err().unwrap().to_string();
         // P-521's object identifier
         assert!(
             error.contains("unsupported EC key curve 1.3.132.0.35"),
             "{error}"
         );
 
-        let missing = load("nope.key").err().unwrap();
+        let missing = load("nope.key").err().unwrap().to_string();
         assert!(missing.contains("nope.key"), "{missing}");
     }
 }
