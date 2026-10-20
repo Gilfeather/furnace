@@ -37,6 +37,12 @@ pub const RELOAD_INTERVAL: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Handshaken connections waiting for the server to take them
 const ACCEPT_QUEUE: usize = 256;
+/// Handshakes in flight at once, per listener. Past it the listener stops accepting until one
+/// ends, and further connections wait in the operating system's backlog, so clients that open
+/// connections and never send a ClientHello cannot hold more than this many tasks and sockets
+/// (each for up to [`HANDSHAKE_TIMEOUT`]). `--max-concurrent-requests` bounds requests, which
+/// come after the handshake.
+pub const MAX_HANDSHAKES: usize = 1024;
 
 /// Which protocols a listener offers through ALPN
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -254,18 +260,36 @@ impl tonic::transport::server::Connected for TlsConnection {
     }
 }
 
-/// Accept TCP connections on `listener` and run their TLS handshakes concurrently, each
-/// under a timeout; completed connections arrive on the returned channel. Stops when the
-/// receiver is dropped.
+/// Accept TCP connections on `listener` and run their TLS handshakes concurrently, at most
+/// [`MAX_HANDSHAKES`] at once and each under a timeout; completed connections arrive on the
+/// returned channel. Stops when the receiver is dropped.
 pub fn accept(
     listener: TcpListener,
     configs: Arc<TlsConfigs>,
     protocols: Protocols,
 ) -> mpsc::Receiver<TlsConnection> {
+    accept_bounded(listener, configs, protocols, MAX_HANDSHAKES)
+}
+
+fn accept_bounded(
+    listener: TcpListener,
+    configs: Arc<TlsConfigs>,
+    protocols: Protocols,
+    max_handshakes: usize,
+) -> mpsc::Receiver<TlsConnection> {
     let (tx, rx) = mpsc::channel(ACCEPT_QUEUE);
     let local = listener.local_addr().ok();
+    let handshakes = Arc::new(tokio::sync::Semaphore::new(max_handshakes));
     tokio::spawn(async move {
         loop {
+            // A slot first, so a full set of handshakes stops accepting
+            let handshake = tokio::select! {
+                permit = handshakes.clone().acquire_owned() => match permit {
+                    Ok(permit) => permit,
+                    Err(_) => return,
+                },
+                () = tx.closed() => return,
+            };
             let (tcp, peer) = tokio::select! {
                 accepted = listener.accept() => match accepted {
                     Ok(accepted) => accepted,
@@ -282,7 +306,10 @@ pub fn accept(
             let acceptor = TlsAcceptor::from(configs.current(protocols));
             let tx = tx.clone();
             tokio::spawn(async move {
-                match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
+                let handshaken =
+                    tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await;
+                drop(handshake);
+                match handshaken {
                     Ok(Ok(stream)) => {
                         let _ = tx
                             .send(TlsConnection {
@@ -450,6 +477,32 @@ pub(crate) mod tests {
             let expected = read_certs(&fixture(&format!("{server}.crt"))).unwrap();
             assert_eq!(certificate, expected[0], "{server}");
         }
+    }
+
+    #[tokio::test]
+    async fn handshakes_in_flight_are_bounded() {
+        let configs = TlsConfigs::load(settings("server-p256", false)).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut connections = accept_bounded(listener, configs, Protocols::Http, 1);
+        // A client that connects and never says hello holds the only handshake...
+        let silent = TcpStream::connect(addr).await.unwrap();
+        let handshake = tokio::spawn(async move {
+            let tcp = TcpStream::connect(addr).await?;
+            let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+            client(None).connect(name, tcp).await
+        });
+        // ...so the next one waits (a slow machine only makes this wait longer)
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!handshake.is_finished());
+        // and goes through once the silent client leaves
+        drop(silent);
+        let handshaken = tokio::time::timeout(Duration::from_secs(10), handshake)
+            .await
+            .expect("the handshake goes through")
+            .unwrap();
+        assert!(handshaken.is_ok(), "{handshaken:?}");
+        assert!(connections.recv().await.is_some());
     }
 
     #[tokio::test]

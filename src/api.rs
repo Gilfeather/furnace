@@ -13,7 +13,7 @@ use axum::{
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
-    routing::{get, post},
+    routing::{MethodRouter, get, post},
 };
 use chrono::Utc;
 use serde::de::{self, Deserializer, IgnoredAny, MapAccess, Visitor};
@@ -23,12 +23,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::signal;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Semaphore;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
 #[cfg(feature = "grpc")]
 pub mod grpc;
+mod infer;
 mod v2;
+
+use infer::{Code, f32s_from_le, f32s_to_le};
 
 use crate::access::{Access, RateLimit, Rejection, constant_time_eq, presented_key};
 pub use crate::batching::BatchConfig;
@@ -150,6 +153,36 @@ pub enum PredictOutputData {
     Batch { outputs: Vec<Vec<f32>> },
 }
 
+/// What [`PredictResponse`] serializes to, borrowing the output: a batch goes out as its rows
+/// without copying each into a `Vec` of its own
+#[derive(Serialize)]
+struct PredictReply<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<&'a [f32]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outputs: Option<Rows<'a>>,
+    status: &'static str,
+    inference_time_ms: f64,
+    timestamp: String,
+    batch_size: usize,
+}
+
+/// A flat buffer as a JSON array of `rows` equal rows
+struct Rows<'a> {
+    values: &'a [f32],
+    rows: usize,
+}
+
+impl Serialize for Rows<'_> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        let width = self.values.len() / self.rows.max(1);
+        serializer.collect_seq(self.values.chunks_exact(width.max(1)).take(self.rows))
+    }
+}
+
 /// `GET /metrics`: server-level counters for monitoring (originally contributed in #32)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MetricsResponse {
@@ -265,13 +298,7 @@ pub struct ModelInfoResponse {
     pub timestamp: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ErrorResponse {
-    pub error: String,
-    pub code: String,
-    pub details: Option<serde_json::Value>,
-    pub timestamp: String,
-}
+pub use crate::error::ErrorResponse;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -352,7 +379,7 @@ impl Default for ServerConfig {
     }
 }
 
-type AppState = Arc<ServerState>;
+pub(crate) type AppState = Arc<ServerState>;
 
 /// Loads a model again for `POST /admin/models/{model}/reload`, from the given weight file or,
 /// with `None`, from where it was loaded before. Blocking.
@@ -500,7 +527,9 @@ impl Server {
         self
     }
 
-    /// The HTTP API as an axum router, to serve or mount yourself. Panics without a model.
+    /// The HTTP API as an axum router, to serve or mount yourself. A server with nothing to
+    /// serve logs an error and answers every model route with `404 MODEL_NOT_FOUND`;
+    /// [`try_router`](Self::try_router) refuses it instead, as [`serve`](Self::serve) does.
     ///
     /// A rate limit without API keys tells clients apart by their address, which axum knows
     /// only when the router is served with [`ClientAddr`] as connect info; otherwise every
@@ -517,20 +546,34 @@ impl Server {
     /// # }
     /// ```
     pub fn router(self) -> Router {
+        if let Err(e) = check_contents(&self.contents) {
+            error!("{e}");
+        }
         warn_if_limited_by_address(&self.config);
         router_with_state(server_state(self.contents, &self.config), &self.config)
     }
 
+    /// [`router`](Self::router), or an error for a server with nothing to serve
+    pub fn try_router(self) -> Result<Router> {
+        check_contents(&self.contents)?;
+        Ok(self.router())
+    }
+
     /// Serve until Ctrl-C / SIGTERM
     pub async fn serve(self) -> Result<()> {
-        if self.contents.is_empty() {
-            return Err(ApiError::ServerStartup(
-                "no model to serve; add one with Server::model".to_string(),
-            )
-            .into());
-        }
         serve(self.config, self.contents).await
     }
+}
+
+/// A server needs a model, an LLM or neurons to serve
+fn check_contents(contents: &Contents) -> Result<()> {
+    if contents.is_empty() {
+        return Err(ApiError::ServerStartup(
+            "no model to serve; add one with Server::model".to_string(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// What a reload replaces at once: the model and its readiness. Its pathway in the nervous
@@ -602,12 +645,14 @@ impl ModelSlot {
     }
 }
 
-struct ServerState {
+pub(crate) struct ServerState {
     /// The served models; the first is the default for `/predict` and `/model/info`
     models: Vec<Arc<ModelSlot>>,
     start_time: SystemTime,
     inference_slots: Arc<Semaphore>,
-    max_concurrent: usize,
+    /// `--max-concurrent-requests`: `max_concurrent_inferences` in the JSON metrics,
+    /// `furnace_max_concurrent_requests` in Prometheus
+    max_concurrent_requests: usize,
     request_timeout: Option<Duration>,
     max_batch_size: usize,
     admin_token: Option<String>,
@@ -650,12 +695,6 @@ impl ServerState {
     fn model_names(&self) -> Vec<&str> {
         self.models.iter().map(|slot| slot.name.as_str()).collect()
     }
-
-    /// Record a successful inference of `slot`'s model
-    fn observe_inference(&self, slot: &ModelSlot, elapsed: Duration) {
-        slot.inference_latency.observe(elapsed);
-        self.inference_latency.observe(elapsed);
-    }
 }
 
 /// Build the application router with all middleware applied. Serve it with [`ClientAddr`]
@@ -664,10 +703,12 @@ pub fn router(model: Model, config: &ServerConfig) -> Router {
     router_with_models(vec![model.into()], config)
 }
 
-/// [`router`] for several models; the first is the default for `/predict`
+/// [`router`] for several models; the first is the default for `/predict`. Without any, as
+/// [`Server::router`].
 pub fn router_with_models(models: Vec<ServedModel>, config: &ServerConfig) -> Router {
-    warn_if_limited_by_address(config);
-    router_with_state(server_state(models.into(), config), config)
+    let mut server = Server::with_config(config.clone());
+    server.contents = models.into();
+    server.router()
 }
 
 /// A router served by its user may lack the peer address the rate limit needs; say so once,
@@ -675,14 +716,15 @@ pub fn router_with_models(models: Vec<ServedModel>, config: &ServerConfig) -> Ro
 fn warn_if_limited_by_address(config: &ServerConfig) {
     if config.rate_limit.is_some() && config.api_keys.is_empty() {
         warn!(
-            "the rate limit tells clients apart by address: serve this router with              into_make_service_with_connect_info::<furnace::api::ClientAddr>(), or every              client shares one budget"
+            "the rate limit tells clients apart by address: serve this router with \
+             into_make_service_with_connect_info::<furnace::api::ClientAddr>(), or every \
+             client shares one budget"
         );
     }
 }
 
 /// The shared state of the HTTP and gRPC servers; also starts the models' warm-ups
 fn server_state(contents: Contents, config: &ServerConfig) -> AppState {
-    assert!(!contents.is_empty(), "at least one model to serve");
     let batching = config.batching;
     let inference_slots = Arc::new(Semaphore::new(config.max_concurrent_requests));
     let models = contents
@@ -733,7 +775,7 @@ fn server_state(contents: Contents, config: &ServerConfig) -> AppState {
         models,
         start_time: SystemTime::now(),
         inference_slots,
-        max_concurrent: config.max_concurrent_requests,
+        max_concurrent_requests: config.max_concurrent_requests,
         request_timeout: config.request_timeout,
         max_batch_size: batching.max_batch_size.max(1),
         admin_token: config.admin_token.clone(),
@@ -751,31 +793,63 @@ fn server_state(contents: Contents, config: &ServerConfig) -> AppState {
     })
 }
 
+/// How a route is made: its handler, given the state its layers need
+type MakeRoute = fn(&AppState) -> MethodRouter<AppState>;
+
+/// An inference route, whose requests are counted in the metrics
+fn counted(state: &AppState, route: MethodRouter<AppState>) -> MethodRouter<AppState> {
+    route.layer(middleware::from_fn_with_state(
+        state.clone(),
+        count_requests,
+    ))
+}
+
+/// Every route of the server's own HTTP API: the router serves these, and a test checks that
+/// `docs/openapi.json` describes exactly these plus [`LLM_PATHS`] and [`NERVE_PATHS`]
+const ROUTES: &[(&str, MakeRoute)] = &[
+    ("/healthz", |_| get(health_check)),
+    ("/health", |_| get(health_check)),
+    ("/readyz", |_| get(readiness)),
+    ("/predict", |state| counted(state, post(predict))),
+    ("/models/{model}/predict", |state| {
+        counted(state, post(predict_named))
+    }),
+    ("/model/info", |_| get(model_info)),
+    ("/models", |_| get(list_models)),
+    ("/models/{model}", |_| get(model_info_named)),
+    ("/admin/models/{model}/reload", |_| post(reload_model)),
+    ("/metrics", |_| get(metrics)),
+    ("/v2", |_| get(v2::server_metadata)),
+    ("/v2/health/live", |_| get(v2::live)),
+    ("/v2/health/ready", |_| get(v2::ready)),
+    ("/v2/models/{model}", |_| get(v2::model_metadata)),
+    ("/v2/models/{model}/versions/{version}", |_| {
+        get(v2::model_metadata)
+    }),
+    ("/v2/models/{model}/ready", |_| get(v2::model_ready)),
+    ("/v2/models/{model}/versions/{version}/ready", |_| {
+        get(v2::model_ready)
+    }),
+    ("/v2/models/{model}/infer", |state| {
+        counted(state, post(v2::infer))
+    }),
+    ("/v2/models/{model}/versions/{version}/infer", |state| {
+        counted(state, post(v2::infer))
+    }),
+];
+
+/// The OpenAI routes, served with the feature `llm` and an LLM to serve
+#[cfg(any(test, feature = "llm"))]
+pub(crate) const LLM_PATHS: [&str; 3] = ["/v1/chat/completions", "/v1/completions", "/v1/models"];
+
+/// The nervous system's own routes (the receptors' routes are the user's)
+#[cfg(test)]
+const NERVE_PATHS: [&str; 2] = ["/nerve", "/nerve/effectors/{name}/events"];
+
 fn router_with_state(state: AppState, config: &ServerConfig) -> Router {
-    let router = Router::new()
-        .route("/healthz", get(health_check))
-        .route("/health", get(health_check))
-        .route("/readyz", get(readiness))
-        .route(
-            "/predict",
-            post(predict).layer(middleware::from_fn_with_state(
-                state.clone(),
-                count_requests,
-            )),
-        )
-        .route(
-            "/models/{model}/predict",
-            post(predict_named).layer(middleware::from_fn_with_state(
-                state.clone(),
-                count_requests,
-            )),
-        )
-        .route("/model/info", get(model_info))
-        .route("/models", get(list_models))
-        .route("/models/{model}", get(model_info_named))
-        .route("/admin/models/{model}/reload", post(reload_model))
-        .route("/metrics", get(metrics))
-        .merge(v2::routes(state.clone()));
+    let router = ROUTES.iter().fold(Router::new(), |router, (path, make)| {
+        router.route(path, make(&state))
+    });
     #[cfg(feature = "llm")]
     let router = match &state.llm {
         Some(llm) => router.merge(crate::llm::routes(llm.clone())),
@@ -833,7 +907,7 @@ fn rejection_response(state: &ServerState, rejection: &Rejection) -> Response {
             state.rejected_unauthorized.fetch_add(1, Ordering::Relaxed);
             let mut response = create_error_response(
                 StatusCode::UNAUTHORIZED,
-                "UNAUTHORIZED",
+                Code::Unauthorized,
                 "Missing or unknown API key; send 'Authorization: Bearer <key>' or 'X-API-Key: <key>'",
                 None,
             );
@@ -848,7 +922,7 @@ fn rejection_response(state: &ServerState, rejection: &Rejection) -> Response {
             let seconds = retry.as_secs() + u64::from(retry.subsec_nanos() > 0);
             let mut response = create_error_response(
                 StatusCode::TOO_MANY_REQUESTS,
-                "RATE_LIMITED",
+                Code::RateLimited,
                 &format!(
                     "Rate limit exceeded; retry in {} ms",
                     retry.as_millis().max(1)
@@ -898,11 +972,13 @@ async fn edge(request: Request, next: Next) -> Response {
         );
         response
     } else {
+        // Built only when a subscriber listens at INFO; the fields are borrowed strings, so the
+        // span costs no formatting of its own
         let span = info_span!(
             "request",
             id = id.to_str().unwrap_or_default(),
-            method = %request.method(),
-            path = %request.uri().path()
+            method = request.method().as_str(),
+            path = request.uri().path()
         );
         next.run(request).instrument(span).await
     };
@@ -953,6 +1029,7 @@ pub async fn start_server_with_models(
 }
 
 async fn serve(config: ServerConfig, contents: Contents) -> Result<()> {
+    check_contents(&contents)?;
     let state = server_state(contents, &config);
     #[cfg(not(feature = "llm"))]
     let names = state.model_names();
@@ -1095,19 +1172,27 @@ async fn serve(config: ServerConfig, contents: Contents) -> Result<()> {
     Ok(())
 }
 
+/// Ctrl-C or SIGTERM. A handler that cannot be installed is logged and waits forever, so the
+/// server keeps serving (stopped by the other signal, or killed) instead of losing the task.
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
+        if let Err(e) = signal::ctrl_c().await {
+            warn!("Cannot listen for Ctrl+C, stop the server another way: {e}");
+            std::future::pending::<()>().await;
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("Failed to install signal handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                terminate.recv().await;
+            }
+            Err(e) => {
+                warn!("Cannot listen for SIGTERM, stop the server another way: {e}");
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(not(unix))]
@@ -1162,8 +1247,8 @@ async fn predict(State(state): State<AppState>, request: Request) -> Response {
 fn no_tensor_model_response() -> Response {
     create_error_response(
         StatusCode::NOT_FOUND,
-        "MODEL_NOT_FOUND",
-        "This server serves no tensor model, only LLMs on /v1/chat/completions",
+        Code::ModelNotFound,
+        "This server serves no tensor model; its LLMs, if any, are on /v1/chat/completions",
         None,
     )
 }
@@ -1183,7 +1268,7 @@ async fn predict_named(
 fn unknown_model_response(state: &ServerState, name: &str) -> Response {
     create_error_response(
         StatusCode::NOT_FOUND,
-        "MODEL_NOT_FOUND",
+        Code::ModelNotFound,
         &format!(
             "Unknown model '{name}'; this server serves {}",
             state.model_names().join(", ")
@@ -1199,7 +1284,7 @@ async fn predict_with(state: &AppState, slot: &ModelSlot, request: Request) -> R
         let info = loaded.model.get_info();
         return create_error_response(
             StatusCode::BAD_REQUEST,
-            "NAMED_TENSORS_REQUIRED",
+            Code::NamedTensorsRequired,
             &format!(
                 "Model '{}' takes named tensors ({}); send them to POST /v2/models/{}/infer",
                 info.name,
@@ -1222,7 +1307,7 @@ async fn predict_with(state: &AppState, slot: &ModelSlot, request: Request) -> R
         None => {
             return create_error_response(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "INVALID_REQUEST",
+                Code::InvalidRequest,
                 &format!("Expected request with `Content-Type: {SUPPORTED_REQUEST_TYPES}`"),
                 None,
             );
@@ -1235,7 +1320,8 @@ async fn predict_with(state: &AppState, slot: &ModelSlot, request: Request) -> R
         return *response;
     }
     let binary_response = accepts_octet_stream(request.headers());
-    let headers = request.headers().clone();
+    // The one header the binary decoder reads, rather than a copy of them all
+    let batch_header = request.headers().get(BATCH_SIZE_HEADER).cloned();
 
     let body = match Bytes::from_request(request, state).await {
         Ok(body) => body,
@@ -1243,7 +1329,7 @@ async fn predict_with(state: &AppState, slot: &ModelSlot, request: Request) -> R
             warn!("Rejected request body: {}", rejection.body_text());
             return create_error_response(
                 rejection.status(),
-                "INVALID_REQUEST",
+                Code::InvalidRequest,
                 &rejection.body_text(),
                 None,
             );
@@ -1252,7 +1338,7 @@ async fn predict_with(state: &AppState, slot: &ModelSlot, request: Request) -> R
 
     let decoded = match format {
         RequestFormat::Json => decode_json(&loaded.model, &body),
-        RequestFormat::Binary => decode_binary(&loaded.model, &headers, &body),
+        RequestFormat::Binary => decode_binary(&loaded.model, batch_header.as_ref(), &body),
         #[cfg(feature = "image")]
         RequestFormat::Image(kind) => decode_image(state, &loaded.model, kind, body.clone()).await,
     };
@@ -1268,171 +1354,39 @@ async fn predict_with(state: &AppState, slot: &ModelSlot, request: Request) -> R
     };
     // `inference_time_ms` excludes receiving and decoding the body
     let start_time = Instant::now();
-
-    // Backpressure: reject immediately instead of queueing when all slots are busy
-    let permit = match state.inference_slots.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            warn!("All inference slots busy, rejecting request");
-            return busy_response();
-        }
+    let output = match state
+        .infer_flat(slot, &loaded, announced, data, batch_size)
+        .await
+    {
+        Ok(output) => output,
+        Err(e) => return e.into_response(),
     };
-
-    let result = match run_inference(state, &loaded, announced, data, batch_size, permit).await {
-        Ok(result) => result,
-        Err(response) => return *response,
-    };
-
-    match result {
-        Ok(output) => {
-            let elapsed = start_time.elapsed();
-            state.observe_inference(slot, elapsed);
-            let inference_time_ms = elapsed.as_secs_f64() * 1000.0;
-            // Per request, so debug: at info it would cost more than the server's own work
-            debug!(
-                "Prediction completed in {:.2}ms, batch size: {}",
-                inference_time_ms, batch_size
-            );
-            if binary_response {
-                return binary_output_response(
-                    &output,
-                    batch_size,
-                    &loaded.model.get_info().output_spec.shape,
-                    inference_time_ms,
-                );
-            }
-
-            let output_data = if single {
-                PredictOutputData::Single { output }
-            } else {
-                let output_size = output.len() / batch_size;
-                PredictOutputData::Batch {
-                    outputs: output
-                        .chunks_exact(output_size)
-                        .map(<[f32]>::to_vec)
-                        .collect(),
-                }
-            };
-            (
-                StatusCode::OK,
-                Json(PredictResponse {
-                    output_data,
-                    status: "success".to_string(),
-                    inference_time_ms,
-                    timestamp: Utc::now().to_rfc3339(),
-                    batch_size,
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            error!("Prediction error: {}", e);
-            let (status_code, error_code) = match &e {
-                FurnaceError::Model(ModelError::InputValidation { .. }) => {
-                    (StatusCode::BAD_REQUEST, "INPUT_VALIDATION_FAILED")
-                }
-                FurnaceError::Model(
-                    ModelError::InvalidDataType(_) | ModelError::InvalidInput(_),
-                ) => (StatusCode::BAD_REQUEST, "INVALID_INPUT_VALUE"),
-                FurnaceError::Model(ModelError::InferenceFailed(_)) => {
-                    (StatusCode::INTERNAL_SERVER_ERROR, "INFERENCE_FAILED")
-                }
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
-            };
-            create_error_response(status_code, error_code, &e.to_string(), None)
-        }
+    let inference_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+    // Per request, so debug: at info it would cost more than the server's own work
+    debug!(
+        "Prediction completed in {:.2}ms, batch size: {}",
+        inference_time_ms, batch_size
+    );
+    if binary_response {
+        return binary_output_response(
+            &output,
+            batch_size,
+            &loaded.model.get_info().output_spec.shape,
+            inference_time_ms,
+        );
     }
-}
-
-/// Run one request of flat `f32` inputs through its model's pathway (see [`run_general`]).
-///
-/// The outer error is a finished response (busy, timeout, a lost request); the inner result is
-/// the model's answer for this request.
-async fn run_inference(
-    state: &ServerState,
-    loaded: &Loaded,
-    announced: Option<Announced<'_>>,
-    data: Vec<f32>,
-    batch_size: usize,
-    permit: OwnedSemaphorePermit,
-) -> std::result::Result<Result<Vec<f32>>, Box<Response>> {
-    let mut shape = Vec::with_capacity(loaded.model.get_info().input_spec.shape.len() + 1);
-    shape.push(batch_size);
-    shape.extend_from_slice(&loaded.model.get_info().input_spec.shape);
-    let input = HostTensor {
-        shape,
-        values: Values::F32(data),
-    };
-    let outputs = run_general(state, loaded, announced, vec![input], permit).await?;
-    Ok(
-        outputs.and_then(|outputs| match outputs.into_iter().next() {
-            Some(HostTensor {
-                values: Values::F32(values),
-                ..
-            }) => Ok(values),
-            _ => Err(
-                ModelError::InferenceFailed("the model returned no f32 output".to_string()).into(),
-            ),
+    Json(PredictReply {
+        output: single.then_some(&output[..]),
+        outputs: (!single).then_some(Rows {
+            values: &output,
+            rows: batch_size,
         }),
-    )
-}
-
-/// Run one request of named tensors through its model's pathway in the nervous system:
-/// summed with concurrent requests when batching is on, on a blocking thread of its own
-/// otherwise; under the timeout, holding its concurrency slot until it is answered.
-async fn run_general(
-    state: &ServerState,
-    loaded: &Loaded,
-    announced: Option<Announced<'_>>,
-    inputs: Vec<HostTensor>,
-    permit: OwnedSemaphorePermit,
-) -> std::result::Result<Result<Vec<HostTensor>>, Box<Response>> {
-    let task = state
-        .serving
-        .infer(&loaded.model.get_info().name, inputs, announced);
-    let answered = match state.request_timeout {
-        Some(timeout) => match tokio::time::timeout(timeout, task).await {
-            Ok(answered) => answered,
-            Err(_) => return Err(Box::new(timeout_response(timeout))),
-        },
-        None => task.await,
-    };
-    // Free the slot before the response is made, so a client that reads /metrics right after
-    // its response never sees its own request still in flight
-    drop(permit);
-    match answered {
-        Ok(result) => Ok(result),
-        Err(Refused::Busy) => Err(Box::new(busy_response())),
-        Err(Refused::Lost) => Err(Box::new(panicked_response())),
-    }
-}
-
-fn timeout_response(timeout: Duration) -> Response {
-    warn!("Inference exceeded timeout of {:?}", timeout);
-    create_error_response(
-        StatusCode::GATEWAY_TIMEOUT,
-        "INFERENCE_TIMEOUT",
-        &format!("Inference exceeded timeout of {}ms", timeout.as_millis()),
-        None,
-    )
-}
-
-fn panicked_response() -> Response {
-    create_error_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "INFERENCE_FAILED",
-        "Inference task panicked",
-        None,
-    )
-}
-
-fn busy_response() -> Response {
-    create_error_response(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "SERVER_BUSY",
-        "Too many concurrent requests, retry later",
-        None,
-    )
+        status: "success",
+        inference_time_ms,
+        timestamp: Utc::now().to_rfc3339(),
+        batch_size,
+    })
+    .into_response()
 }
 
 #[cfg(not(feature = "image"))]
@@ -1531,7 +1485,7 @@ fn decode_json_serde(body: &[u8]) -> std::result::Result<PredictRequest, Box<Res
         warn!("Rejected request body: {}", message);
         Box::new(create_error_response(
             status,
-            "INVALID_REQUEST",
+            Code::InvalidRequest,
             &message,
             None,
         ))
@@ -1544,10 +1498,9 @@ fn decode_json_serde(body: &[u8]) -> std::result::Result<PredictRequest, Box<Res
 /// `output`; with it the response uses `outputs`, mirroring `input` / `inputs`.
 fn decode_binary(
     model: &Model,
-    headers: &HeaderMap,
+    batch_header: Option<&HeaderValue>,
     body: &[u8],
 ) -> std::result::Result<PredictInput, Box<Response>> {
-    let batch_header = headers.get(BATCH_SIZE_HEADER);
     let batch_size = match batch_header {
         None => 1,
         Some(value) => match value.to_str().ok().and_then(|s| s.trim().parse().ok()) {
@@ -1555,7 +1508,7 @@ fn decode_binary(
             None => {
                 return Err(Box::new(create_error_response(
                     StatusCode::BAD_REQUEST,
-                    "INVALID_REQUEST",
+                    Code::InvalidRequest,
                     "X-Batch-Size must be a non-negative integer",
                     None,
                 )));
@@ -1574,7 +1527,7 @@ fn decode_binary(
     if body.len() != expected_bytes {
         return Err(Box::new(create_error_response(
             StatusCode::BAD_REQUEST,
-            "INPUT_VALIDATION_FAILED",
+            Code::InputValidationFailed,
             &format!(
                 "Expected {expected_bytes} bytes ({batch_size} item(s) of shape {shape:?} as \
                  little-endian f32), got {}",
@@ -1590,10 +1543,8 @@ fn decode_binary(
     }
 
     // Length was checked above, so there is no remainder
-    let (chunks, _) = body.as_chunks::<4>();
-    let data = chunks.iter().copied().map(f32::from_le_bytes).collect();
     Ok(PredictInput {
-        data,
+        data: f32s_from_le(body),
         batch_size,
         single: batch_header.is_none(),
     })
@@ -1606,7 +1557,7 @@ fn image_size(model: &Model) -> std::result::Result<(u32, u32), Box<Response>> {
     image_input_size(shape).ok_or_else(|| {
         Box::new(create_error_response(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "INVALID_REQUEST",
+            Code::InvalidRequest,
             &format!(
                 "Image input needs a model with input shape [3, H, W]; this model takes \
                  {shape:?}. Send JSON or `{OCTET_STREAM}` instead"
@@ -1634,8 +1585,7 @@ async fn decode_image(
     // Decoding can allocate far more than the body size, so it shares the inference
     // slots: at most `max_concurrent_requests` decodes or inferences run at once
     let Ok(permit) = state.inference_slots.clone().try_acquire_owned() else {
-        warn!("All inference slots busy, rejecting image request");
-        return Err(Box::new(busy_response()));
+        return Err(Box::new(infer::InferError::Busy.into_response()));
     };
     let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
@@ -1652,7 +1602,7 @@ async fn decode_image(
             warn!("Rejected image body: {}", e);
             Err(Box::new(create_error_response(
                 StatusCode::BAD_REQUEST,
-                "INVALID_IMAGE",
+                Code::InvalidImage,
                 &format!("Failed to decode the image: {e}"),
                 None,
             )))
@@ -1661,7 +1611,7 @@ async fn decode_image(
             error!("Image decoding task failed: {}", e);
             Err(Box::new(create_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
+                Code::InternalError,
                 "Image decoding task panicked",
                 None,
             )))
@@ -1676,24 +1626,26 @@ fn binary_output_response(
     output_shape: &[usize],
     inference_time_ms: f64,
 ) -> Response {
-    let mut body = Vec::with_capacity(size_of_val(output));
-    for value in output {
-        body.extend_from_slice(&value.to_le_bytes());
-    }
     let shape = output_shape
         .iter()
         .map(usize::to_string)
         .collect::<Vec<_>>()
         .join(",");
+    let header = |value: String| {
+        HeaderValue::from_str(&value).expect("digits and commas are a valid header value")
+    };
     (
         StatusCode::OK,
         [
-            (CONTENT_TYPE, OCTET_STREAM.to_string()),
-            (BATCH_SIZE_HEADER, batch_size.to_string()),
-            (OUTPUT_SHAPE_HEADER, shape),
-            (INFERENCE_TIME_HEADER, format!("{inference_time_ms:.3}")),
+            (CONTENT_TYPE, HeaderValue::from_static(OCTET_STREAM)),
+            (BATCH_SIZE_HEADER, HeaderValue::from(batch_size)),
+            (OUTPUT_SHAPE_HEADER, header(shape)),
+            (
+                INFERENCE_TIME_HEADER,
+                header(format!("{inference_time_ms:.3}")),
+            ),
         ],
-        body,
+        f32s_to_le(output),
     )
         .into_response()
 }
@@ -1701,7 +1653,7 @@ fn binary_output_response(
 fn empty_input_response() -> Box<Response> {
     Box::new(create_error_response(
         StatusCode::BAD_REQUEST,
-        "INVALID_INPUT",
+        Code::InvalidInput,
         "Input cannot be empty",
         None,
     ))
@@ -1714,7 +1666,7 @@ fn check_batch_len(batch_size: usize) -> std::result::Result<(), Box<Response>> 
     if batch_size > MAX_BATCH_SIZE {
         return Err(Box::new(create_error_response(
             StatusCode::BAD_REQUEST,
-            "BATCH_TOO_LARGE",
+            Code::BatchTooLarge,
             &format!("Batch size {batch_size} exceeds maximum allowed batch size {MAX_BATCH_SIZE}"),
             None,
         )));
@@ -1733,7 +1685,7 @@ fn validate_inputs(model: &Model, inputs: &[Vec<f32>]) -> std::result::Result<()
         if let Err(e) = model.validate_input_shape(input) {
             return Err(Box::new(create_error_response(
                 StatusCode::BAD_REQUEST,
-                "INPUT_VALIDATION_FAILED",
+                Code::InputValidationFailed,
                 &e.to_string(),
                 Some(serde_json::json!({
                     "expected_shape": model.get_info().input_spec.shape,
@@ -1747,19 +1699,17 @@ fn validate_inputs(model: &Model, inputs: &[Vec<f32>]) -> std::result::Result<()
     Ok(())
 }
 
-/// Count every `/predict` request and its outcome, including rejections by the body limit
+/// Count every inference request over HTTP and its outcome, including rejections by the body
+/// limit (see [`ServerState::count_request`])
 async fn count_requests(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    state.total_requests.fetch_add(1, Ordering::Relaxed);
     let start = Instant::now();
     let response = next.run(request).await;
-    state.request_latency.observe(start.elapsed());
     let status = response.status();
-    if status.is_client_error() || status.is_server_error() {
-        state.total_errors.fetch_add(1, Ordering::Relaxed);
-    }
-    if status == StatusCode::SERVICE_UNAVAILABLE {
-        state.rejected_busy.fetch_add(1, Ordering::Relaxed);
-    }
+    state.count_request(
+        start.elapsed(),
+        status.is_client_error() || status.is_server_error(),
+        response.extensions().get::<infer::Busy>().is_some(),
+    );
     response
 }
 
@@ -1863,7 +1813,7 @@ fn prometheus_metrics(state: &ServerState) -> String {
             "furnace_max_concurrent_requests",
             gauge,
             "Most requests queued for or running inference at once",
-            state.max_concurrent as u64,
+            state.max_concurrent_requests as u64,
         ),
         (
             "furnace_max_batch_size",
@@ -1973,7 +1923,7 @@ fn prometheus_metrics(state: &ServerState) -> String {
 
 fn in_flight(state: &ServerState) -> usize {
     state
-        .max_concurrent
+        .max_concurrent_requests
         .saturating_sub(state.inference_slots.available_permits())
 }
 
@@ -2034,7 +1984,7 @@ fn json_metrics(state: &ServerState) -> MetricsResponse {
         rejected_unauthorized: state.rejected_unauthorized.load(Ordering::Relaxed),
         rejected_rate_limited: state.rejected_rate_limited.load(Ordering::Relaxed),
         in_flight_inferences: in_flight(state),
-        max_concurrent_inferences: state.max_concurrent,
+        max_concurrent_inferences: state.max_concurrent_requests,
         total_inferences: stats.inference_count,
         total_batches: stats.batch_count,
         average_batch_size: average_batch_size(&stats),
@@ -2133,7 +2083,7 @@ async fn reload_model(
     let Some(token) = &state.admin_token else {
         return create_error_response(
             StatusCode::NOT_FOUND,
-            "ADMIN_API_DISABLED",
+            Code::AdminApiDisabled,
             "The admin API is off; start the server with --admin-token to enable it",
             None,
         );
@@ -2141,7 +2091,7 @@ async fn reload_model(
     if !authorized(&headers, token) {
         let mut response = create_error_response(
             StatusCode::UNAUTHORIZED,
-            "UNAUTHORIZED",
+            Code::Unauthorized,
             "Missing or wrong bearer token",
             None,
         );
@@ -2157,7 +2107,7 @@ async fn reload_model(
     let Some(reload) = slot.reload.clone() else {
         return create_error_response(
             StatusCode::CONFLICT,
-            "NOT_RELOADABLE",
+            Code::NotReloadable,
             &format!("Model '{name}' cannot be reloaded"),
             None,
         );
@@ -2170,7 +2120,7 @@ async fn reload_model(
             Err(e) => {
                 return create_error_response(
                     StatusCode::BAD_REQUEST,
-                    "INVALID_REQUEST",
+                    Code::InvalidRequest,
                     &format!("Expected {{\"weights\": \"<path>\"}} or an empty body: {e}"),
                     None,
                 );
@@ -2180,7 +2130,7 @@ async fn reload_model(
     let Ok(_reloading) = slot.reloading.try_lock() else {
         return create_error_response(
             StatusCode::CONFLICT,
-            "RELOAD_IN_PROGRESS",
+            Code::ReloadInProgress,
             &format!("Model '{name}' is already being reloaded"),
             None,
         );
@@ -2244,14 +2194,14 @@ async fn reload_model(
             warn!("Reloading model {name} failed, still serving the previous one: {e}");
             create_error_response(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                "RELOAD_FAILED",
+                Code::ReloadFailed,
                 &format!("Reload failed, still serving the previous model: {e}"),
                 None,
             )
         }
         Err(e) => create_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "RELOAD_FAILED",
+            Code::ReloadFailed,
             &format!("Reload task failed, still serving the previous model: {e}"),
             None,
         ),
@@ -2270,19 +2220,15 @@ fn authorized(headers: &HeaderMap, token: &str) -> bool {
     constant_time_eq(given.as_bytes(), token.as_bytes())
 }
 
+/// Furnace's JSON error: `{"error", "code", "details", "timestamp"}`
 fn create_error_response(
     status_code: StatusCode,
-    error_code: &str,
+    code: Code,
     message: &str,
     details: Option<serde_json::Value>,
 ) -> Response {
-    let error_response = ErrorResponse {
-        error: message.to_string(),
-        code: error_code.to_string(),
-        details,
-        timestamp: Utc::now().to_rfc3339(),
-    };
-
+    let error_response =
+        ErrorResponse::new(message.to_string(), code.as_str().to_string(), details);
     (status_code, Json(error_response)).into_response()
 }
 
@@ -2549,32 +2495,35 @@ pub(crate) mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(
-            paths,
-            [
-                "/health",
-                "/healthz",
-                "/metrics",
-                "/admin/models/{model}/reload",
-                "/model/info",
-                "/models",
-                "/models/{model}",
-                "/models/{model}/predict",
-                "/nerve",
-                "/predict",
-                "/readyz",
-                "/v2",
-                "/v2/health/live",
-                "/v2/health/ready",
-                "/v2/models/{model}",
-                "/v2/models/{model}/infer",
-                "/v2/models/{model}/ready",
-                "/v2/models/{model}/versions/{version}",
-                "/v2/models/{model}/versions/{version}/infer",
-                "/v2/models/{model}/versions/{version}/ready"
-            ]
-            .into()
-        );
+        let served: std::collections::BTreeSet<&str> = ROUTES
+            .iter()
+            .map(|(path, _)| *path)
+            .chain(LLM_PATHS)
+            .chain(NERVE_PATHS)
+            .collect();
+        assert_eq!(paths, served);
+
+        // Every error code the server sends, and no other, in the spec and in docs/API.md
+        let codes: std::collections::BTreeSet<&str> = Code::ALL
+            .iter()
+            .map(|code| code.as_str())
+            .chain(cfg!(not(feature = "image")).then_some("INVALID_IMAGE"))
+            .collect();
+        let documented: std::collections::BTreeSet<&str> =
+            spec["components"]["schemas"]["ErrorResponse"]["properties"]["code"]["enum"]
+                .as_array()
+                .expect("the spec lists the codes")
+                .iter()
+                .map(|code| code.as_str().unwrap())
+                .collect();
+        assert_eq!(documented, codes);
+        let api_md = include_str!("../docs/API.md");
+        for code in &codes {
+            assert!(
+                api_md.contains(&format!("| `{code}` |")),
+                "docs/API.md has no table row for {code}"
+            );
+        }
 
         let app = test_app();
         let get = |path: &'static str| {
@@ -2949,6 +2898,39 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_model_without_a_reloader_is_a_409() {
+        let config = ServerConfig {
+            admin_token: Some(TOKEN.to_string()),
+            ..ServerConfig::default()
+        };
+        let app = router(dummy_model(), &config);
+        let (status, body) = send(app, reload_request("test_model", Some(TOKEN), "")).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.code, "NOT_RELOADABLE");
+    }
+
+    #[tokio::test]
+    async fn an_empty_server_is_an_error_or_serves_nothing() {
+        assert!(Server::new().try_router().is_err());
+        // router() does not panic: the model routes find no model
+        let app = Server::new().router();
+        let body = serde_json::json!({ "input": [0.5] }).to_string();
+        let (status, body) = send(app.clone(), predict_request(body)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.code, "MODEL_NOT_FOUND");
+        let health = Request::builder()
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(send(app, health).await.0, StatusCode::OK);
+        // serve() and the start_server functions refuse it
+        let refused = start_server_with_models(ServerConfig::default(), Vec::new()).await;
+        assert!(refused.is_err());
+    }
+
+    #[tokio::test]
     async fn test_reload_swaps_the_model_and_keeps_its_stats() {
         let app = multi_app(Some(TOKEN));
         let (status, _) = send(app.clone(), named_predict_request("b")).await;
@@ -3252,6 +3234,236 @@ pub(crate) mod tests {
         router(model, &config)
     }
 
+    /// A latch: closed until opened, then open for good
+    #[derive(Debug, Default)]
+    struct Gate {
+        open: std::sync::Mutex<bool>,
+        opened: std::sync::Condvar,
+    }
+
+    impl Gate {
+        fn open(&self) {
+            *self.open.lock().unwrap() = true;
+            self.opened.notify_all();
+        }
+
+        fn wait(&self) {
+            let mut open = self.open.lock().unwrap();
+            while !*open {
+                open = self.opened.wait(open).unwrap();
+            }
+        }
+    }
+
+    /// [`DummyModel`] whose warm-up (all zeros) waits for `warm_up` and whose inferences wait
+    /// for `inference`, counting those that wait: tests open the gates when they choose instead
+    /// of racing the model
+    #[derive(Debug)]
+    struct Gated {
+        dummy: DummyModel,
+        warm_up: Arc<Gate>,
+        inference: Arc<Gate>,
+        waiting: Arc<AtomicU64>,
+    }
+
+    impl crate::BurnModel for Gated {
+        fn name(&self) -> &str {
+            self.dummy.name()
+        }
+        fn backend(&self) -> crate::BackendKind {
+            self.dummy.backend()
+        }
+        fn inputs(&self) -> Vec<crate::IoSpec> {
+            self.dummy.inputs()
+        }
+        fn outputs(&self) -> Vec<crate::IoSpec> {
+            self.dummy.outputs()
+        }
+        fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
+            let zeros = matches!(&inputs[0].values, Values::F32(v) if v.iter().all(|x| *x == 0.0));
+            if zeros {
+                self.warm_up.wait();
+            } else {
+                self.waiting.fetch_add(1, Ordering::SeqCst);
+                self.inference.wait();
+            }
+            self.dummy.run(inputs)
+        }
+    }
+
+    struct GatedServer {
+        state: AppState,
+        app: Router,
+        warm_up: Arc<Gate>,
+        inference: Arc<Gate>,
+        waiting: Arc<AtomicU64>,
+    }
+
+    fn gated_server(config: ServerConfig) -> GatedServer {
+        let warm_up = Arc::new(Gate::default());
+        let inference = Arc::new(Gate::default());
+        let waiting = Arc::new(AtomicU64::new(0));
+        let model = Model::new(
+            Box::new(Gated {
+                dummy: DummyModel::new("test_model".to_string(), vec![784], vec![10]),
+                warm_up: warm_up.clone(),
+                inference: inference.clone(),
+                waiting: waiting.clone(),
+            }),
+            "dummy",
+            0,
+        );
+        let state = server_state(vec![ServedModel::from(model)].into(), &config);
+        GatedServer {
+            app: router_with_state(state.clone(), &config),
+            state,
+            warm_up,
+            inference,
+            waiting,
+        }
+    }
+
+    async fn status_of(app: &Router, path: &str) -> StatusCode {
+        let request = Request::builder().uri(path).body(Body::empty()).unwrap();
+        send(app.clone(), request).await.0
+    }
+
+    /// Readiness and metadata over `/readyz`, v2 and gRPC, before and after the warm-up
+    #[tokio::test]
+    async fn readiness_and_metadata_follow_the_warm_up_on_every_protocol() {
+        let server = gated_server(ServerConfig::default());
+        let app = &server.app;
+        assert!(!server.state.ready());
+        let probes = [
+            "/readyz",
+            "/v2/health/ready",
+            "/v2/models/test_model/ready",
+            "/v2/models/test_model/versions/1/ready",
+        ];
+        for path in probes {
+            assert_eq!(
+                status_of(app, path).await,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{path}"
+            );
+        }
+        assert_eq!(status_of(app, "/v2/health/live").await, StatusCode::OK);
+        assert_eq!(
+            status_of(app, "/v2/models/test_model/versions/2/ready").await,
+            StatusCode::NOT_FOUND
+        );
+        #[cfg(feature = "grpc")]
+        let mut grpc = grpc::tests::client_for(server.state.clone()).await;
+        #[cfg(feature = "grpc")]
+        {
+            use grpc::pb;
+            let ready = grpc.server_ready(pb::ServerReadyRequest {}).await.unwrap();
+            assert!(!ready.into_inner().ready);
+            let model = pb::ModelReadyRequest {
+                name: "test_model".to_string(),
+                version: String::new(),
+            };
+            assert!(!grpc.model_ready(model).await.unwrap().into_inner().ready);
+            let metadata = grpc
+                .server_metadata(pb::ServerMetadataRequest {})
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(metadata.name, "furnace");
+            assert_eq!(metadata.version, env!("CARGO_PKG_VERSION"));
+        }
+
+        server.warm_up.open();
+        wait_until_ready(app).await;
+        for path in probes {
+            assert_eq!(status_of(app, path).await, StatusCode::OK, "{path}");
+        }
+        let (status, body) = get_json(app, "/v2").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["name"], "furnace");
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        let (status, body) = get_json(app, "/v2/models/test_model/versions/1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["inputs"][0]["shape"], serde_json::json!([-1, 784]));
+        let (status, body) = get_json(app, "/v2/models/other").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "MODEL_NOT_FOUND");
+        #[cfg(feature = "grpc")]
+        {
+            use grpc::pb;
+            let ready = grpc.server_ready(pb::ServerReadyRequest {}).await.unwrap();
+            assert!(ready.into_inner().ready);
+            let model = pb::ModelReadyRequest {
+                name: "test_model".to_string(),
+                version: "1".to_string(),
+            };
+            assert!(grpc.model_ready(model).await.unwrap().into_inner().ready);
+            let unknown = pb::ModelReadyRequest {
+                name: "other".to_string(),
+                version: String::new(),
+            };
+            let status = grpc.model_ready(unknown).await.unwrap_err();
+            assert_eq!(status.code(), tonic::Code::NotFound);
+        }
+    }
+
+    /// With the only slot held by a request the model has not answered, every protocol's
+    /// next request is refused, and counted once as busy; no requests race
+    #[tokio::test]
+    async fn a_saturated_server_refuses_on_every_protocol() {
+        let server = gated_server(ServerConfig {
+            max_concurrent_requests: 1,
+            ..ServerConfig::default()
+        });
+        server.warm_up.open();
+        let app = server.app.clone();
+        let held = tokio::spawn(async move {
+            let body = serde_json::json!({ "input": vec![0.5; 784] }).to_string();
+            send(app, predict_request(body)).await.0
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while server.waiting.load(Ordering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the first request never reached the model"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        let body = serde_json::json!({ "input": vec![0.5; 784] }).to_string();
+        let (status, body) = send(server.app.clone(), predict_request(body)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.code, "SERVER_BUSY");
+        let (status, body) = send(server.app.clone(), v2_request(0.5)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.code, "SERVER_BUSY");
+        // /predict and v2, and gRPC when it is built
+        let busy = 2 + u64::from(cfg!(feature = "grpc"));
+        #[cfg(feature = "grpc")]
+        {
+            let mut grpc = grpc::tests::client_for(server.state.clone()).await;
+            let status = grpc
+                .model_infer(grpc::tests::request(
+                    vec![1, 784],
+                    Some(vec![0.5; 784]),
+                    None,
+                ))
+                .await
+                .unwrap_err();
+            assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        }
+
+        server.inference.open();
+        assert_eq!(held.await.unwrap(), StatusCode::OK);
+        let m = get_metrics(server.app.clone()).await;
+        assert_eq!(m.rejected_busy, busy);
+        assert_eq!(m.total_requests, busy + 1);
+        assert_eq!(m.total_errors, busy);
+        assert_eq!(m.in_flight_inferences, 0);
+    }
+
     fn v2_request(value: f32) -> Request<Body> {
         Request::builder()
             .uri("/v2/models/test_model/infer")
@@ -3277,8 +3489,11 @@ pub(crate) mod tests {
         let (status, body) = send(app.clone(), predict_request(body)).await;
         assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
         assert!(String::from_utf8_lossy(&body).contains("INFERENCE_TIMEOUT"));
-        let (status, _) = send(app, v2_request(0.5)).await;
+        let (status, body) = send(app, v2_request(0.5)).await;
         assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        // v2 errors carry the same code as /predict's, not one guessed from the status
+        let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.code, "INFERENCE_TIMEOUT");
     }
 
     #[tokio::test]

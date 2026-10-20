@@ -1001,6 +1001,280 @@
           }
         }
       }
+    },
+    "/nerve/effectors/{name}/events": {
+      "get": {
+        "summary": "Stream an SSE effector's commands",
+        "operationId": "nerveEffectorEvents",
+        "description": "Server-sent events, one per command the named SSE effector acts on. See docs/NERVE.md.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The effector's commands as they happen",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No SSE effector of that name",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "tags": [
+          "LLMs (OpenAI API)"
+        ],
+        "summary": "Chat completion (feature llm)",
+        "operationId": "chatCompletions",
+        "description": "OpenAI's chat completions: messages in, the assistant's reply out, streamed or at once. Served when the server has an LLM. See docs/LLM.md.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The completion as JSON, or with \"stream\": true server-sent events ending with [DONE]",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An error in OpenAI's shape: {\"error\": {\"message\", \"type\", \"param\", \"code\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "An error in OpenAI's shape: {\"error\": {\"message\", \"type\", \"param\", \"code\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "description": "An error in OpenAI's shape: {\"error\": {\"message\", \"type\", \"param\", \"code\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "An error in OpenAI's shape: {\"error\": {\"message\", \"type\", \"param\", \"code\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "An error in OpenAI's shape: {\"error\": {\"message\", \"type\", \"param\", \"code\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/completions": {
+      "post": {
+        "tags": [
+          "LLMs (OpenAI API)"
+        ],
+        "summary": "Text completion (feature llm)",
+        "operationId": "completions",
+        "description": "OpenAI's legacy completions: one prompt in, its continuation out. Served when the server has an LLM. See docs/LLM.md.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The completion as JSON, or with \"stream\": true server-sent events ending with [DONE]",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An error in OpenAI's shape: {\"error\": {\"message\", \"type\", \"param\", \"code\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "An error in OpenAI's shape: {\"error\": {\"message\", \"type\", \"param\", \"code\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "description": "An error in OpenAI's shape: {\"error\": {\"message\", \"type\", \"param\", \"code\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "An error in OpenAI's shape: {\"error\": {\"message\", \"type\", \"param\", \"code\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "An error in OpenAI's shape: {\"error\": {\"message\", \"type\", \"param\", \"code\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "tags": [
+          "LLMs (OpenAI API)"
+        ],
+        "summary": "List the models (feature llm)",
+        "operationId": "listOpenAiModels",
+        "description": "The LLMs, then the server's other models, in OpenAI's list shape.",
+        "responses": {
+          "200": {
+            "description": "The models",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1037,7 +1311,7 @@
     },
     "responses": {
       "Error": {
-        "description": "Error; see `code`. 400 invalid input, 413 body too large, 415 unsupported content type, 422 malformed request, 500 inference failed, 503 SERVER_BUSY, 504 INFERENCE_TIMEOUT",
+        "description": "Error; see `code`. 400 invalid input, 404 MODEL_NOT_FOUND, 413 body too large, 415 unsupported content type, 422 malformed request, 500 INFERENCE_FAILED or INTERNAL_ERROR, 503 SERVER_BUSY, 504 INFERENCE_TIMEOUT",
         "headers": {
           "X-Request-Id": {
             "$ref": "#/components/headers/RequestId"
@@ -1245,7 +1519,8 @@
             "description": "Requests queued for or running inference"
           },
           "max_concurrent_inferences": {
-            "type": "integer"
+            "type": "integer",
+            "description": "--max-concurrent-requests (furnace_max_concurrent_requests in Prometheus)"
           },
           "total_inferences": {
             "type": "integer",
@@ -1303,8 +1578,16 @@
           },
           "nerve": {
             "type": "object",
-            "description": "The nervous system: every served model's pathway (an entrance `in:{model}`, a neuron `model:{model}`, the `serve:respond` effector) and the neurons added with `Server::nerve`. Per neuron fired and quiet counts, per pathway latency, the fraction of signals that reached a brain, stimulus-to-action per reflex arc. See docs/NERVE.md.",
+            "description": "The nervous system, as GET /nerve describes it: the served models' pathways and the neurons added with Server::nerve",
             "additionalProperties": true
+          },
+          "llm": {
+            "type": "array",
+            "description": "The LLMs (feature llm), with their own counters; absent without any. See docs/LLM.md.",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
           }
         }
       },
@@ -1490,8 +1773,28 @@
           },
           "code": {
             "type": "string",
-            "description": "Machine-readable error, e.g. INVALID_REQUEST, INVALID_IMAGE, INVALID_INPUT, INPUT_VALIDATION_FAILED, INVALID_INPUT_VALUE, BATCH_TOO_LARGE, SERVER_BUSY, INFERENCE_TIMEOUT or INFERENCE_FAILED (see the errors table in docs/API.md)",
-            "example": "INPUT_VALIDATION_FAILED"
+            "description": "Machine-readable error, the same on /predict and v2 (see the errors table in docs/API.md). INVALID_IMAGE needs the image feature.",
+            "example": "INPUT_VALIDATION_FAILED",
+            "enum": [
+              "INVALID_REQUEST",
+              "INVALID_IMAGE",
+              "INVALID_INPUT",
+              "INPUT_VALIDATION_FAILED",
+              "INVALID_INPUT_VALUE",
+              "BATCH_TOO_LARGE",
+              "NAMED_TENSORS_REQUIRED",
+              "MODEL_NOT_FOUND",
+              "UNAUTHORIZED",
+              "RATE_LIMITED",
+              "SERVER_BUSY",
+              "INFERENCE_TIMEOUT",
+              "INFERENCE_FAILED",
+              "INTERNAL_ERROR",
+              "ADMIN_API_DISABLED",
+              "NOT_RELOADABLE",
+              "RELOAD_IN_PROGRESS",
+              "RELOAD_FAILED"
+            ]
           },
           "details": {
             "type": "object",

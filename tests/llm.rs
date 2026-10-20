@@ -514,20 +514,25 @@ async fn a_full_scheduler_answers_503() {
     };
     let running = stream().await.unwrap();
     wait_for(|| live.get() == 1).await;
-    let waiting = stream().await.unwrap();
+    // A stream's status waits for its first event, so a queued one has no response yet
+    let waiting = tokio::spawn(stream());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while send(&app, get("/metrics")).await.json()["llm"][0]["requests_waiting"] != 1 {
+        assert!(Instant::now() < deadline, "the second request never queued");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
     let refused = send(&app, post("/v1/chat/completions", &chat(json!({})))).await;
     let error = assert_openai_error(&refused, StatusCode::SERVICE_UNAVAILABLE, "server_error");
     assert_eq!(error["code"], "server_busy");
     assert_eq!(running.status(), StatusCode::OK);
-    assert_eq!(waiting.status(), StatusCode::OK);
     // A waiting request whose client left frees its place in the queue, as soon as its task
-    // has seen the client go
-    drop(waiting);
+    // has seen the client go: a new one is queued (no answer yet) rather than refused at once
+    waiting.abort();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let answer = stream().await.unwrap();
-        if answer.status() == StatusCode::OK {
-            break;
+        match tokio::time::timeout(Duration::from_millis(50), stream()).await {
+            Err(_) => break,
+            Ok(answer) => assert_eq!(answer.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE),
         }
         assert!(Instant::now() < deadline, "the queue stayed full");
         tokio::time::sleep(Duration::from_millis(1)).await;
@@ -830,4 +835,47 @@ async fn an_error_mid_stream_is_a_payload_then_done() {
     // Without streaming, the same failure is a 500
     let answer = send(&app, post("/v1/chat/completions", &chat(json!({})))).await;
     assert_openai_error(&answer, StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+}
+
+/// Refuses only once it has looked at the request: `Error` comes in place of `Started`
+#[derive(Debug)]
+struct RefusesLate;
+
+impl LlmEngine for RefusesLate {
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    fn max_context(&self) -> usize {
+        8
+    }
+
+    fn generate(
+        &self,
+        _request: GenerateRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<Event>, furnace::llm::EngineError> {
+        let (events, receiver) = tokio::sync::mpsc::channel(1);
+        events
+            .try_send(Event::Error(furnace::llm::EngineError::TooLong {
+                prompt_tokens: 12,
+                max_context: 8,
+            }))
+            .unwrap();
+        Ok(receiver)
+    }
+}
+
+#[tokio::test]
+async fn a_refusal_as_the_first_event_is_a_400_even_when_streaming() {
+    let app = Server::new().llm(RefusesLate).router();
+    for stream in [true, false] {
+        let answer = send(
+            &app,
+            post("/v1/chat/completions", &chat(json!({"stream": stream}))),
+        )
+        .await;
+        let error = assert_openai_error(&answer, StatusCode::BAD_REQUEST, "invalid_request_error");
+        assert_eq!(error["code"], "context_length_exceeded", "{error}");
+        assert_eq!(error["param"], "messages", "{error}");
+    }
 }

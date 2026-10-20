@@ -39,6 +39,7 @@ Server counters for monitoring, as JSON:
 {
   "uptime_seconds": 3600,
   "total_requests": 1520, "total_errors": 12, "rejected_busy": 9,
+  "rejected_unauthorized": 0, "rejected_rate_limited": 3,
   "in_flight_inferences": 2, "max_concurrent_inferences": 100,
   "total_inferences": 1508, "total_batches": 611, "average_batch_size": 2.6, "max_batch_size": 8,
   "average_inference_time_ms": 84.2,
@@ -46,23 +47,31 @@ Server counters for monitoring, as JSON:
   "request_latency_ms": { "p50": 9.1, "p95": 14.2, "p99": 23.8 },
   "inference_latency_ms": { "p50": 8.3, "p95": 12.9, "p99": 21.0 },
   "ready": true,
+  "models": [{ "name": "resnet18", "ready": true, "inference_count": 1508, "error_count": 3, "batch_count": 611, "average_batch_size": 2.6, "average_inference_time_ms": 84.2, "inference_latency_ms": { "p50": 8.3, "p95": 12.9, "p99": 21.0 } }],
   "timestamp": "2026-10-14T05:01:13Z"
 }
 ```
+
+With LLMs (`--features llm`) an `llm` array carries their counters ([LLM.md](LLM.md)), and
+`nerve` describes the nervous system as `GET /nerve` does.
 
 Prometheus gets the same counters in its text format: a request whose `Accept` header lists
 `text/plain` or `application/openmetrics-text` before any JSON type, as Prometheus' scraper
 sends, gets `furnace_requests_total`, `furnace_in_flight_requests`, `furnace_batches_total`
 and the rest, plus the latency histograms `furnace_request_duration_seconds` and
-`furnace_inference_duration_seconds` (buckets from 0.5 ms to 10 s) and
-`furnace_build_info{version, model, backend}`. Point a scrape job at `/metrics`; no exporter is
+`furnace_inference_duration_seconds` (buckets from 0.5 ms to 10 s), `furnace_build_info{version}`
+and, per model, `furnace_model_info{model, backend}`. `--max-concurrent-requests` is
+`max_concurrent_inferences` in the JSON and `furnace_max_concurrent_requests` here. Point a scrape job at `/metrics`; no exporter is
 needed.
 
 The percentiles in the JSON are estimated from those histograms, so they are accurate to the
 bucket they fall in.
 
-`total_requests` and `total_errors` count every `/predict` request, including those rejected
-before inference (400, 413, 503). `rejected_busy` is the 503 subset. `total_inferences` counts
+`total_requests` and `total_errors` count every inference request (`/predict`,
+`/models/{model}/predict`, v2 `infer` over HTTP and gRPC), including those rejected before
+inference (400, 413, 503). `rejected_busy` is the 503 subset. Requests refused by the API key or
+rate limit check (401, 429) come before any route and are counted only in
+`rejected_unauthorized` and `rejected_rate_limited`. `total_inferences` counts
 requests that reached the model and `total_batches` the forward passes that served them (see
 [Dynamic batching](#dynamic-batching)); `average_batch_size` is items per forward pass.
 `in_flight_inferences` includes requests waiting in the batching queue.
@@ -255,7 +264,9 @@ result = client.infer("resnet18", [inp])
 logits = result.as_numpy("output")     # shape (2, 1000)
 ```
 
-Errors are `{"error": "..."}` (with Furnace's `code`, `details` and `timestamp` alongside).
+Errors are `{"error": "..."}` (with Furnace's `code`, `details` and `timestamp` alongside); the
+`code` is the one `/predict` gives for the same error (see [Errors](#errors)), and
+`INVALID_REQUEST` for a request v2 cannot read.
 
 ### Models with several inputs or outputs
 
@@ -356,8 +367,11 @@ another model path for a `--model-path` model; the path is read on the server.
 | 404 | `ADMIN_API_DISABLED` | Started without `--admin-token` |
 | 401 | `UNAUTHORIZED` | Missing or wrong `Authorization: Bearer` token |
 | 404 | `MODEL_NOT_FOUND` | No such model |
+| 400 | `INVALID_REQUEST` | A body that is neither empty nor `{"weights": "<path>"}` |
+| 409 | `NOT_RELOADABLE` | The model was served without a way to reload it |
 | 409 | `RELOAD_IN_PROGRESS` | The model is being reloaded already |
 | 422 | `RELOAD_FAILED` | Loading or warming up failed; the previous model is still serving |
+| 500 | `RELOAD_FAILED` | The reload task itself failed; the previous model is still serving |
 
 ## LLMs (OpenAI API)
 
@@ -376,6 +390,10 @@ HTTPS, and gRPC over TLS on `--grpc-port`, with a PEM certificate and key:
 furnace --tls-cert /etc/furnace/tls.crt --tls-key /etc/furnace/tls.key
 curl --cacert ca.crt https://localhost:3000/healthz
 ```
+
+At most 1024 handshakes run at once per listener; past that the server stops accepting until
+one finishes (or times out after 10 seconds), so connections that never send a ClientHello
+cannot pile up. `--max-concurrent-requests` counts requests, after the handshake.
 
 Add `--tls-client-ca ca.crt` for mutual TLS: then only clients presenting a certificate signed by
 that CA can connect at all, over HTTP and gRPC alike.
@@ -466,13 +484,20 @@ Errors share one shape:
 | 400 | `INPUT_VALIDATION_FAILED` | Wrong number of values (or bytes, for binary input) for the model |
 | 400 | `INVALID_INPUT_VALUE` | NaN or infinite value |
 | 400 | `BATCH_TOO_LARGE` | More than 1000 items |
-| 404 | `MODEL_NOT_FOUND` | `/models/{model}/...` names a model the server does not serve |
+| 400 | `NAMED_TENSORS_REQUIRED` | `/predict` for a model that takes named tensors; use `/v2/models/{model}/infer` |
+| 404 | `MODEL_NOT_FOUND` | `/models/{model}/...` or `/v2/models/{model}/...` names a model the server does not serve, or `/predict` on a server without a tensor model |
 | 413 | `INVALID_REQUEST` | Body larger than `--max-body-mb` |
 | 401 | `UNAUTHORIZED` | `--api-key` is set and the request has no or an unknown key |
 | 429 | `RATE_LIMITED` | Over `--rate-limit`; `Retry-After` says when to retry |
 | 503 | `SERVER_BUSY` | All `--max-concurrent-requests` slots in use; retry later |
 | 504 | `INFERENCE_TIMEOUT` | Exceeded `--request-timeout-ms` |
-| 500 | `INFERENCE_FAILED` | Model error |
+| 500 | `INFERENCE_FAILED` | Model error, or a model that panicked |
+| 500 | `INTERNAL_ERROR` | Any other server-side failure |
+
+The admin API's codes (`ADMIN_API_DISABLED`, `NOT_RELOADABLE`, `RELOAD_IN_PROGRESS`,
+`RELOAD_FAILED`) are in [Reloading a model](#reloading-a-model). Over gRPC the same errors map to
+`INVALID_ARGUMENT` (400), `NOT_FOUND` (404), `RESOURCE_EXHAUSTED` (503), `DEADLINE_EXCEEDED`
+(504) and `INTERNAL` (500).
 
 ## Troubleshooting
 
