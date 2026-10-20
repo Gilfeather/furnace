@@ -88,8 +88,37 @@ aliases before 1.0. Renames are listed as old name -> new name.
     `histogram_quantile(0.99, rate(furnace_nerve_pathway_latency_seconds_bucket[5m]))`.
   - `NeuronMetrics::computed` counts a brain's firings too (`brain::Llm`,
     `brain::ModelNeuron`): they fire through `Firing::Compute`. It stayed at 0 for them.
+- Building a fabric (`furnace::nerve`), old -> new:
+  - `b.neuron(n, Mechanisms::NONE)` -> `b.neuron(n)`, `b.receptor(r, Mechanisms::NONE)` ->
+    `b.receptor(r)`. A neuron has no mechanisms until `b.gate(id, mechanisms)` gives it some:
+    `b.receptor(r, m)` -> `let id = b.receptor(r); b.gate(id, m);`.
+  - `b.neuron(Effector::new(act), Mechanisms::NONE)` -> `b.effector(act)`; a configured
+    effector goes in as it is: `b.effector(Effector::new(act).refractory(..))`.
+  - `b.reflex(from, to, 1.0)` -> `b.reflex(from, to)`; another weight is
+    `b.reflex(from, to).weight(w)`.
+  - `b.deliberative(from, to, 2.0, Summation::default())` -> `b.deliberative(from, to)`;
+    otherwise `.weight(w)` and `.summation(s)` on what it returns. Pathways no longer chain
+    (`b.reflex(..).reflex(..)`): one statement each.
+  - `FabricBuilder::add` (a shared `Arc<dyn Neuron>`) is internal; add the neuron itself.
+  - No longer public (internal to the server): `nerve::Announced`, `Fabric::announce`,
+    `Fabric::stimulate_announced`, `Summation::announced_only`, `nerve::Pathway`,
+    `Fabric::pathways`, `Fabric::neurons`, `Fabric::receptors`, `Fabric::name`,
+    `Fabric::kind`, `Fabric::effector_names` (`Cx::effectors` in a neuron),
+    `Fabric::events`, `Fabric::efferent`, `Fabric::afferent`, `nerve::PathwayId`,
+    `nerve::LatencyEstimate`, `nerve::Description`, `nerve::NeuronDescription`,
+    `Fabric::describe` (`GET /nerve`), `Fabric::render_prometheus` (`GET /metrics`),
+    `nerve::MAX_HOPS`, `nerve::TRACE_HOPS`, `nerve::sketch64`
+    (`Feature::sketch(bytes).sketch`), `brain::parse_commands`, `brain::signal_text`,
+    `receptor::RateMeter`, `Lines::line_signal`, `Effector::act`, and the `as_str` of
+    `PathwayKind`, `NeuronKind` and `Quiet` (their JSON is the same text).
 
 ### Added
+- `furnace::nerve::prelude`: what building a fabric usually takes, in one `use`.
+- `FabricBuilder::effector`, `FabricBuilder::gate` and `nerve::Link` (`weight`,
+  `summation`), see above. `Effector` converts from any `Act`.
+- `FnNeuron::reflex` takes a closure returning a `Firing` or anything that becomes one: a
+  `Signal` fires it, an `Option<Signal>` fires it or stays quiet, a `Vec<Signal>` fires them
+  all (`From` for `Firing`).
 - `FabricBuilder::efferent(Handle)`: run the motor side on a Tokio runtime of your own
   instead of one the fabric starts.
 - `telemetry::Histogram::with_buckets`, `Histogram::count` and `FINE_LATENCY_BUCKETS`.

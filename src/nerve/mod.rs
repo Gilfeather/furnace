@@ -23,50 +23,33 @@
 //!
 //! ```no_run
 //! use std::time::Duration;
-//! use furnace::nerve::{
-//!     effector, receptor, Fabric, Firing, FnNeuron, Habituation, Mechanisms, NeuronKind,
-//!     Summation,
-//! };
+//! use furnace::nerve::prelude::*;
+//! use serde_json::json;
 //!
-//! let mut fabric = Fabric::builder();
-//! // POST /events: a 64-bit sketch of the body is the feature; repeats habituate here
-//! let events = fabric.receptor(
-//!     receptor::Http::new("events", "/events"),
-//!     Mechanisms::NONE
-//!         .threshold(0.3)
-//!         .habituation(Habituation::new(Duration::from_secs(30))),
+//! let mut b = Fabric::builder();
+//! // POST /events: a 64-bit sketch of the body is the feature; repeats habituate here,
+//! // attenuated below the threshold
+//! let events = b.receptor(Http::new("events", "/events").text());
+//! let habituation = Habituation::new(Duration::from_secs(30));
+//! b.gate(events, Mechanisms::NONE.threshold(0.5).habituation(habituation));
+//! // A reflex: in process, no blocking. Alerts become a command to `alert` at once; the rest
+//! // go on to the brain
+//! let triage = b.neuron(FnNeuron::reflex("triage", |signal, _| {
+//!     match signal.payload.as_text() {
+//!         Some(t) if t.contains("ALERT") => signal.command("alert", json!({"text": t})),
+//!         _ => signal,
+//!     }
+//! }));
+//! // The brain: slow, so it sits behind a deliberative pathway, a queue whose worker sums a
+//! // window of signals into one firing (a closure here; `Llm` or `ModelNeuron` in practice)
+//! let brain = b.neuron(
+//!     FnNeuron::reflex("brain", |signal, _| signal.command("alert", json!({"text": "look"})))
+//!         .with_kind(NeuronKind::Brain),
 //! );
-//! // A reflex: in process, no blocking; urgent lines become commands at once
-//! let classify = fabric.neuron(
-//!     FnNeuron::reflex("classify", |signal, _cx| {
-//!         if signal.payload.as_text().is_some_and(|t| t.contains("ALERT")) {
-//!             Firing::one(signal.command("alert", serde_json::json!({"text": "alert"})))
-//!         } else {
-//!             Firing::one(signal)
-//!         }
-//!     }),
-//!     Mechanisms::NONE,
-//! );
-//! let alert = fabric.neuron(
-//!     effector::Effector::new(effector::Webhook::new("alert", "http://127.0.0.1:9000/hook")?),
-//!     Mechanisms::NONE.refractory(Duration::from_millis(100)),
-//! );
-//! // The brain: slow, so it sits behind a queue that sums a window of signals into one
-//! // firing (a closure here; `brain::Llm` or `brain::ModelNeuron` in practice)
-//! let brain = fabric.neuron(
-//!     FnNeuron::reflex("brain", |signal, _cx| {
-//!         let text = signal.payload.as_text().unwrap_or_default().to_string();
-//!         Firing::one(signal.command("alert", serde_json::json!({"text": text})))
-//!     })
-//!     .with_kind(NeuronKind::Brain),
-//!     Mechanisms::NONE,
-//! );
-//! fabric.reflex(events, classify, 1.0);
-//! fabric.reflex(classify, alert, 1.0);
-//! // A command takes the pathway to the effector it names; any other signal the heaviest
-//! // pathway fast enough for its deadline: the brain's, as long as it keeps up
-//! fabric.deliberative(classify, brain, 2.0, Summation::default());
-//! let fabric = fabric.build()?;
+//! b.effector(Webhook::new("alert", "http://127.0.0.1:9000/hook")?);
+//! b.reflex(events, triage);
+//! b.deliberative(triage, brain);
+//! let fabric = b.build()?;
 //! # let _ = fabric;
 //! # Ok::<(), furnace::nerve::BuildError>(())
 //! ```
@@ -97,20 +80,30 @@ pub mod bench_wire {
     pub use super::wire::{Client, Error, Response, Url};
 }
 
-pub use fabric::{
-    Announced, BuildError, Fabric, FabricBuilder, MAX_HOPS, Outcome, Pathway, PathwayKind,
-    Summation,
-};
+/// What building a fabric usually takes, in one import: `use furnace::nerve::prelude::*;`
+pub mod prelude {
+    #[cfg(feature = "llm")]
+    pub use super::brain::Llm;
+    pub use super::brain::ModelNeuron;
+    pub use super::effector::{
+        ChannelOut, Effector, FileAppend, Process, Respond, SseOut, Webhook,
+    };
+    pub use super::receptor::{ChannelIn, Http, Lines, SseIn, Timer};
+    pub use super::{
+        BuildError, Fabric, Firing, FnNeuron, Habituation, Mechanisms, NeuronKind, Payload, Signal,
+        Summation, Urgency,
+    };
+}
+
+pub(crate) use fabric::Announced;
+pub use fabric::{BuildError, Fabric, FabricBuilder, Link, Outcome, PathwayKind, Summation};
 pub use http::{OUTCOME_HEADER, SIGNAL_HEADER};
-pub use latency::{LatencyEstimate, LatencySnapshot};
-pub use metrics::{
-    ArcMetrics, Description, NerveMetrics, NeuronDescription, NeuronMetrics, PathwayMetrics,
-};
+pub use latency::LatencySnapshot;
+pub use metrics::{ArcMetrics, NerveMetrics, NeuronMetrics, PathwayMetrics};
 pub use neuron::{Cx, Firing, FnNeuron, Habituation, Mechanisms, Neuron, NeuronKind, Quiet};
 pub use receptor::{Afferent, Receptor};
 pub use signal::{
-    Answer, Command, Feature, NeuronId, PathwayId, Payload, ReplyHandle, Signal, SignalId,
-    TRACE_HOPS, Trace, Urgency, sketch64,
+    Answer, Command, Feature, NeuronId, Payload, ReplyHandle, Signal, SignalId, Trace, Urgency,
 };
 
 /// Nanoseconds from `epoch` to `now`: 0 if `now` is earlier, `u64::MAX` past 584 years

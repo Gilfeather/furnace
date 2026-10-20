@@ -113,8 +113,9 @@ mod tests {
     #[test]
     fn ticks_of_the_same_feature_habituate() {
         let mut b = crate::nerve::Fabric::builder();
-        let timer = b.receptor(
-            Timer::new("tick", Duration::from_millis(1)).same_feature(),
+        let timer = b.receptor(Timer::new("tick", Duration::from_millis(1)).same_feature());
+        b.gate(
+            timer,
             crate::nerve::Mechanisms::NONE
                 .threshold(0.6)
                 .habituation(crate::nerve::Habituation::new(Duration::from_secs(3600))),
@@ -126,9 +127,8 @@ mod tests {
                 Firing::Quiet
             })
             .with_kind(NeuronKind::Effector),
-            crate::nerve::Mechanisms::NONE,
         );
-        b.reflex(timer, sink, 1.0);
+        b.reflex(timer, sink);
         let fabric = b.build().unwrap();
         fabric.start();
         // Only the first tick passes; the repeats die at the timer's gate

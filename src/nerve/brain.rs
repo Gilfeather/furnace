@@ -24,7 +24,9 @@ use tracing::debug;
 
 use super::latency::LatencyEstimate;
 use super::neuron::{Cx, Firing, Neuron, NeuronKind};
-use super::signal::{Command, Payload, Signal};
+use super::signal::Signal;
+#[cfg(any(feature = "llm", test))]
+use super::signal::{Command, Payload};
 use crate::model::Model;
 use crate::tensor::HostTensor;
 
@@ -42,7 +44,8 @@ fn computed(signals: Vec<Signal>) -> Firing {
 ///   (OpenAI tool calls; string `arguments` are parsed as JSON)
 /// - `{"tool_calls": [...]}` and `{"commands": [...]}`
 /// - an array of any of the above
-pub fn parse_commands(text: &str) -> Vec<Command> {
+#[cfg(any(feature = "llm", test))]
+pub(crate) fn parse_commands(text: &str) -> Vec<Command> {
     let mut commands = Vec::new();
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) {
         collect(&value, &mut commands);
@@ -57,6 +60,7 @@ pub fn parse_commands(text: &str) -> Vec<Command> {
 }
 
 /// Balanced `{...}` and `[...]` spans of `text`, outermost only, strings respected
+#[cfg(any(feature = "llm", test))]
 fn json_candidates(text: &str) -> Vec<&str> {
     let bytes = text.as_bytes();
     let mut spans = Vec::new();
@@ -93,6 +97,7 @@ fn json_candidates(text: &str) -> Vec<&str> {
     spans
 }
 
+#[cfg(any(feature = "llm", test))]
 fn collect(value: &serde_json::Value, out: &mut Vec<Command>) {
     match value {
         serde_json::Value::Array(items) => items.iter().for_each(|item| collect(item, out)),
@@ -130,6 +135,7 @@ fn collect(value: &serde_json::Value, out: &mut Vec<Command>) {
 }
 
 /// `arguments` or `args`, a JSON string parsed if it is one
+#[cfg(any(feature = "llm", test))]
 fn arguments(object: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
     match object.get("arguments").or_else(|| object.get("args")) {
         Some(serde_json::Value::String(text)) => {
@@ -141,7 +147,8 @@ fn arguments(object: &serde_json::Map<String, serde_json::Value>) -> serde_json:
 }
 
 /// The text a brain shows its model for a signal
-pub fn signal_text(signal: &Signal) -> String {
+#[cfg(feature = "llm")]
+fn signal_text(signal: &Signal) -> String {
     match &signal.payload {
         Payload::Text(text) => text.to_string(),
         Payload::Json(value) => value.to_string(),
@@ -598,9 +605,8 @@ mod tests {
         assert_eq!(tricky[0].args, "a } b");
     }
 
-    use crate::nerve::effector::{ChannelOut, Effector};
+    use crate::nerve::effector::ChannelOut;
     use crate::nerve::fabric::{Fabric, Summation};
-    use crate::nerve::neuron::Mechanisms;
     use crate::nerve::signal::{Feature, NeuronId};
     use crate::nerve::testing::pass;
     use std::time::{Duration, Instant};
@@ -614,16 +620,12 @@ mod tests {
         std::sync::mpsc::Receiver<crate::nerve::effector::Delivery>,
     ) {
         let mut b = Fabric::builder();
-        let r = b.neuron(pass("in"), Mechanisms::NONE);
-        let brain = b.neuron(brain, Mechanisms::NONE);
+        let r = b.neuron(pass("in"));
+        let brain = b.neuron(brain);
         let (channel, receiver) = ChannelOut::new("out", 64);
-        b.neuron(Effector::new(channel), Mechanisms::NONE);
-        b.deliberative(
-            r,
-            brain,
-            1.0,
-            Summation::default().window(Duration::from_millis(5)),
-        );
+        b.effector(channel);
+        b.deliberative(r, brain)
+            .summation(Summation::default().window(Duration::from_millis(5)));
         (b.build().unwrap(), r, receiver)
     }
 
