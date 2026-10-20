@@ -10,6 +10,11 @@ on:
       - deploy/kserve/**
       - .github/workflows/kserve-e2e.yml
   workflow_dispatch:
+    inputs:
+      image:
+        description: Image to test instead of the released one in deploy/kserve (e.g. a branch build pushed to a registry the cluster can pull from)
+        required: false
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -57,8 +62,14 @@ jobs:
         kubectl -n kserve get deployments,pods
 
     - name: Deploy ResNet-18
+      env:
+        IMAGE: ${{ inputs.image }}
       run: |
         set -euo pipefail
+        if [ -n "${IMAGE:-}" ]; then
+          sed -i "s|^\( *image: \).*|\1$IMAGE|" deploy/kserve/servingruntime.yaml
+        fi
+        grep -n "image:" deploy/kserve/servingruntime.yaml
         # The webhooks can take a moment to answer after the controller reports ready
         for attempt in $(seq 1 30); do
           if kubectl apply -f deploy/kserve/servingruntime.yaml -f deploy/kserve/inferenceservice.yaml; then

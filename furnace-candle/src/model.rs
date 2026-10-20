@@ -10,7 +10,9 @@ use candle_nn::{Embedding, RmsNorm};
 /// What differs between the architectures this file serves
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Architecture {
+    /// `llama`: Llama, SmolLM, Mistral and the others written as llama
     Llama,
+    /// `qwen2`: Qwen2 and Qwen2.5, with biases on the attention projections
     Qwen2,
 }
 
@@ -57,6 +59,7 @@ struct Layer {
 /// The weights of a model, shared by all its sequences
 #[derive(Debug)]
 pub struct Weights {
+    /// Which forward pass the file needs
     pub architecture: Architecture,
     embedding: Embedding,
     layers: Vec<Layer>,
@@ -70,6 +73,7 @@ pub struct Weights {
     sin: Tensor,
     /// The context the GGUF file was trained for
     pub context_length: usize,
+    /// Tokens in the vocabulary: the length of every logits vector
     pub vocab_size: usize,
     device: Device,
 }
@@ -210,6 +214,7 @@ impl Weights {
         self.cos.dims()[0]
     }
 
+    /// An empty KV cache for a new sequence
     pub fn new_cache(&self) -> Cache {
         Cache {
             layers: vec![None; self.layers.len()],

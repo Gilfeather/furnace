@@ -37,6 +37,9 @@ The server runs on the nervous system: every model is a neuron, every route a re
   `benches/burn`, `llm` and `nerve` did not use), one median, one memory probe, and one way to
   start and stop a server ([PERFORMANCE.md](docs/PERFORMANCE.md#how-the-harnesses-count)).
   The crates.io package no longer carries `benches/burn`, `llm` and `nerve`.
+- TLS: a PKCS#8 private key the server does not take is named by its algorithm, read from the
+  key ("RSA keys are not supported", "unsupported EC key curve 1.3.132.0.35"), instead of
+  "unsupported PKCS#8 key (RSA?)".
 
 ### Fixed
 - A batch size a fixed-batch graph cannot run is a `400` on `/predict` too (was `500` with a

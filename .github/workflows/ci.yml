@@ -43,7 +43,7 @@ jobs:
       uses: actions/checkout@v5
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@master
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
       with:
         toolchain: ${{ matrix.rust }}
         components: rustfmt, clippy
@@ -84,6 +84,99 @@ jobs:
       if: ${{ !matrix.check-only }}
       run: cargo test --profile ci --lib --bins --tests --features "image grpc tls llm nerve"
 
+    # The examples in the API docs (the crate's front page among them) compile against the
+    # current API; once, they don't depend on the platform
+    - name: Run doc-tests
+      if: ${{ !matrix.check-only && matrix.os == 'ubuntu-latest' }}
+      run: cargo test --profile ci --doc --features "image grpc tls llm nerve"
+
+  # Each optional feature on its own, so a `cfg(feature)` path that only one of them reaches is
+  # compiled somewhere. Clippy without codegen: a type check that also fails on the unused-import
+  # warnings an odd combination produces.
+  features:
+    name: Features (${{ matrix.features }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        features:
+          - --no-default-features
+          - --no-default-features --features tls
+          - --no-default-features --features grpc
+          - --no-default-features --features nerve
+          - --no-default-features --features llm
+          - --no-default-features --features image
+          - --features embed-weights
+        include:
+          - os: macos-latest
+            features: --no-default-features --features metal
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: stable
+        components: clippy
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ matrix.features }}
+
+    # One small built-in model, so the ONNX code generation and `embed-weights` have something
+    # to compile
+    - name: Download the MNIST model
+      run: |
+        mkdir -p models
+        curl -fsSL "$MNIST_URL" -o models/mnist.onnx
+
+    - name: Clippy
+      run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
+
+  # The benchmark harnesses have their own workspaces, so `cargo fmt --all` and clippy above
+  # never see them. benches/compare links ONNX Runtime and is only type-checked.
+  bench-harnesses:
+    name: Benchmark harnesses
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: stable
+        components: rustfmt, clippy
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: |
+          benches/burn -> target
+          benches/llm -> target
+          benches/nerve -> target
+          benches/compare -> target
+
+    - name: Check formatting
+      shell: bash
+      run: |
+        for bench in burn llm nerve compare; do
+          cargo fmt --manifest-path "benches/$bench/Cargo.toml" --all -- --check
+        done
+
+    - name: Clippy
+      shell: bash
+      run: |
+        for bench in burn llm nerve; do
+          cargo clippy --locked --manifest-path "benches/$bench/Cargo.toml" --all-targets -- -D warnings
+        done
+
+    - name: Type check benches/compare
+      run: cargo check --locked --manifest-path benches/compare/Cargo.toml --all-targets
+
   llm-candle:
     name: furnace-candle (GGUF LLMs through candle)
     runs-on: ubuntu-latest
@@ -92,8 +185,9 @@ jobs:
       uses: actions/checkout@v5
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
       with:
+        toolchain: stable
         components: clippy
 
     - name: Cache cargo
@@ -106,18 +200,21 @@ jobs:
         cargo clippy -p furnace-candle --all-targets -- -D warnings
         cargo test -p furnace-candle --profile ci
 
-  # No C or C++ in the LLM layer: none of these crates may be built for furnace with `llm`, or
-  # for furnace-candle, on any of the release targets. Dev-dependencies don't ship and are not
-  # checked.
+  # No C or C++: none of these crates may be built for furnace with `llm`, with the release
+  # features (`grpc tls`, whose crypto is RustCrypto and must not pull ring back in) or with
+  # `image`, or for furnace-candle, on any of the release targets. Dev-dependencies don't ship
+  # and are not checked.
   pure-rust:
-    name: Pure-Rust dependency tree (llm)
+    name: Pure-Rust dependency tree
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: stable
 
     - name: No C or C++ crates
       shell: bash
@@ -130,7 +227,8 @@ jobs:
         # libraries or bindings to them, or GPU kernels compiled by nvcc
         banned='^(cc|cmake|bindgen|pkg-config|ring|aws-lc-rs|aws-lc-sys|openssl|openssl-sys|onig|onig_sys|cudarc|intel-mkl-src|accelerate-src|candle-kernels|candle-flash-attn|candle-metal-kernels|zstd-sys|libz-sys|bzip2-sys|lzma-sys)$'
         failed=0
-        for package in "-p furnace-server --features llm,nerve" "-p furnace-server --no-default-features --features llm,nerve" "-p furnace-candle"; do
+        for package in "-p furnace-server --features llm,nerve" "-p furnace-server --no-default-features --features llm,nerve" \
+                       "-p furnace-server --features grpc,tls" "-p furnace-server --features image" "-p furnace-candle"; do
           crates=$(cargo tree $package -e normal,build "${targets[@]}" --prefix none -f '{p}' | awk '{print $1}' | sort -u)
           found=$(grep -E "$banned" <<<"$crates" || true)
           if [ -n "$found" ]; then
@@ -156,8 +254,9 @@ jobs:
       uses: actions/checkout@v5
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
       with:
+        toolchain: stable
         components: clippy
 
     - name: Cache cargo
@@ -171,6 +270,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
+    # The chart's appVersion and the KServe manifests name the image and weights of the release;
+    # a version bump in Cargo.toml must move them too
+    - name: Versions match Cargo.toml
+      run: |
+        set -euo pipefail
+        version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+        echo "Cargo.toml: $version"
+        failed=0
+        check() {
+          if grep -qF -- "$2" "$1"; then echo "$1: $2"; else echo "::error file=$1::expected $2"; failed=1; fi
+        }
+        check deploy/helm/furnace/Chart.yaml "appVersion: \"$version\""
+        check deploy/kserve/servingruntime.yaml "ghcr.io/gilfeather/furnace:$version"
+        check deploy/kserve/inferenceservice.yaml "/releases/download/v$version/"
+        exit $failed
     - uses: azure/setup-helm@v5
     - name: Install kubeconform
       run: |
@@ -200,8 +314,9 @@ jobs:
       uses: actions/checkout@v5
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
       with:
+        toolchain: stable
         components: clippy
 
     - name: Cache cargo
@@ -231,8 +346,9 @@ jobs:
       uses: actions/checkout@v5
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
       with:
+        toolchain: stable
         components: llvm-tools-preview
 
     - name: Install cargo-llvm-cov
@@ -254,7 +370,7 @@ jobs:
         [ -f models/mnist.onnx ] || curl -fsSL "$MNIST_URL" -o models/mnist.onnx
 
     - name: Generate code coverage
-      run: cargo llvm-cov --profile ci --workspace --lcov --output-path lcov.info
+      run: cargo llvm-cov --profile ci --workspace --features "image grpc tls llm nerve" --lcov --output-path lcov.info
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v5
@@ -273,7 +389,9 @@ jobs:
       uses: actions/checkout@v5
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: stable
 
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2
@@ -291,4 +409,4 @@ jobs:
         [ -f models/mnist.onnx ] || curl -fsSL "$MNIST_URL" -o models/mnist.onnx
 
     - name: Run benchmarks
-      run: cargo bench --bench inference_benchmark
+      run: cargo bench --bench inference_benchmark --no-run
