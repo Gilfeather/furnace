@@ -336,6 +336,167 @@ Notes on the numbers:
   hop; the afferent/efferent split does, by design.
 - FastAPI runs one uvicorn worker; its habituation table is an `OrderedDict`.
 
+## Consolidation
+
+Consolidation level 1 is a **verified cache of the brain's decisions**, and the foundation for
+what comes later (keys by similarity, expectations the brain writes into the periphery). The
+brain's answers used to vanish: the thousandth signal of the same kind was asked of the brain
+again, at the full price. With consolidation (`furnace::nerve::consolidation`) the fabric
+watches what the brain decides for each key. Once it has decided the same thing for the same
+key a few times in a row, the decision becomes an *engram* and the next such signal is answered
+by a reflex in microseconds, without the brain. A sample of the reflex's answers keeps being
+checked against the brain; an engram the brain disagrees with is dissolved.
+
+```text
+receptor ──► Recall ──(consolidated engram)──────────────────────────► effectors
+               │
+               └──(miss, or shadow check)──► Record(brain) ──(commands)──► effectors
+                    deliberative pathway          │
+                                                  ▼
+                                        Memory (EngramStore)
+changes ──► Inhibit ──(tags, dependency versions)──┘
+```
+
+```rust
+use furnace::nerve::consolidation::{Consolidation, EngramStore, Inhibit};
+
+let engrams = EngramStore::new(
+    Consolidation::new()
+        .effectors(["page", "ticket", "ignore"]) // what may become a reflex
+        .after(3)                                 // agreeing decisions to consolidate
+        .shadow(0.05)                             // fraction of answers re-checked
+        .volatile(["reason"])                     // argument fields not compared
+        .depends_on(["customers"])                // external state the brain consults
+        .tags(|s| customer_of(s).map(|c| vec![format!("customer:{c}")]).unwrap_or_default())
+        .forget_after(Duration::from_secs(3600)),
+);
+// Effector failures reach the engrams they acted for
+b.neuron(Effector::new(engrams.watch(Webhook::new("page", url))), Mechanisms::NONE);
+let (recall, _brain) = b.consolidate(brain, Mechanisms::NONE, Summation::default(), &engrams);
+b.reflex(triage, recall, 1.0); // whatever fed the brain now feeds `recall`
+// Change notifications: {"inhibit": ["customer:42"]} or {"advance": ["customers"]}
+let changes = b.neuron(Inhibit::new("changes", &engrams), Mechanisms::NONE);
+b.reflex(db_changes, changes, 1.0);
+```
+
+- **Key.** Level 1 is exact: the signal's `Feature` by default, or `Consolidation::key`. What
+  makes it useful is the receptor or a reflex in front of `recall` putting the right thing in
+  the key: a log line with its numbers and ids masked, a quantized sensor state, a normalized
+  request. A fired decision carries its key as its feature.
+- **`Recall`** (a reflex in front of the brain, named `<brain>-recall`) looks the key up. A
+  consolidated engram fires its commands at once; anything else passes on to the brain's
+  deliberative pathway, as before.
+- **`Record`** wraps the brain: a brain's commands are routed by name straight to their
+  effectors, so a neuron on a pathway behind the brain would never see them. Wrapping it sees
+  each firing next to the signal that caused it, which is the decision for that key.
+- **`Memory`** is the trait `Recall`, `Record`, `Inhibit` and `Watched` talk to: what a key is,
+  what is stored and how it is looked up. `EngramStore`, the one built in, is a bounded
+  set-associative table like the habituation table, holding commands; another memory (other
+  keys, other contents) can take its place without touching the neurons.
+- **Consolidated** after `after` agreeing brain decisions in a row (3); a different decision
+  starts the count over. After an engram has been dissolved by the brain or by failures, the
+  same key needs `after` more agreeing decisions for each dissolution.
+- **Shadow checks.** A fraction of the reflex's answers (5%, and always the first 3 of every
+  engram, chosen deterministically from the signal's id) also go to the brain, after the reflex
+  acted and without the request's reply. The brain's answer is compared and dropped. A
+  disagreement dissolves the engram.
+- **Policy.** Opt-in per effector: a decision with a command for an effector not listed is never
+  answered from an engram (`delete`, `pay`). Two decisions agree when their commands are equal
+  with the `volatile` argument fields left out; the engram fires the latest brain decision as
+  it was made.
+- **Effector failures.** `engrams.watch(act)` wraps an effector's act; `failures` failures in a
+  row (3, every attempt counts) for a key dissolve its engram.
+
+### What a decision may depend on
+
+A brain declared with no `depends_on` is taken to **decide from its input alone**: the same key
+always gets the same answer. That holds for a log triage on the line's text; it does not hold
+for a brain that looks up a customer's plan before deciding. Such a brain declares what it
+consults, and every change of that state has to reach the store:
+
+- **Tags (inhibition).** `Consolidation::tags` labels each decision with what it is about
+  (`customer:42`). A change notification with `{"inhibit": ["customer:42"]}` reaching an
+  `Inhibit` neuron (from a receptor fed by the database's change stream, a webhook, a queue)
+  dissolves every engram carrying the tag at once, and the next such signal goes to the brain.
+  A brain decision for a stimulus seen before the change, still on its way back, is not
+  recorded. No penalty: the engram may consolidate again as soon as the brain agrees with
+  itself under the new state.
+- **Versions.** Every declared dependency has a version. `{"advance": ["customers"]}` (or
+  `Memory::advance`) raises it, and every engram made under the old version is void, as are
+  decisions made under it that come back later. This is the sure way when changes cannot be
+  tagged (a bulk import, a migration).
+- **Forgetting and shadow checks are the last line, not the mechanism.** An engram unused for
+  `forget_after` (an hour) is forgotten, and the shadow sample catches a reflex the brain no
+  longer agrees with, but only on that sample and only after the fact. A dependency nobody
+  declared is a bug in the brain's declaration; these two bound how long it can last.
+
+### Metrics of consolidation
+
+On the recall neuron in `GET /nerve` (with the policy, the dependencies' versions and the most
+used engrams) and in `/metrics`: signals, sent to the brain, hits, shadow checks, agreements,
+disagreements, consolidated, dissolved (by failures), inhibited, stale, forgotten, decisions
+refused by the policy, `brain_fraction` and `brain_load` (shadow checks included), the brain
+fraction per window of 1,000 signals, the brain's signal-to-decision p50 and the brain time the
+hits saved at that p50. `Inhibit` counts the tags and versions it applied.
+
+Not built yet: keys by similarity (locality-sensitive or perceptual-hash keys), distilling the
+engrams into a small model, and expectations the brain writes into the periphery, of which
+this cache is the simplest kind (an exact match that acts).
+
+### Measured: log triage
+
+[`benches/nerve`](../benches/nerve/src/consolidation.rs) replays two public logs from
+[Loghub](https://github.com/logpai/loghub), `HDFS_2k.log` and `BGL_2k.log` (2,000 lines each;
+BGL's label column dropped), through a `Lines` receptor over TCP at 50 lines per second. A
+reflex makes the feature each line's template (every token holding a digit masked). The brain
+is a mock LLM: a summed window of up to 8 lines takes 400 ms plus 20 ms per further line, 4
+generations at once. It decides on the raw line: `page` for errors and failures, `ticket` for
+warnings and for HDFS blocks stored short of the 64 MB block size, `ignore` otherwise, with a `reason`
+quoting the line (volatile). The block size is masked out of the template, so that template's
+decision depends on what the key does not see: the case consolidation must not get wrong.
+One run each, consolidation off and on, Windows 11:
+
+```bash
+cd benches/nerve && cargo build --release
+target/release/furnace-nerve-bench consolidation --logs DIR
+```
+
+| Log (templates) | Consolidation | Brain calls | Brain calls per 200 lines, in order | Line to action p50 | p99 | Actions equal to the brain's for that line | Shadow agreement |
+|---|---|---|---|---|---|---|---|
+| HDFS (16) | off | 2,000 | 200 every time | 727 ms | 954 ms | 100% | — |
+| | on | 328 | 127, 46, 58, 25, 14, 13, 4, 12, 15, 14 | 0.04 ms | 809 ms | 98.4% | 97.1% (136 of 140) |
+| BGL (142) | off | 2,000 | 200 every time | 723 ms | 949 ms | 100% | — |
+| | on | 666 | 127, 113, 39, 10, 17, 37, 130, 59, 50, 84 | 0.03 ms | 881 ms | 100% | 100% (124 of 124) |
+
+With consolidation on, the reflex's own answers took 0.04 ms (HDFS) and 0.03 ms (BGL) at p50
+and under 0.1 ms at p99, against about 0.55 to 0.6 s through the brain; the p99 rows are the
+lines that still went to the brain. HDFS: 14 consolidations, 1,810 reflex answers, 139 shadow
+checks, 4 dissolutions; the brain time the hits saved, at its p50, was about 1,060 s over a
+40-second replay. BGL: 61 consolidations, 1,458 reflex answers, 124 checks, no dissolution,
+about 810 s saved.
+
+What the numbers say, and what they do not:
+
+- The brain's load falls where traffic repeats: by 6× on HDFS (16 templates) and 3× on BGL
+  (142 templates). Not by an order of magnitude on 2,000 lines: every template costs at least
+  `after` brain decisions plus its first `first_shadows` checks, and BGL keeps showing new
+  templates (the rise at lines 1,200 to 1,400 is a burst of templates not seen before). The
+  share falls further the longer the stream runs on known templates.
+- The HDFS trap worked as intended and shows the risk. The brain tickets a block stored short
+  of 64 MB (35 lines in the sample) and ignores a full one; the template masks the size, so
+  both share one key. The engram for that template consolidated on `ignore`, then the shadow
+  checks caught the disagreement and dissolved it 4 times, each time needing more agreeing
+  decisions to come back. In between, 33 partial-block lines were answered `ignore` by the
+  reflex: 1.6% of all actions differ from what the brain would have done. A key that hides
+  what the decision depends on gives wrong reflexes until a check catches them. The remedy is
+  the key (keep the field the brain looks at), not more checks; the dissolution count in
+  `GET /nerve` is how to find such keys.
+- The brain here is a mock that decides from the line alone (no `depends_on`), at a fixed
+  latency, so the numbers measure the mechanism, not an LLM's answers. A real GGUF is the next
+  measurement.
+- One run per mode, on one idle Windows 11 machine, 50 lines per second. The JSON report has
+  every count (`--json PATH`).
+
 ## What it is not, and limits
 
 - Not a workflow engine or a DAG DSL: pathways and neurons are code.

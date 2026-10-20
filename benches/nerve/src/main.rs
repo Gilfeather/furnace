@@ -6,6 +6,7 @@
 //! ```bash
 //! cargo build --release
 //! target/release/furnace-nerve-bench [hop|arc|brain|memory|webhook|serve-bench|all]
+//! target/release/furnace-nerve-bench consolidation --logs DIR [--json PATH]
 //!     [--runs 3] [--clients 1,4,16] [--servers furnace,hand-written,fastapi] [--json PATH]
 //! ```
 //!
@@ -24,7 +25,11 @@
 //! - *serve-bench*: the demo served over HTTP by furnace (`Server::nerve`), by a hand-written
 //!   axum server and by FastAPI, loaded by N clients on keep-alive connections.
 //!
-//! `serve KIND PORT` runs one server on its own.
+//! `serve KIND PORT` runs one server on its own. `consolidation` replays public logs through
+//! a brain with consolidation off and on, once (see `consolidation.rs`); it is not part of
+//! `all`, since it needs the logs.
+
+mod consolidation;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -920,6 +925,15 @@ async fn main() {
             fail("usage: serve KIND PORT");
         };
         serve(kind, port).await;
+        return;
+    }
+    if args.first().map(String::as_str) == Some("consolidation") {
+        let dir = flag("--logs").unwrap_or_else(|| fail("consolidation needs --logs DIR"));
+        let report = tokio::task::block_in_place(|| consolidation::bench(&dir));
+        consolidation::print(&report);
+        if let Some(path) = flag("--json") {
+            write_json(&path, &report);
+        }
         return;
     }
     let what = args

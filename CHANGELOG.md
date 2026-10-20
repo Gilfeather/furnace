@@ -15,6 +15,21 @@ The server runs on the nervous system: every model is a neuron, every route a re
 - `tls::MAX_HANDSHAKES` (1024): TLS handshakes in flight per listener. Past it the listener
   stops accepting until one ends, so clients that connect and never send a ClientHello cannot
   hold an unbounded number of tasks and sockets.
+- Consolidation, level 1 (`furnace::nerve::consolidation`): a verified cache of a brain's
+  decisions, the foundation for later levels. `FabricBuilder::consolidate` puts a `Recall`
+  reflex in front of a brain and records its decisions (`Record`) in a `Memory`, by default an
+  `EngramStore`: bounded and set-associative, keyed by the signal's feature or a key of your
+  own. After `after` agreeing decisions (3) a key's decision is answered in microseconds without
+  the brain; a sample of those answers (5%, and always the first 3) is still sent to the brain
+  after the reflex acted and compared, never acted on. A disagreement or `failures` effector
+  failures in a row (`EngramStore::watch`) dissolve the engram. Opt-in per effector; volatile
+  argument fields are left out of the comparison. A brain declares the external state it
+  consults (`depends_on`); change notifications to an `Inhibit` neuron dissolve the engrams
+  tagged with what changed (`{"inhibit": ["customer:42"]}`) or void every engram made under a
+  dependency's old version (`{"advance": ["customers"]}`). A brain without declarations is
+  taken to decide from its input alone. Counters and the top engrams are on the recall neuron
+  in `GET /nerve` and `/metrics`. Measured on Loghub's HDFS and BGL logs in
+  [NERVE.md](docs/NERVE.md#consolidation).
 
 ### Changed
 - `/predict`, v2 over HTTP and v2 over gRPC share one inference path: the concurrency slot,
