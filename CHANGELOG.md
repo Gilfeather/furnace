@@ -10,9 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The server runs on the nervous system: every model is a neuron, every route a receptor.
 
 ### Migrating from 0.10
-The public API changes below break code written for 0.10. Renamed types keep their old name as
-a deprecated alias for one release, so such code still builds, with a warning that names the
-new one.
+The public API changes below break code written for 0.10; furnace keeps no compatibility
+aliases before 1.0. Renames are listed as old name -> new name.
 
 - `Server::router()`, `api::router()` and `api::router_with_models()` return
   `Result<Router>`: an error for a server with nothing to serve, as `serve()` gives (0.10
@@ -29,17 +28,16 @@ new one.
   named exactly `sample_model`, with a warning (0.10: any name containing `sample`, logged at
   `info`). Any other missing path is `ModelError::FileNotFound`; write real files with
   `cargo run --bin create_sample_model`.
-- `GET /metrics` JSON: `max_concurrent_requests`, the name the flag, the configuration and
-  Prometheus use. `max_concurrent_inferences` carries the same value until 0.12; read the new
-  field.
-- `access::RateLimit` is `access::ClientRateLimit` (`ServerConfig::rate_limit`), so it is not
+- `GET /metrics` JSON: `max_concurrent_inferences` -> `max_concurrent_requests`, the name the
+  flag, the configuration and Prometheus use.
+- `access::RateLimit` -> `access::ClientRateLimit` (`ServerConfig::rate_limit`), so it is not
   confused with the nervous system's `effector::RateLimit`.
 - LLM layer (feature `llm`):
-  - `llm::Input` is `llm::Prompt`: `Prompt::Chat`, `Prompt::Text`. `GenerateRequest::input`
+  - `llm::Input` -> `llm::Prompt`: `Prompt::Chat`, `Prompt::Text`. `GenerateRequest::input`
     keeps its name.
-  - `llm::SchedulerStats` is `llm::SchedulerCounters` (live values; `LlmEngine::scheduler_stats`
-    keeps its name).
-  - `llm::mock::Live` is `llm::mock::SharedCount`: it counts decode calls too, which are not
+  - `llm::SchedulerStats` -> `llm::SchedulerCounters` (live values;
+    `LlmEngine::scheduler_stats` keeps its name).
+  - `llm::mock::Live` -> `llm::mock::SharedCount`: it counts decode calls too, which are not
     alive.
   - `Event` is `#[non_exhaustive]`: a `match` on it needs a `_` arm. It is no longer `Clone`,
     since an `Error` holds the model's error.

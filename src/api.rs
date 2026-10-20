@@ -201,8 +201,6 @@ pub struct MetricsResponse {
     pub in_flight_inferences: usize,
     /// `--max-concurrent-requests` (`furnace_max_concurrent_requests` in Prometheus)
     pub max_concurrent_requests: usize,
-    /// The old name of `max_concurrent_requests`, the same value; removed in 0.12
-    pub max_concurrent_inferences: usize,
     /// Requests that reached the model (successful or failed)
     pub total_inferences: u64,
     /// Forward passes run; with dynamic batching one pass serves several requests
@@ -1982,7 +1980,6 @@ fn json_metrics(state: &ServerState) -> MetricsResponse {
         rejected_rate_limited: state.rejected_rate_limited.load(Ordering::Relaxed),
         in_flight_inferences: in_flight(state),
         max_concurrent_requests: state.max_concurrent_requests,
-        max_concurrent_inferences: state.max_concurrent_requests,
         total_inferences: stats.inference_count,
         total_batches: stats.batch_count,
         average_batch_size: average_batch_size(&stats),
@@ -2288,7 +2285,6 @@ pub(crate) mod tests {
         let initial = get_metrics(app.clone()).await;
         assert_eq!(initial.total_requests, 0);
         assert_eq!(initial.max_concurrent_requests, 100);
-        assert_eq!(initial.max_concurrent_inferences, 100);
         assert!(initial.last_inference_at.is_none());
 
         let ok = serde_json::json!({ "input": vec![0.5; 784] }).to_string();

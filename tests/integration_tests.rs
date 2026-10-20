@@ -683,8 +683,6 @@ async fn test_cli_config_file_with_command_line_override() {
     };
     // From the file
     assert_eq!(metrics["max_concurrent_requests"], 7);
-    // The old name, kept for 0.11
-    assert_eq!(metrics["max_concurrent_inferences"], 7);
     let info: Value = client()
         .get(format!("{base_url}/model/info"))
         .send()
