@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- One batching engine (`src/batching/engine.rs`) behind both the server's dynamic batching
+  and the nervous system's deliberative pathways: the queue, the workers that merge what is
+  queued once they are all busy, the window from the first item, arrival hints, skipping
+  abandoned items and containing a panicking batch. The server's `Batcher` runs it over a
+  `Model` with a reply per request and the configured `--batch-timeout-us`; a deliberative
+  pathway runs it with one worker, a bounded queue and the window learned from its latency.
+  Nothing changes for either: batching stays off by default, the flags keep their meaning,
+  and the pathway's summation window, capacity and overflow count are as before. A brain
+  that panics now loses that window's signals instead of its pathway's worker.
+
 ## [0.10.0] - 2026-10-21
 
 Furnace becomes the layer between sensors, models and actuators, not only a server that

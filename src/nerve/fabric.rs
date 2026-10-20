@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,7 @@ use super::latency::LatencyEstimate;
 use super::neuron::{Cx, Firing, Gate, Mechanisms, Neuron, NeuronKind, Quiet};
 use super::receptor::{Afferent, Receptor};
 use super::signal::{NeuronId, PathwayId, Payload, Signal};
+use crate::batching::engine::{self, Batching, Engine, Queued};
 
 /// Hops a signal may take before the fabric assumes a loop and drops it
 pub const MAX_HOPS: usize = 32;
@@ -102,7 +103,8 @@ pub struct Pathway {
     /// Dropped because the queue was full
     pub(crate) overflow: AtomicU64,
     pub(crate) summation: Option<Summation>,
-    queue: Option<Queue>,
+    /// A deliberative pathway's queue and its summation worker
+    queue: Option<Engine<Signal>>,
 }
 
 impl Pathway {
@@ -127,16 +129,6 @@ impl Pathway {
             (Some(remaining), Some(p99)) => p99 <= remaining,
         }
     }
-}
-
-struct Queue {
-    sender: mpsc::SyncSender<Queued>,
-    waiting: Arc<AtomicU64>,
-}
-
-struct Queued {
-    signal: Signal,
-    queued_at: Instant,
 }
 
 /// Per-neuron counters
@@ -379,41 +371,43 @@ impl FabricBuilder {
                 }
             })
             .collect();
-        let mut workers = Vec::new();
-        let pathways: Vec<Pathway> = self
-            .pathways
-            .into_iter()
-            .enumerate()
-            .map(|(i, (from, to, kind, weight, summation))| {
-                cells[from.index()].out.push(PathwayId(i as u32));
-                let queue = summation.map(|s| {
-                    let (sender, receiver) = mpsc::sync_channel(s.capacity);
-                    let waiting = Arc::new(AtomicU64::new(0));
-                    workers.push((PathwayId(i as u32), receiver, waiting.clone()));
-                    Queue { sender, waiting }
-                });
-                Pathway {
-                    from,
-                    to,
-                    kind,
-                    weight,
-                    latency: LatencyEstimate::new(),
-                    signals: AtomicU64::new(0),
-                    ineligible: AtomicU64::new(0),
-                    overflow: AtomicU64::new(0),
-                    summation,
-                    queue,
-                }
-            })
-            .collect();
         let inner = Arc::new_cyclic(|weak: &Weak<Inner>| {
-            for (pathway, receiver, waiting) in workers {
-                let weak = weak.clone();
-                std::thread::Builder::new()
-                    .name(format!("furnace-nerve-{}", pathway.index()))
-                    .spawn(move || summation_worker(weak, pathway, receiver, waiting))
-                    .expect("failed to spawn a summation worker");
-            }
+            let pathways: Vec<Pathway> = self
+                .pathways
+                .into_iter()
+                .enumerate()
+                .map(|(i, (from, to, kind, weight, summation))| {
+                    let id = PathwayId(i as u32);
+                    cells[from.index()].out.push(id);
+                    let queue = summation.map(|s| {
+                        Engine::start(
+                            Summing {
+                                fabric: weak.clone(),
+                                pathway: id,
+                            },
+                            engine::Config {
+                                max_batch: s.max_batch,
+                                workers: 1,
+                                capacity: Some(s.capacity),
+                                waits_unannounced: true,
+                            },
+                            move |_| format!("furnace-nerve-{i}"),
+                        )
+                    });
+                    Pathway {
+                        from,
+                        to,
+                        kind,
+                        weight,
+                        latency: LatencyEstimate::new(),
+                        signals: AtomicU64::new(0),
+                        ineligible: AtomicU64::new(0),
+                        overflow: AtomicU64::new(0),
+                        summation,
+                        queue,
+                    }
+                })
+                .collect();
             Inner {
                 epoch: Instant::now(),
                 cells,
@@ -675,17 +669,12 @@ impl Fabric {
             Some(queue) => {
                 self.prepare_for(pathway, &signal, now);
                 signal.trace.mark_queued();
-                match queue.sender.try_send(Queued {
-                    signal,
-                    queued_at: now,
-                }) {
-                    Ok(()) => {
-                        queue.waiting.fetch_add(1, Ordering::Relaxed);
-                        Outcome {
-                            queued: 1,
-                            ..Outcome::default()
-                        }
-                    }
+                match queue.submit(None, signal) {
+                    Ok(()) => Outcome {
+                        queued: 1,
+                        ..Outcome::default()
+                    },
+                    // Full: dropped rather than queued without bound
                     Err(_) => {
                         pathway.overflow.fetch_add(1, Ordering::Relaxed);
                         Outcome::default()
@@ -747,7 +736,7 @@ impl Fabric {
     }
 
     /// Fire `to` with a batch a worker summed, and propagate the results
-    fn fire_summed(&self, pathway: PathwayId, batch: Vec<Queued>) {
+    fn fire_summed(&self, pathway: PathwayId, batch: Vec<Queued<Signal>>) {
         let pathway = &self.0.pathways[pathway.index()];
         let cell = &self.0.cells[pathway.to.index()];
         let now = Instant::now();
@@ -755,7 +744,7 @@ impl Fabric {
         let mut admitted = Vec::with_capacity(batch.len());
         let mut queued_at = Vec::with_capacity(batch.len());
         for Queued {
-            mut signal,
+            item: mut signal,
             queued_at: at,
         } in batch
         {
@@ -797,7 +786,7 @@ impl Fabric {
             .pathways
             .iter()
             .filter_map(|p| p.queue.as_ref())
-            .map(|q| q.waiting.load(Ordering::Relaxed))
+            .map(|q| q.waiting() as u64)
             .sum()
     }
 
@@ -809,43 +798,32 @@ impl Fabric {
     }
 }
 
-/// A deliberative pathway's worker: temporal summation of the signals of a window into one
-/// firing of the pathway's neuron
-fn summation_worker(
-    weak: Weak<Inner>,
+/// A deliberative pathway's summation: the batching engine over the pathway's queue, with
+/// the window learned from the pathway's latency, firing the pathway's neuron with each
+/// batch and propagating what it fires
+struct Summing {
+    fabric: Weak<Inner>,
     pathway: PathwayId,
-    receiver: mpsc::Receiver<Queued>,
-    waiting: Arc<AtomicU64>,
-) {
-    while let Ok(first) = receiver.recv() {
-        let Some(inner) = weak.upgrade() else {
-            return;
-        };
-        let fabric = Fabric(inner);
-        let config = fabric.0.pathways[pathway.index()]
-            .summation
-            .unwrap_or_default();
-        let window = fabric.0.pathways[pathway.index()]
-            .window()
-            .unwrap_or(Duration::ZERO);
-        let deadline = first.queued_at + window;
-        let mut batch = vec![first];
-        while batch.len() < config.max_batch {
-            let now = Instant::now();
-            if now >= deadline {
-                match receiver.try_recv() {
-                    Ok(queued) => batch.push(queued),
-                    Err(_) => break,
-                }
-                continue;
-            }
-            match receiver.recv_timeout(deadline - now) {
-                Ok(queued) => batch.push(queued),
-                Err(_) => break,
-            }
+}
+
+impl Batching for Summing {
+    type Item = Signal;
+
+    fn weight(&self, _: &Signal) -> usize {
+        1
+    }
+
+    fn window(&self) -> Duration {
+        self.fabric
+            .upgrade()
+            .and_then(|inner| inner.pathways[self.pathway.index()].window())
+            .unwrap_or(Duration::ZERO)
+    }
+
+    fn run(&self, batch: Vec<Queued<Signal>>) {
+        if let Some(inner) = self.fabric.upgrade() {
+            Fabric(inner).fire_summed(self.pathway, batch);
         }
-        waiting.fetch_sub(batch.len() as u64, Ordering::Relaxed);
-        fabric.fire_summed(pathway, batch);
     }
 }
 
