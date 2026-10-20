@@ -476,7 +476,7 @@ impl Server {
 
     /// Add neurons of your own to the server's nervous system. The server wires its models
     /// into the same fabric (an entrance `in:{model}`, a neuron `model:{model}` and the
-    /// `respond` effector), so your pathways and its requests share one system. The HTTP
+    /// `serve:respond` effector), so your pathways and its requests share one system. The HTTP
     /// receptors become routes, the receptors start with the server, `GET /nerve` describes
     /// every neuron, pathway and measured latency, `GET /nerve/effectors/{name}/events`
     /// streams an SSE effector's commands, and `/metrics` carries it all. A server may serve
@@ -1335,13 +1335,17 @@ async fn run_inference(
         values: Values::F32(data),
     };
     let outputs = run_general(state, loaded, announced, vec![input], permit).await?;
-    Ok(outputs.and_then(|outputs| match outputs.into_iter().next() {
-        Some(HostTensor {
-            values: Values::F32(values),
-            ..
-        }) => Ok(values),
-        _ => Err(ModelError::InferenceFailed("the model returned no f32 output".to_string()).into()),
-    }))
+    Ok(
+        outputs.and_then(|outputs| match outputs.into_iter().next() {
+            Some(HostTensor {
+                values: Values::F32(values),
+                ..
+            }) => Ok(values),
+            _ => Err(
+                ModelError::InferenceFailed("the model returned no f32 output".to_string()).into(),
+            ),
+        }),
+    )
 }
 
 /// Run one request of named tensors through its model's pathway in the nervous system:
@@ -2527,6 +2531,7 @@ pub(crate) mod tests {
                 "/models",
                 "/models/{model}",
                 "/models/{model}/predict",
+                "/nerve",
                 "/predict",
                 "/readyz",
                 "/v2",

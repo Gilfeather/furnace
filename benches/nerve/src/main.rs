@@ -153,8 +153,23 @@ fn is_alert(text: &str) -> bool {
 /// signals, deliberative pathway to a counting brain for the rest. `alarm` is whatever the
 /// measurement needs; the receptor is an HTTP route or an in-process channel.
 struct Demo {
+    builder: furnace::nerve::FabricBuilder,
+    brain_hits: Arc<AtomicU64>,
+}
+
+/// A built demo, for driving it in this process
+struct Built {
     fabric: Fabric,
     brain_hits: Arc<AtomicU64>,
+}
+
+impl Demo {
+    fn build(self) -> Built {
+        Built {
+            fabric: self.builder.build(),
+            brain_hits: self.brain_hits,
+        }
+    }
 }
 
 fn demo_fabric(
@@ -208,7 +223,7 @@ fn demo_fabric(
     b.reflex(triage, alarm, 1.0);
     b.deliberative(triage, brain, 2.0, Summation::default());
     Demo {
-        fabric: b.build(),
+        builder: b,
         brain_hits,
     }
 }
@@ -297,7 +312,8 @@ fn bench_arc() -> Arc_ {
         |b, mechanisms| b.receptor(receptor, mechanisms),
         Effector::new(channel),
         false,
-    );
+    )
+    .build();
     demo.fabric.start();
     // Alerts only: every stimulus is meant to reach the effector; repeats die at the gate
     let text = |i: usize| format!("ALERT {}", i % 50_000);
@@ -384,7 +400,8 @@ fn bench_brain() -> BrainFraction {
         |b, mechanisms| b.receptor(receptor, mechanisms),
         Effector::new(channel),
         false,
-    );
+    )
+    .build();
     demo.fabric.start();
     let mut at = Vec::new();
     let mut repeats = 0;
@@ -433,7 +450,8 @@ fn bench_memory() -> Memory {
         |b, mechanisms| b.receptor(receptor, mechanisms),
         Effector::new(channel),
         false,
-    );
+    )
+    .build();
     demo.fabric.start();
     std::thread::sleep(Duration::from_millis(100));
     let built = memory::private_mb(std::process::id());
@@ -585,7 +603,8 @@ async fn bench_webhook() -> WebhookLatency {
         ))
         .no_retry(),
         false,
-    );
+    )
+    .build();
     demo.fabric.start();
     let mut through = Vec::with_capacity(WEBHOOK_CALLS);
     for n in 0..WEBHOOK_CALLS + WARMUP {
@@ -657,7 +676,7 @@ async fn serve(kind: &str, port: u16) {
             let result = Server::new()
                 .host("127.0.0.1")
                 .port(port)
-                .nerve(demo.fabric)
+                .nerve(demo.builder)
                 .serve()
                 .await;
             if let Err(e) = result {

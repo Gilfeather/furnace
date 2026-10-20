@@ -981,6 +981,26 @@
           }
         }
       }
+    },
+    "/nerve": {
+      "get": {
+        "summary": "Describe the nervous system",
+        "description": "Every neuron (kind, mechanisms, what it is), every pathway (kind, weight, measured p50/p99 latency) and the fabric's counters. The served models appear as `in:{model}` → `model:{model}` → `serve:respond`.",
+        "operationId": "describeNerve",
+        "responses": {
+          "200": {
+            "description": "The fabric's description",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1280,6 +1300,11 @@
               "$ref": "#/components/schemas/ModelMetrics"
             },
             "description": "Per model; the totals above are over all of them"
+          },
+          "nerve": {
+            "type": "object",
+            "description": "The nervous system: every served model's pathway (an entrance `in:{model}`, a neuron `model:{model}`, the `serve:respond` effector) and the neurons added with `Server::nerve`. Per neuron fired and quiet counts, per pathway latency, the fraction of signals that reached a brain, stimulus-to-action per reflex arc. See docs/NERVE.md.",
+            "additionalProperties": true
           }
         }
       },

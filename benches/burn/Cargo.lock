@@ -2794,6 +2794,7 @@ dependencies = [
  "chrono",
  "clap",
  "fast-float2",
+ "futures-util",
  "memmap2",
  "num_cpus",
  "rayon",
