@@ -84,7 +84,7 @@ fn demo() -> Demo {
         2.0,
         Summation::default().window(Duration::from_millis(1)),
     );
-    let app = Server::new().nerve(b.build()).router();
+    let app = Server::new().nerve(b).router();
     Demo {
         app,
         alarms,

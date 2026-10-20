@@ -910,7 +910,10 @@ impl Batching for Summing {
 
     /// A signal that exists to answer a request nobody waits for any more is skipped
     fn wanted(&self, signal: &Signal) -> bool {
-        signal.reply.as_ref().is_none_or(super::signal::Reply::wanted)
+        signal
+            .reply
+            .as_ref()
+            .is_none_or(super::signal::Reply::wanted)
     }
 
     fn window(&self) -> Duration {

@@ -1204,20 +1204,44 @@ mod tests {
                 serde_json::json!({"status": 201, "body": {"ok": true}}),
             ),
         );
-        let answer = receiver.try_recv().unwrap();
-        assert_eq!(answer.status, 201);
-        assert_eq!(answer.content_type, "application/json");
-        assert_eq!(answer.body, Bytes::from(r#"{"ok":true}"#));
-        // Nobody waiting: a final failure
+        let Answer::Http {
+            status,
+            content_type,
+            body,
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("an HTTP answer");
+        };
+        assert_eq!(status, 201);
+        assert_eq!(content_type, "application/json");
+        assert_eq!(body, Bytes::from(r#"{"ok":true}"#));
+        // Nobody waiting: not a failure of the effector, so the breaker never counts it
         fabric.stimulate(r, command("respond", serde_json::Value::Null));
-        assert_eq!(effector.metrics().failed, 1);
+        assert_eq!(effector.metrics().failed, 0);
         // A plain signal answers with its payload
         let (reply, mut receiver) = Reply::new();
         fabric.stimulate(
             r,
             Signal::new(Feature::NONE, Payload::text("plain")).with_reply(reply),
         );
-        assert_eq!(receiver.try_recv().unwrap().body, Bytes::from("plain"));
+        let Answer::Http { body, .. } = receiver.try_recv().unwrap() else {
+            panic!("an HTTP answer");
+        };
+        assert_eq!(body, Bytes::from("plain"));
+        // Tensors go back as tensors, for the protocol that asked
+        let (reply, mut receiver) = Reply::new();
+        let tensor = crate::tensor::HostTensor {
+            shape: vec![1, 2],
+            values: crate::tensor::Values::F32(vec![1.0, 2.0]),
+        };
+        fabric.stimulate(
+            r,
+            Signal::new(Feature::NONE, Payload::tensors(vec![tensor.clone()])).with_reply(reply),
+        );
+        let Answer::Tensors(tensors) = receiver.try_recv().unwrap() else {
+            panic!("tensors");
+        };
+        assert_eq!(tensors, vec![tensor]);
     }
 
     #[tokio::test]

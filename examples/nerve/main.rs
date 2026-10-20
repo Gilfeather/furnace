@@ -51,7 +51,8 @@ use furnace::nerve::brain::{Llm, ModelNeuron};
 use furnace::nerve::effector::{Effector, FileAppend, Process, Respond, Webhook};
 use furnace::nerve::receptor::{Channel, Http, kinds};
 use furnace::nerve::{
-    Fabric, Feature, Firing, FnNeuron, Habituation, Mechanisms, Payload, Signal, Summation, Urgency,
+    Fabric, FabricBuilder, Feature, Firing, FnNeuron, Habituation, Mechanisms, Payload, Signal,
+    Summation, Urgency,
 };
 use furnace::tensor::{HostTensor, Values};
 use furnace::{BackendKind, Model, Server};
@@ -183,7 +184,9 @@ fn act_on(verdict: Verdict, signal: Signal, what: &str) -> Firing {
 // ---------------------------------------------------------------------------------------------
 // The fabric
 
-fn build_fabric(journal: &std::path::Path) -> (Fabric, furnace::nerve::receptor::ChannelSender) {
+fn build_fabric(
+    journal: &std::path::Path,
+) -> (FabricBuilder, furnace::nerve::receptor::ChannelSender) {
     let mut b = Fabric::builder();
     let habituation = Mechanisms::NONE
         .threshold(0.6)
@@ -286,7 +289,7 @@ fn build_fabric(journal: &std::path::Path) -> (Fabric, furnace::nerve::receptor:
         b.reflex(classifier, alarm, 1.0);
         b.deliberative(classifier, brain, 2.0, Summation::default().max_batch(16));
     }
-    (b.build(), frame_sender)
+    (b, frame_sender)
 }
 
 // ---------------------------------------------------------------------------------------------
