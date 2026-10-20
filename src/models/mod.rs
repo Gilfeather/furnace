@@ -72,7 +72,7 @@ macro_rules! built_in_model {
             use std::path::Path;
 
             use crate::backend::BackendKind;
-            use crate::error::{ModelError, Result};
+            use crate::error::Result;
             use crate::model::BurnModel;
             use crate::tensor::{HostTensor, IoSpec};
 
@@ -108,7 +108,7 @@ macro_rules! built_in_model {
                         None => Model::from_embedded(&device),
                         #[cfg(not(feature = "embed-weights"))]
                         None => {
-                            return Err(ModelError::InvalidArgument {
+                            return Err(crate::error::ModelError::InvalidArgument {
                                 arg: "weights".to_string(),
                                 value: $name.to_string(),
                                 reason: "no weight file given and weights are not embedded"
