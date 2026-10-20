@@ -25,7 +25,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use furnace::nerve::effector::{Channel as ChannelEffector, Delivery, Effector};
+use furnace::nerve::effector::{ChannelOut, Delivery, Effector};
 use furnace::nerve::expect::fields::log_line;
 use furnace::nerve::expect::{ExpectConfig, ExpectMetrics, Expectations};
 use furnace::nerve::receptor::Lines;
@@ -595,7 +595,7 @@ fn live(lines: &[Line], setup: &str, brain_name: &str, make: BrainMaker) -> Live
     };
     let tag = b.neuron(tag, Mechanisms::NONE);
     b.reflex(logs, tag, 1.0);
-    let (page_act, deliveries) = ChannelEffector::new("page", 1 << 16);
+    let (page_act, deliveries) = ChannelOut::new("page", 1 << 16);
     b.neuron(Effector::new(page_act), Mechanisms::NONE);
     let summation = Summation::default()
         .max_batch(BRAIN_BATCH)
@@ -630,7 +630,7 @@ fn live(lines: &[Line], setup: &str, brain_name: &str, make: BrainMaker) -> Live
             Some(expectations)
         }
     };
-    let fabric = b.build();
+    let fabric = b.build().expect("the fabric");
     fabric.start();
     let (sender, received) = mpsc::channel::<(Delivery, Instant)>();
     std::thread::spawn(move || {
