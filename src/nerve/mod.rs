@@ -71,6 +71,8 @@ mod neuron;
 pub mod receptor;
 pub(crate) mod serve;
 mod signal;
+#[cfg(test)]
+mod testing;
 pub mod wire;
 
 pub use fabric::{
