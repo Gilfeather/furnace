@@ -592,9 +592,10 @@ mod tests {
     }
 
     use crate::nerve::effector::{Channel, Effector};
-    use crate::nerve::fabric::{Fabric, FnNeuron, Summation};
+    use crate::nerve::fabric::{Fabric, Summation};
     use crate::nerve::neuron::Mechanisms;
     use crate::nerve::signal::{Feature, NeuronId};
+    use crate::nerve::testing::pass;
     use std::time::{Duration, Instant};
 
     /// A receptor, a deliberative pathway to `brain`, and a channel effector named `out`
@@ -606,10 +607,7 @@ mod tests {
         std::sync::mpsc::Receiver<crate::nerve::effector::Delivery>,
     ) {
         let mut b = Fabric::builder();
-        let r = b.neuron(
-            FnNeuron::reflex("in", |s, _| Firing::one(s)).with_kind(NeuronKind::Receptor),
-            Mechanisms::NONE,
-        );
+        let r = b.neuron(pass("in"), Mechanisms::NONE);
         let brain = b.neuron(brain, Mechanisms::NONE);
         let (channel, receiver) = Channel::new("out", 64);
         b.neuron(Effector::new(channel), Mechanisms::NONE);

@@ -89,3 +89,8 @@ pub use signal::{
     Answer, Command, Feature, NeuronId, PathwayId, Payload, Reply, Signal, SignalId, TRACE_HOPS,
     Trace, Urgency, sketch64,
 };
+
+/// Nanoseconds from `epoch` to `now`: 0 if `now` is earlier, `u64::MAX` past 584 years
+pub(crate) fn nanos_since(epoch: std::time::Instant, now: std::time::Instant) -> u64 {
+    u64::try_from(now.saturating_duration_since(epoch).as_nanos()).unwrap_or(u64::MAX)
+}

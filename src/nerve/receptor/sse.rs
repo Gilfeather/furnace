@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, warn};
 
-use super::{Afferent, RateMeter, Receptor, Source, UrgencyRule, kinds};
+use super::{Afferent, Backoff, RateMeter, Receptor, Source, UrgencyRule, kinds};
 use crate::nerve::neuron::{Cx, Firing, Neuron, NeuronKind};
 use crate::nerve::signal::{Feature, Payload, Signal};
 use crate::nerve::wire;
@@ -132,7 +132,7 @@ impl Receptor for Sse {
             let client = wire::Client::new(Duration::from_secs(3600));
             let meter = RateMeter::new();
             let mut last_id: Option<String> = None;
-            let mut backoff = Duration::from_millis(200);
+            let mut backoff = Backoff::new(Duration::from_millis(200));
             loop {
                 let mut headers = vec![("accept", "text/event-stream")];
                 let id = last_id.clone().unwrap_or_default();
@@ -141,7 +141,7 @@ impl Receptor for Sse {
                 }
                 match client.send("GET", &url, &headers, b"").await {
                     Ok(mut streaming) if streaming.status == 200 => {
-                        backoff = Duration::from_millis(200);
+                        backoff.reset();
                         let mut parser = SseParser::default();
                         loop {
                             match streaming.next().await {
@@ -186,8 +186,7 @@ impl Receptor for Sse {
                 if afferent.fabric().is_none() {
                     return;
                 }
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(10));
+                tokio::time::sleep(backoff.next()).await;
             }
         });
     }
