@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use furnace_compare::{Args, FURNACE_VERSION, bench_http_server};
+use furnace_compare::{Args, bench_http_server, furnace_version};
 
 fn main() {
     let args = Args::parse("server");
@@ -23,7 +23,7 @@ fn main() {
             .args(["--log-level", "warn"]);
         cmd
     });
-    report.version = FURNACE_VERSION.to_string();
+    report.version = furnace_version();
     report.binary_mb = std::fs::metadata(&server).map_or(0.0, |m| m.len() as f64 / 1e6);
     report
         .notes

@@ -80,8 +80,9 @@ cargo clippy --all-targets -- -D warnings
 # Code is formatted
 cargo fmt --check
 
-# No security vulnerabilities
-cargo audit
+# No security advisories, and licenses, bans and sources as deny.toml allows (what CI runs;
+# `cargo install cargo-deny`)
+cargo deny check
 ```
 
 ## GitHub Branch Protection

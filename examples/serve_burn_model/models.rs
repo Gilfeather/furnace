@@ -8,7 +8,8 @@ use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, Relu};
 use burn::tensor::{Device, Int, Tensor};
 use furnace::{BackendKind, BurnModel, DataType, HostTensor, IoSpec};
 
-/// A small CNN: `[batch, 1, 28, 28]` -> `[batch, 10]` logits
+/// A small CNN: `[batch, 1, 28, 28]` -> `[batch, 10]` logits. `benches/burn/src/models.rs` has
+/// a copy, since the bench is its own crate: change both together.
 #[derive(Module, Debug)]
 pub struct DigitNet {
     conv: Conv2d,
@@ -62,7 +63,8 @@ impl SentimentNet {
     }
 }
 
-/// `SentimentNet` served with named tensors
+/// `SentimentNet` served with named tensors. `TextModel` in `benches/burn/src/main.rs` is the
+/// same `BurnModel` around a larger encoder.
 #[derive(Debug)]
 pub struct Sentiment {
     pub net: SentimentNet,

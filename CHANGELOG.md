@@ -33,6 +33,10 @@ The server runs on the nervous system: every model is a neuron, every route a re
   `Process` writes stdin within its timeout; `FileAppend` writes on a thread of its own.
 - `Respond` with nobody waiting any more is not a failure, so late answers no longer open its
   breaker.
+- The bench harnesses share `benches/common`: one percentile definition (nearest rank, which
+  `benches/burn`, `llm` and `nerve` did not use), one median, one memory probe, and one way to
+  start and stop a server ([PERFORMANCE.md](docs/PERFORMANCE.md#how-the-harnesses-count)).
+  The crates.io package no longer carries `benches/burn`, `llm` and `nerve`.
 - TLS: a PKCS#8 private key the server does not take is named by its algorithm, read from the
   key ("RSA keys are not supported", "unsupported EC key curve 1.3.132.0.35"), instead of
   "unsupported PKCS#8 key (RSA?)".
@@ -47,7 +51,7 @@ The server runs on the nervous system: every model is a neuron, every route a re
 - A rate limit without API keys logs a warning when the router may be served without
   `ClientAddr`, in which case every client shares one budget.
 
-## [0.10.0] - 2026-10-21
+## [0.10.0] - 2026-10-20
 
 Furnace becomes the layer between sensors, models and actuators, not only a server that
 answers requests: a nervous system (`nerve`) built from a neuron's mechanisms, an LLM layer

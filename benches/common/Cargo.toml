@@ -1,0 +1,28 @@
+# Helpers the four bench harnesses share (benches/burn, llm, nerve and compare): the memory
+# probe, one percentile definition, the median, starting and stopping a server, the FastAPI
+# interpreter, the load loop and the JSON report. A path dependency of each harness, built in
+# that harness's workspace; its own empty workspace only lets `cargo test` run here. Never
+# published.
+[package]
+name = "furnace-bench-common"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+description = "Measurement helpers shared by furnace's bench harnesses"
+license = "MIT"
+
+[workspace]
+
+[features]
+default = []
+# `load`: N clients sending back to back on a tokio runtime (the async harnesses)
+load = ["dep:tokio"]
+
+[dependencies]
+serde = "1.0"
+serde_json = "1.0"
+tokio = { version = "1.53", default-features = false, features = ["rt", "sync"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

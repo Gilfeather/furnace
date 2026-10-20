@@ -17,6 +17,7 @@ license = "MIT"
 furnace = { package = "furnace-server", path = "../..", default-features = false, features = ["llm"] }
 # The `real` comparison: GGUF files through candle
 furnace-candle = { path = "../../furnace-candle" }
+furnace-bench-common = { path = "../common", features = ["load"] }
 axum = "0.8"
 tokio = { version = "1.53", features = ["full"] }
 reqwest = { version = "0.13", default-features = false }
@@ -26,9 +27,11 @@ futures-util = { version = "0.3", default-features = false }
 tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+# Timer resolution and the server's CPU time (the memory probe is in benches/common)
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media", "Win32_System_Threading"] }
 
-# Same settings as furnace's release profile
+# Same settings as furnace's release profile (Cargo.toml) and the other harnesses'
+# (benches/burn, compare, nerve): keep the five identical
 [profile.release]
 opt-level = 3
 lto = "fat"

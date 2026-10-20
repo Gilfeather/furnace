@@ -2,7 +2,8 @@
 
 Serverless platforms stop a service when it gets no traffic and start it again on the next
 request, so the first user waits for the server to start. For a Python inference stack that is
-seconds. Furnace is ready in about 40 ms, which makes scaling to zero practical for models.
+seconds. Furnace is ready about 30 ms after launch and has answered its first inference by
+40 ms, which makes scaling to zero practical for models.
 
 ## Cold start, measured
 

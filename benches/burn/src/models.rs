@@ -13,7 +13,8 @@ use burn::nn::{
 };
 use burn::tensor::{Device, Int, Tensor};
 
-/// A small CNN: `[batch, 1, 28, 28]` -> `[batch, 10]`, as in `examples/serve_burn_model`
+/// A small CNN: `[batch, 1, 28, 28]` -> `[batch, 10]`, a copy of `DigitNet` in
+/// `examples/serve_burn_model/models.rs` (this crate cannot use the example's): change both together
 #[derive(Module, Debug)]
 pub struct DigitNet {
     conv: Conv2d,

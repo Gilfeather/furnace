@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use furnace_bench_common::{free_port, stop, wait_until_healthy};
+pub use furnace_bench_common::{memory, percentile};
 use serde::{Deserialize, Serialize};
 
 pub const CHANNELS: usize = 3;
@@ -17,8 +19,16 @@ pub const INPUT_LEN: usize = CHANNELS * SIDE * SIDE;
 pub const CLASSES: usize = 1000;
 /// ImageNet class 258 ("Samoyed"), the expected top-1 for PyTorch Hub's `dog.jpg`
 pub const EXPECTED_TOP1: usize = 258;
-/// What the furnace rows run: the furnace checkout this harness sits in
-pub const FURNACE_VERSION: &str = "furnace 0.10.0, Burn 0.22";
+
+/// What the furnace rows run: the furnace checkout this harness sits in, and the Burn it
+/// asks for, both read from its Cargo.toml
+pub fn furnace_version() -> String {
+    format!(
+        "furnace {}, Burn {}",
+        furnace_bench_common::furnace_version(),
+        furnace_bench_common::furnace_dependency("burn")
+    )
+}
 
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -151,12 +161,6 @@ impl BatchResult {
     }
 }
 
-/// Nearest-rank percentile of sorted samples
-pub fn percentile(sorted: &[Duration], p: f64) -> Duration {
-    let rank = ((p * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len());
-    sorted[rank - 1]
-}
-
 /// Run `f` `warmup` times untimed, then `iters` times timed
 pub fn time_iters(warmup: usize, iters: usize, mut f: impl FnMut()) -> Vec<Duration> {
     for _ in 0..warmup {
@@ -237,7 +241,7 @@ pub fn bench_in_process<E>(
         })
         .collect();
 
-    let mem = memory::current_process();
+    let mem = memory::of_process(std::process::id());
     Report {
         engine: engine.to_string(),
         version: version.to_string(),
@@ -271,10 +275,7 @@ pub fn bench_http_server(
     let image = preprocess(&args.image);
 
     // A port nobody listens on, so /healthz can only be answered by our own server
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .expect("free port")
-        .port();
+    let port = free_port();
 
     let start = Instant::now();
     let mut child = command(port)
@@ -282,12 +283,11 @@ pub fn bench_http_server(
         .stderr(Stdio::null())
         .spawn()
         .unwrap_or_else(|e| panic!("cannot start {engine}: {e}"));
-    // Kill the server even if a request below panics
+    // Stop the server even if a request below panics
     struct KillOnDrop(std::process::Child);
     impl Drop for KillOnDrop {
         fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
+            stop(&mut self.0);
         }
     }
 
@@ -296,31 +296,9 @@ pub fn bench_http_server(
         .build()
         .into();
     let base = format!("http://127.0.0.1:{port}");
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let health = loop {
-        // Windows retries a refused SYN for ~0.5 s, so probe the port with a short
-        // connect timeout before asking /healthz, or startup is overstated
-        let listening =
-            std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(10)).is_ok();
-        if listening && let Ok(mut resp) = agent.get(format!("{base}/healthz")).call() {
-            break resp.body_mut().read_to_string().unwrap_or_default();
-        }
-        if let Some(status) = child.try_wait().expect("try_wait") {
-            panic!("{engine} exited during startup: {status}");
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(60),
-            "{engine} did not start"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    let load_ms = start.elapsed().as_secs_f64() * 1000.0;
     // A server started through a launcher reports the pid that does the work
-    let pid = serde_json::from_str::<serde_json::Value>(&health)
-        .ok()
-        .and_then(|h| h.get("pid")?.as_u64())
-        .and_then(|p| u32::try_from(p).ok())
-        .unwrap_or_else(|| child.id());
+    let pid = wait_until_healthy(engine, &mut child, port, Duration::from_secs(60));
+    let load_ms = start.elapsed().as_secs_f64() * 1000.0;
     let mut guard = KillOnDrop(child);
 
     // Returns (logits, server-reported inference ms)
@@ -378,7 +356,8 @@ pub fn bench_http_server(
                 .collect();
             let mut result = BatchResult::from_samples(batch, &mut samples);
             server_ms.sort_by(f64::total_cmp);
-            result.server_median_ms = Some(server_ms[server_ms.len() / 2]);
+            // The same p50 as `median_ms`, so the two can be subtracted
+            result.server_median_ms = Some(percentile(&server_ms, 0.5));
             result
         })
         .collect();
@@ -439,78 +418,4 @@ pub fn binary_size_mb(libs: &[&str]) -> f64 {
         }
     }
     bytes as f64 / 1e6
-}
-
-pub mod memory {
-    /// Peak memory of a process, in MB (10^6 bytes)
-    #[derive(Debug, Clone, Copy, Default)]
-    pub struct Memory {
-        pub peak_working_set_mb: f64,
-        pub peak_private_mb: f64,
-    }
-
-    pub fn current_process() -> Memory {
-        of_process(std::process::id())
-    }
-
-    #[cfg(windows)]
-    pub fn of_process(pid: u32) -> Memory {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::ProcessStatus::{
-            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
-        };
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
-        };
-
-        // SAFETY: plain Win32 calls on a handle we open and close here; the counters
-        // struct is fully initialized by GetProcessMemoryInfo on success.
-        unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid);
-            if handle.is_null() {
-                return Memory::default();
-            }
-            let mut counters: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
-            counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
-            let ok = GetProcessMemoryInfo(
-                handle,
-                (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX)
-                    .cast::<PROCESS_MEMORY_COUNTERS>(),
-                counters.cb,
-            );
-            CloseHandle(handle);
-            if ok == 0 {
-                return Memory::default();
-            }
-            Memory {
-                peak_working_set_mb: counters.PeakWorkingSetSize as f64 / 1e6,
-                // Peak commit charge: memory private to this process
-                peak_private_mb: counters.PeakPagefileUsage as f64 / 1e6,
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn of_process(pid: u32) -> Memory {
-        // VmHWM is the peak RSS. Linux has no peak private counter, so report the
-        // current anonymous resident memory measured after the benchmark.
-        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
-        let kb = |key: &str| {
-            status
-                .lines()
-                .find(|l| l.starts_with(key))
-                .and_then(|l| l.split_whitespace().nth(1))
-                .and_then(|v| v.parse::<f64>().ok())
-                .unwrap_or(0.0)
-        };
-        Memory {
-            peak_working_set_mb: kb("VmHWM:") * 1024.0 / 1e6,
-            peak_private_mb: kb("RssAnon:") * 1024.0 / 1e6,
-        }
-    }
-
-    #[cfg(not(any(windows, target_os = "linux")))]
-    pub fn of_process(_pid: u32) -> Memory {
-        Memory::default()
-    }
 }

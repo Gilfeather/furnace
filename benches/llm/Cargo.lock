@@ -2908,6 +2908,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
+name = "furnace-bench-common"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "furnace-candle"
 version = "0.1.0"
 dependencies = [
@@ -2922,6 +2932,7 @@ name = "furnace-llm-bench"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "furnace-bench-common",
  "furnace-candle",
  "furnace-server",
  "futures-util",

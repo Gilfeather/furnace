@@ -352,9 +352,13 @@ docker run --rm -p 3000:3000 ghcr.io/gilfeather/furnace:latest --model-name mnis
 ```
 
 To compile in your own models, build from the [`Dockerfile`](Dockerfile) (distroless, non-root,
-~80 MB with ResNet-18's weights):
+~80 MB with ResNet-18's weights). It compiles every `models/*.onnx` in, and a checkout has none;
+these two are what the release image carries:
 
 ```bash
+mkdir -p models
+curl -fsSL https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx -o models/resnet18.onnx
+curl -fsSL https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx -o models/mnist.onnx
 docker build -t furnace .
 docker run --rm -p 3000:3000 furnace                         # serves resnet18
 docker run --rm -p 3000:3000 furnace --model-name mnist --threads 4

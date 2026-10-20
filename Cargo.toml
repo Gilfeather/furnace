@@ -18,7 +18,10 @@ exclude = [
     ".github/",
     ".kiro/",
     "docs/",
-    "/benches/compare/",
+    # The harnesses (their own workspaces and lockfiles) and the CI summary script;
+    # benches/inference_benchmark.rs stays
+    "/benches/*/",
+    "/benches/ci-summary.sh",
     "/models/",
     # crates.io builds use upstream burn-flex; [patch.crates-io] only applies in this repo
     "/vendor/",
@@ -62,8 +65,8 @@ features = ["grpc", "tls", "image", "llm", "nerve"]
 
 [workspace]
 members = [".", "furnace-candle"]
-# Benchmarks with their own workspaces, lockfiles and targets
-exclude = ["benches/burn", "benches/compare"]
+# Benchmarks with their own workspaces, lockfiles and targets, and the helpers they share
+exclude = ["benches/burn", "benches/common", "benches/compare", "benches/llm", "benches/nerve"]
 
 [lib]
 name = "furnace"

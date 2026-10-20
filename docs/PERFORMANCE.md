@@ -281,3 +281,33 @@ body in process takes 27 µs as binary and 4 ms as JSON. Sending a JPEG
 cargo bench --bench inference_benchmark                              # in-process criterion benches
 cargo run --release --example http_bench -- 3000 json1 json4 bin1 bin4   # against a running server
 ```
+
+## How the harnesses count
+
+The four harnesses (`benches/burn`, `benches/llm`, `benches/nerve` and `benches/compare`) take
+their measuring from one crate, [`benches/common`](../benches/common/src/lib.rs), so a figure
+means the same thing in every table:
+
+- **Percentiles** (p50, p95, p99) are nearest-rank: the smallest sample with at least that
+  fraction of all samples at or below it, `sorted[⌈p·n⌉ − 1]`. Never interpolated, so always a
+  measured value. `benches/compare` already counted this way; `benches/burn`, `llm` and
+  `nerve` took `sorted[round((n − 1)·p)]` up to 0.10.0. Over the thousands of requests of a
+  load run the two land on neighbouring samples; with few samples the new p50 is the lower of
+  the two middle ones (one client streaming 4 times in `benches/llm`: the 2nd of 4, was the
+  3rd). `benches/compare`'s server-reported time per request is now that same p50, so it can
+  be subtracted from the median column (it was the upper middle sample).
+- **Medians** of repeated runs (`--runs N`) and of `benches/burn`'s in-process timings are the
+  middle value, or the mean of the two middle values for an even count. The in-process timings
+  were the upper middle sample up to 0.10.0.
+- **Peak private memory** is Windows' peak commit charge. Linux has no peak private counter, so
+  there it is the anonymous resident memory (`RssAnon`) read after the load; `benches/nerve`'s
+  servers reported their peak resident memory (`VmHWM`, shared pages included) instead before
+  0.10.x.
+- **Ready** is the time from launching a server to its first 2xx `/healthz`, polled every 5 ms
+  with a 5 ms connect first (on Windows a refused connection takes about 0.5 s to report).
+- A server is **stopped** with its whole process tree on Windows (`taskkill /T /F`), and with
+  `SIGTERM` first elsewhere, on which uvicorn stops its workers. `benches/llm` and
+  `benches/compare` killed it without `SIGTERM`, and `benches/compare` left FastAPI's
+  interpreter running on Windows.
+
+The tables above were measured with the earlier definitions.
