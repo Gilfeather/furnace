@@ -240,13 +240,21 @@ window; `ModelNeuron::reflex` is the same model inline on a reflex arc (a small 
 In `/metrics` (`nerve` in the JSON, `furnace_nerve_*` in Prometheus) and `GET /nerve`:
 
 - per neuron: `received`, `fired`, `quiet_by_threshold`, `quiet_by_habituation`,
-  `quiet_by_refractory`, `quiet`; effectors add `acted`, `failed`, `retries`, `dropped_open`,
-  `dropped_rate`, the breaker's state and the latency to the world; brains add generations,
-  commands and the generation latency
+  `quiet_by_refractory`, `quiet` (signals the neuron itself was not interested in, not a total;
+  `reason="not_interested"` in Prometheus); effectors add `acted`, `failed`, `retries`,
+  `dropped_open`, `dropped_rate`, `quiet_refractory`, commands in flight, the breaker's state
+  and the latency to the world; brains add generations, commands and the generation latency
 - per pathway: signals, p50 / p99 / mean / max latency from signal-in to signal-out, how many
   signals it was too slow for, and the current summation window
 - `brain_fraction`: signals that reached a brain over signals received
 - per reflex arc (receptor → effector, never queued): stimulus to effector call, p50 / p99
+
+The JSON has all of it. Prometheus has the fabric's counters and `brain_fraction`, each
+neuron's counters (`kind` and `reason` labels), each pathway's signals (`kind="reflex"` or
+`"deliberative"`), the pathway and arc latencies as `quantile="0.5"` and `"0.99"` gauges in
+seconds with a `_count`, and each effector's counters, `inflight` and `circuit_open`. What a
+brain, a recall neuron or an expectations neuron adds, and an effector's latency, are in the
+JSON only.
 
 ## The demo
 
@@ -433,15 +441,16 @@ consults, and every change of that state has to reach the store:
 ### Metrics of consolidation
 
 On the recall neuron in `GET /nerve` (with the policy, the dependencies' versions and the most
-used engrams) and in `/metrics`: signals, sent to the brain, hits, shadow checks, agreements,
-disagreements, consolidated, dissolved (by failures), inhibited, stale, forgotten, decisions
-refused by the policy, `brain_fraction` and `brain_load` (shadow checks included), the brain
-fraction per window of 1,000 signals, the brain's signal-to-decision p50 and the brain time the
-hits saved at that p50. `Inhibit` counts the tags and versions it applied.
+used engrams) and in the JSON of `/metrics`: signals, sent to the brain, hits, shadow checks,
+agreements, disagreements, consolidated, dissolved (by failures), inhibited, stale, forgotten,
+decisions refused by the policy, `brain_fraction` and `brain_load` (shadow checks included),
+the brain fraction per window of 1,000 signals, the brain's signal-to-decision p50 and the
+brain time the hits saved at that p50. `Inhibit` counts the tags and versions it applied.
 
-Not built yet: keys by similarity (locality-sensitive or perceptual-hash keys), distilling the
-engrams into a small model, and expectations the brain writes into the periphery, of which
-this cache is the simplest kind (an exact match that acts).
+Not built yet: keys by similarity (locality-sensitive or perceptual-hash keys) and distilling
+the engrams into a small model. Expectations the brain writes into the periphery, of which this
+cache is the simplest kind (an exact match that acts), are
+[below](#expectations-the-brain-programs-the-periphery).
 
 ### Measured: log triage
 
@@ -596,10 +605,10 @@ once per silence; the next match arms it again.
 ### Metrics of expectations
 
 On the neuron in `GET /nerve` (the rules with their counters and provenance, those waiting for
-approval, the last retirements) and in `/metrics`: signals, absorbed, acted, unexpected,
-violations by kind, absences, surprises, shadow checks and wrong verdicts, false alarms,
-parameters learned, installed, replaced, retired, expired, refused, the surprise rate and its
-timeline per 1,000 signals.
+approval, the last retirements) and in the JSON of `/metrics`: signals, absorbed, acted,
+unexpected, violations by kind, absences, surprises, shadow checks and wrong verdicts, false
+alarms, parameters learned, installed, replaced, retired, expired, refused, the surprise rate
+and its timeline per 1,000 signals.
 
 ### An LLM that writes expectations
 
