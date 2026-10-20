@@ -131,10 +131,12 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub struct Message {
     /// `system`, `user`, `assistant` or `tool`
     pub role: String,
+    /// The message's text
     pub content: String,
 }
 
 impl Message {
+    /// A message from `role` with `content`
     pub fn new(role: &str, content: &str) -> Self {
         Self {
             role: role.to_string(),
@@ -176,7 +178,9 @@ pub struct SamplingParams {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct GenerateRequest {
+    /// The chat or the text to continue
     pub input: Input,
+    /// How to pick the tokens
     pub params: SamplingParams,
     /// Generation stops before any of these; they are not part of the output
     pub stop: Vec<String>,
@@ -201,11 +205,13 @@ impl GenerateRequest {
         }
     }
 
+    /// The same request with `params` for sampling
     pub fn with_params(mut self, params: SamplingParams) -> Self {
         self.params = params;
         self
     }
 
+    /// The same request, stopping before any of `stop`
     pub fn with_stop(mut self, stop: Vec<String>) -> Self {
         self.stop = stop;
         self
@@ -221,6 +227,7 @@ impl SamplingParams {
         }
     }
 
+    /// The same parameters, generating at most `max_tokens`
     pub fn with_max_tokens(mut self, max_tokens: usize) -> Self {
         self.max_tokens = Some(max_tokens);
         self
@@ -253,14 +260,19 @@ impl FinishReason {
 pub enum Event {
     /// The request left the queue and the engine started on it
     Started {
+        /// The prompt's length in tokens, after the chat template
         prompt_tokens: usize,
     },
     /// The next piece of the output (never empty)
     Text(String),
+    /// Generation ended normally
     Finished {
+        /// Why it ended
         reason: FinishReason,
+        /// Tokens generated, the end-of-sequence token not counted
         completion_tokens: usize,
     },
+    /// Generation failed after `Started`; nothing follows
     Error(EngineError),
 }
 
@@ -271,7 +283,9 @@ pub enum EngineError {
     /// The prompt does not fit the context (400)
     #[error("the prompt is {prompt_tokens} tokens, the model's context is {max_context}")]
     TooLong {
+        /// The prompt's length in tokens
         prompt_tokens: usize,
+        /// The model's context, prompt and output together
         max_context: usize,
     },
     /// The engine is full (503)
@@ -298,14 +312,23 @@ pub trait LlmEngine: Send + Sync + fmt::Debug + 'static {
     /// Tokens of prompt and output together
     fn max_context(&self) -> usize;
 
-    /// Reject before any stream exists: the prompt is too long, or the engine is full. Called
-    /// on a Tokio runtime, and must not block it.
+    /// Reject before any stream exists: the prompt is too long, or the engine is full.
+    ///
+    /// Synchronous, but always called inside a Tokio runtime, and must not block it: an
+    /// implementation may `tokio::spawn` the task that feeds the stream, as both of furnace's do
+    /// ([`Scheduled`] and [`mock::MockEngine`]), so calling it outside a runtime panics. Code
+    /// that calls an engine from a plain thread enters a runtime first
+    /// (`Handle::enter`), as the nerve's LLM brain does.
     fn generate(
         &self,
         request: GenerateRequest,
     ) -> Result<tokio::sync::mpsc::Receiver<Event>, EngineError>;
 
-    /// Model time per step, for engines furnace schedules ([`Scheduled`])
+    /// Model time per step, for engines furnace schedules ([`Scheduled`]).
+    ///
+    /// An extension point for the server's metrics rather than part of serving: an engine that
+    /// keeps its own [`SchedulerStats`] returns them here and they appear under `/metrics` with
+    /// [`Scheduled`]'s; an engine with nothing to report keeps the default, `None`.
     fn scheduler_stats(&self) -> Option<&SchedulerStats> {
         None
     }

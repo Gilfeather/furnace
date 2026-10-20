@@ -15,7 +15,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime};
 
@@ -52,7 +52,8 @@ pub struct TlsConfigs {
     settings: TlsSettings,
     http: RwLock<Arc<rustls::ServerConfig>>,
     grpc: RwLock<Arc<rustls::ServerConfig>>,
-    loaded: RwLock<Option<SystemTime>>,
+    /// The files' newest modification time at the last load or reload attempt
+    loaded: Mutex<Option<SystemTime>>,
 }
 
 impl TlsConfigs {
@@ -64,10 +65,11 @@ impl TlsConfigs {
             settings,
             http: RwLock::new(http),
             grpc: RwLock::new(grpc),
-            loaded: RwLock::new(loaded),
+            loaded: Mutex::new(loaded),
         }))
     }
 
+    /// Whether clients must present a certificate (`--tls-client-ca`)
     pub fn mutual(&self) -> bool {
         self.settings.client_ca.is_some()
     }
@@ -83,12 +85,15 @@ impl TlsConfigs {
     /// Reload if a file changed since the last load; returns whether it did. On error the
     /// previous configuration stays.
     pub fn reload_if_changed(&self) -> Result<bool, String> {
+        // One lock for the check and the update, held through the reload, so two callers
+        // cannot both see the change and load it twice
+        let mut loaded = self.loaded.lock().unwrap_or_else(|e| e.into_inner());
         let changed = newest_change(&self.settings);
-        if changed == *self.loaded.read().unwrap_or_else(|e| e.into_inner()) {
+        if changed == *loaded {
             return Ok(false);
         }
         // Record the attempt either way, so a bad file is reported once, not every interval
-        *self.loaded.write().unwrap_or_else(|e| e.into_inner()) = changed;
+        *loaded = changed;
         let (http, grpc) = build(&self.settings)?;
         *self.http.write().unwrap_or_else(|e| e.into_inner()) = http;
         *self.grpc.write().unwrap_or_else(|e| e.into_inner()) = grpc;
@@ -303,6 +308,7 @@ pub struct TlsListener {
 }
 
 impl TlsListener {
+    /// Accept TLS connections on `listener` with the HTTP protocols, as [`accept`] does
     pub fn new(listener: TcpListener, configs: Arc<TlsConfigs>) -> io::Result<Self> {
         let local = listener.local_addr()?;
         Ok(Self {
@@ -420,7 +426,13 @@ pub(crate) mod tests {
         let tcp = TcpStream::connect(addr).await?;
         let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
         let mut tls = connector.connect(name, tcp).await?;
-        let certificate = tls.get_ref().1.peer_certificates().unwrap()[0].clone();
+        let certificate = tls
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|chain| chain.first())
+            .cloned()
+            .ok_or_else(|| io::Error::other("the server sent no certificate"))?;
         tls.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .await?;
         let mut response = String::new();
@@ -457,8 +469,11 @@ pub(crate) mod tests {
         let configs = TlsConfigs::load(settings("server-p256", true)).unwrap();
         assert!(configs.mutual());
         let addr = serve(configs).await;
-        let (status, _) = get_healthz(addr, &client(Some("client"))).await.unwrap();
-        assert_eq!(status, "HTTP/1.1 200 OK");
+        // One client certificate per key type the provider verifies
+        for certificate in ["client", "client-p384", "client-ed25519"] {
+            let (status, _) = get_healthz(addr, &client(Some(certificate))).await.unwrap();
+            assert_eq!(status, "HTTP/1.1 200 OK", "{certificate}");
+        }
         // In TLS 1.3 the server checks the client's certificate after the client has finished
         // its side of the handshake, so the refusal shows when the request goes unanswered
         for certificate in [None, Some("stranger")] {
@@ -526,7 +541,15 @@ pub(crate) mod tests {
         assert!(load("server-p256.key").is_ok());
         assert!(load("server-p256-sec1.key").is_ok());
         let error = build(&settings("server-rsa", false)).err().unwrap();
+        assert!(error.contains("RSA keys are not supported"), "{error}");
         assert!(error.contains("ECDSA"), "{error}");
+        let error = load("server-p521.key").err().unwrap();
+        // P-521's object identifier
+        assert!(
+            error.contains("unsupported EC key curve 1.3.132.0.35"),
+            "{error}"
+        );
+
         let missing = load("nope.key").err().unwrap();
         assert!(missing.contains("nope.key"), "{missing}");
     }

@@ -187,7 +187,7 @@ each token the client records its lateness against the schedule. The time to fir
 - **FastAPI**: FastAPI and uvicorn (one worker), with a `StreamingResponse` paced with
   `asyncio.sleep`, built like vLLM's API server.
 
-AMD Ryzen 9 7940HS (16 threads), Windows 11, furnace 0.9.0 plus the LLM layer, Python 3.14,
+AMD Ryzen 9 7940HS (16 threads), Windows 11, furnace 0.10.0, Python 3.14,
 FastAPI 0.143, uvicorn 0.54. Every server process asks for 1 ms timers (`timeBeginPeriod`),
 otherwise Windows would round every interval to 15.6 ms.
 

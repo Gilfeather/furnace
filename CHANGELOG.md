@@ -33,6 +33,9 @@ The server runs on the nervous system: every model is a neuron, every route a re
   `Process` writes stdin within its timeout; `FileAppend` writes on a thread of its own.
 - `Respond` with nobody waiting any more is not a failure, so late answers no longer open its
   breaker.
+- TLS: a PKCS#8 private key the server does not take is named by its algorithm, read from the
+  key ("RSA keys are not supported", "unsupported EC key curve 1.3.132.0.35"), instead of
+  "unsupported PKCS#8 key (RSA?)".
 
 ### Fixed
 - A batch size a fixed-batch graph cannot run is a `400` on `/predict` too (was `500` with a

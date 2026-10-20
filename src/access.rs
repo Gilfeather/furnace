@@ -37,6 +37,8 @@ pub struct Access {
 }
 
 impl Access {
+    /// Admit requests presenting one of `api_keys` (any request when empty), each client
+    /// within `rate_limit` if one is set
     pub fn new(api_keys: &[String], rate_limit: Option<RateLimit>) -> Self {
         Self {
             api_keys: api_keys.iter().map(|k| k.as_bytes().to_vec()).collect(),

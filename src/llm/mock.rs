@@ -81,6 +81,7 @@ pub fn byte_pipeline() -> TextPipeline {
 pub struct Live(Arc<AtomicUsize>);
 
 impl Live {
+    /// The count now
     pub fn get(&self) -> usize {
         self.0.load(Ordering::Acquire)
     }
@@ -151,11 +152,13 @@ impl MockStepModel {
         self
     }
 
+    /// The context it reports, prompt and output together (4096 by default)
     pub fn max_context(mut self, tokens: usize) -> Self {
         self.max_context = tokens;
         self
     }
 
+    /// The sequences it holds at once (16 by default)
     pub fn max_sequences(mut self, sequences: usize) -> Self {
         self.max_sequences = sequences;
         self

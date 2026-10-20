@@ -36,7 +36,12 @@ leaf server-ed25519 "-algorithm ED25519" server.ext ca
 leaf server-rsa "-algorithm RSA -pkeyopt rsa_keygen_bits:2048" server.ext ca
 # The P-256 key again in SEC1 ("BEGIN EC PRIVATE KEY") form
 openssl ec -in server-p256.key -out server-p256-sec1.key
+# A key on a curve the server does not take (P-521), for the error message
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-521 -out server-p521.key
+# Client certificates for mutual TLS, one per key type the server verifies ("client" is P-256)
 leaf client "-algorithm EC -pkeyopt ec_paramgen_curve:P-256" client.ext ca
+leaf client-p384 "-algorithm EC -pkeyopt ec_paramgen_curve:P-384" client.ext ca
+leaf client-ed25519 "-algorithm ED25519" client.ext ca
 leaf stranger "-algorithm EC -pkeyopt ec_paramgen_curve:P-256" client.ext other-ca
 
 rm -f server.ext client.ext ca.srl other-ca.srl ca.key other-ca.key

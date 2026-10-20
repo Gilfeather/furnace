@@ -14,9 +14,12 @@
 use std::fmt;
 use std::sync::Arc;
 
-use aes_gcm::aead::{AeadCore, AeadInOut, KeyInit};
+use aes_gcm::aead::{AeadCore, AeadInOut, KeyInit, KeySizeUser};
 use ed25519_dalek::pkcs8::DecodePrivateKey as _;
+use ed25519_dalek::pkcs8::{ObjectIdentifier, PrivateKeyInfoRef};
+// zeroize through the curve crates' re-export, which is the version they use themselves
 use p256::ecdsa::signature::hazmat::PrehashVerifier;
+use p256::elliptic_curve::zeroize::Zeroizing;
 use rustls::crypto::cipher::{
     AeadKey, InboundOpaqueMessage, InboundPlainMessage, Iv, MessageDecrypter, MessageEncrypter,
     Nonce, OutboundOpaqueMessage, OutboundPlainMessage, PrefixedPayload, Tls13AeadAlgorithm,
@@ -37,7 +40,7 @@ use rustls::{
 use sha2::Digest as _;
 
 /// The provider: pass it to `rustls::ServerConfig::builder_with_provider`
-pub fn provider() -> CryptoProvider {
+pub(super) fn provider() -> CryptoProvider {
     CryptoProvider {
         cipher_suites: vec![
             TLS13_AES_128_GCM_SHA256,
@@ -63,9 +66,10 @@ impl SecureRandom for Random {
     }
 }
 
-fn random<const N: usize>() -> Result<[u8; N], Error> {
-    let mut bytes = [0; N];
-    getrandom::fill(&mut bytes).map_err(|_| Error::FailedToGetRandomBytes)?;
+/// Fresh secret bytes, wiped when dropped
+fn random<const N: usize>() -> Result<Zeroizing<[u8; N]>, Error> {
+    let mut bytes = Zeroizing::new([0; N]);
+    getrandom::fill(&mut *bytes).map_err(|_| Error::FailedToGetRandomBytes)?;
     Ok(bytes)
 }
 
@@ -170,12 +174,13 @@ impl<M: hmac::Mac + Clone + Send + Sync> rustls_hmac::Key for HmacKey<M> {
 // ---------------------------------------------------------------------------------------------
 // Cipher suites (TLS 1.3)
 
-pub static TLS13_AES_128_GCM_SHA256: SupportedCipherSuite =
+/// AES-128-GCM with SHA-256
+pub(super) static TLS13_AES_128_GCM_SHA256: SupportedCipherSuite =
     SupportedCipherSuite::Tls13(&Tls13CipherSuite {
         common: CipherSuiteCommon {
             suite: CipherSuite::TLS13_AES_128_GCM_SHA256,
             hash_provider: &SHA256,
-            // RFC 8446 section 5.5 and the AEAD limits draft
+            // RFC 8446 section 5.5: 2^24.5 full-size records per key for AES-GCM, rounded down
             confidentiality_limit: 1 << 24,
         },
         hkdf_provider: &tls13::HkdfUsingHmac(&HMAC_SHA256),
@@ -183,7 +188,8 @@ pub static TLS13_AES_128_GCM_SHA256: SupportedCipherSuite =
         quic: None,
     });
 
-pub static TLS13_AES_256_GCM_SHA384: SupportedCipherSuite =
+/// AES-256-GCM with SHA-384
+pub(super) static TLS13_AES_256_GCM_SHA384: SupportedCipherSuite =
     SupportedCipherSuite::Tls13(&Tls13CipherSuite {
         common: CipherSuiteCommon {
             suite: CipherSuite::TLS13_AES_256_GCM_SHA384,
@@ -195,7 +201,8 @@ pub static TLS13_AES_256_GCM_SHA384: SupportedCipherSuite =
         quic: None,
     });
 
-pub static TLS13_CHACHA20_POLY1305_SHA256: SupportedCipherSuite =
+/// ChaCha20-Poly1305 with SHA-256
+pub(super) static TLS13_CHACHA20_POLY1305_SHA256: SupportedCipherSuite =
     SupportedCipherSuite::Tls13(&Tls13CipherSuite {
         common: CipherSuiteCommon {
             suite: CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
@@ -210,28 +217,27 @@ pub static TLS13_CHACHA20_POLY1305_SHA256: SupportedCipherSuite =
 /// A TLS 1.3 AEAD: 12-byte nonces and 16-byte tags, as all three suites have
 struct Aead<C>(std::marker::PhantomData<fn() -> C>);
 
-/// What the AEAD must provide; the nonce and tag sizes are checked where it is used
+/// What the AEAD must provide; the key, nonce and tag sizes are checked below, at compile time
 trait Cipher: AeadInOut + KeyInit + Send + Sync + 'static {
-    const KEY_LEN: usize;
+    /// The key length rustls is told, so the keys it derives always fit `new_from_slice`
+    const KEY_LEN: usize =
+        <<Self as KeySizeUser>::KeySize as aes_gcm::aead::array::typenum::Unsigned>::USIZE;
     fn traffic_secrets(key: AeadKey, iv: Iv) -> ConnectionTrafficSecrets;
 }
 
 impl Cipher for aes_gcm::Aes128Gcm {
-    const KEY_LEN: usize = 16;
     fn traffic_secrets(key: AeadKey, iv: Iv) -> ConnectionTrafficSecrets {
         ConnectionTrafficSecrets::Aes128Gcm { key, iv }
     }
 }
 
 impl Cipher for aes_gcm::Aes256Gcm {
-    const KEY_LEN: usize = 32;
     fn traffic_secrets(key: AeadKey, iv: Iv) -> ConnectionTrafficSecrets {
         ConnectionTrafficSecrets::Aes256Gcm { key, iv }
     }
 }
 
 impl Cipher for chacha20poly1305::ChaCha20Poly1305 {
-    const KEY_LEN: usize = 32;
     fn traffic_secrets(key: AeadKey, iv: Iv) -> ConnectionTrafficSecrets {
         ConnectionTrafficSecrets::Chacha20Poly1305 { key, iv }
     }
@@ -335,19 +341,22 @@ impl<C: Cipher> MessageDecrypter for Crypter<C> {
     }
 }
 
-// The sizes the code above relies on, for every suite
+// The sizes the code above relies on, for every suite: the nonce and tag, and the key that
+// RFC 8446 gives the suite (rustls derives keys of `KEY_LEN`, so the `expect`s on
+// `new_from_slice` cannot fail)
 const _: () = {
     use aes_gcm::aead::array::typenum::Unsigned;
     macro_rules! check {
-        ($($cipher:ty),*) => {$(
+        ($($cipher:ty => $key:expr),*) => {$(
+            assert!(<$cipher as Cipher>::KEY_LEN == $key);
             assert!(<<$cipher as AeadCore>::NonceSize as Unsigned>::USIZE == 12);
             assert!(<<$cipher as AeadCore>::TagSize as Unsigned>::USIZE == TAG_LEN);
         )*};
     }
     check!(
-        aes_gcm::Aes128Gcm,
-        aes_gcm::Aes256Gcm,
-        chacha20poly1305::ChaCha20Poly1305
+        aes_gcm::Aes128Gcm => 16,
+        aes_gcm::Aes256Gcm => 32,
+        chacha20poly1305::ChaCha20Poly1305 => 32
     );
 };
 
@@ -360,7 +369,7 @@ static X25519: X25519Group = X25519Group;
 
 impl SupportedKxGroup for X25519Group {
     fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, Error> {
-        let secret = x25519_dalek::StaticSecret::from(random::<32>()?);
+        let secret = x25519_dalek::StaticSecret::from(*random::<32>()?);
         let public = x25519_dalek::PublicKey::from(&secret);
         Ok(Box::new(X25519Exchange { secret, public }))
     }
@@ -407,7 +416,7 @@ impl SupportedKxGroup for Secp256r1Group {
     fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, Error> {
         // A random scalar; out-of-range values (chance below 2^-32) are drawn again
         let secret = loop {
-            if let Ok(secret) = p256::SecretKey::from_slice(&random::<32>()?) {
+            if let Ok(secret) = p256::SecretKey::from_slice(random::<32>()?.as_slice()) {
                 break secret;
             }
         };
@@ -454,7 +463,7 @@ static SECP384R1: Secp384r1Group = Secp384r1Group;
 impl SupportedKxGroup for Secp384r1Group {
     fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, Error> {
         let secret = loop {
-            if let Ok(secret) = p384::SecretKey::from_slice(&random::<48>()?) {
+            if let Ok(secret) = p384::SecretKey::from_slice(random::<48>()?.as_slice()) {
                 break secret;
             }
         };
@@ -518,7 +527,7 @@ impl KeyProvider for Keys {
                 } else if let Ok(key) = ed25519_dalek::SigningKey::from_pkcs8_der(der) {
                     Arc::new(Ed25519Key(key))
                 } else {
-                    return Err(unsupported("unsupported PKCS#8 key (RSA?)"));
+                    return Err(unsupported(&unsupported_pkcs8(der)));
                 }
             }
             PrivateKeyDer::Sec1(der) => {
@@ -535,6 +544,26 @@ impl KeyProvider for Keys {
             _ => return Err(unsupported("unsupported key format")),
         };
         Ok(key)
+    }
+}
+
+/// What is wrong with a PKCS#8 key none of the parsers took: its algorithm, from the key itself
+fn unsupported_pkcs8(der: &[u8]) -> String {
+    const RSA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
+    const EC: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+    let Ok(info) = PrivateKeyInfoRef::try_from(der) else {
+        return "not a valid PKCS#8 key".to_string();
+    };
+    let algorithm = info.algorithm;
+    if algorithm.oid == RSA {
+        "RSA keys are not supported".to_string()
+    } else if algorithm.oid == EC {
+        match algorithm.parameters_oid() {
+            Ok(curve) => format!("unsupported EC key curve {curve}"),
+            Err(_) => "an EC key without a named curve".to_string(),
+        }
+    } else {
+        format!("unsupported PKCS#8 key algorithm {}", algorithm.oid)
     }
 }
 
@@ -644,7 +673,7 @@ impl Signer for Ed25519Key {
 #[derive(Debug)]
 struct EcdsaVerify {
     curve: Curve,
-    hash: hash::HashAlgorithm,
+    hash: Prehash,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -653,21 +682,28 @@ enum Curve {
     P384,
 }
 
+/// The hashes ECDSA signatures are verified with; two, so every match on them is exhaustive
+#[derive(Debug, Clone, Copy)]
+enum Prehash {
+    Sha256,
+    Sha384,
+}
+
 static ECDSA_P256_SHA256: EcdsaVerify = EcdsaVerify {
     curve: Curve::P256,
-    hash: hash::HashAlgorithm::SHA256,
+    hash: Prehash::Sha256,
 };
 static ECDSA_P256_SHA384: EcdsaVerify = EcdsaVerify {
     curve: Curve::P256,
-    hash: hash::HashAlgorithm::SHA384,
+    hash: Prehash::Sha384,
 };
 static ECDSA_P384_SHA256: EcdsaVerify = EcdsaVerify {
     curve: Curve::P384,
-    hash: hash::HashAlgorithm::SHA256,
+    hash: Prehash::Sha256,
 };
 static ECDSA_P384_SHA384: EcdsaVerify = EcdsaVerify {
     curve: Curve::P384,
-    hash: hash::HashAlgorithm::SHA384,
+    hash: Prehash::Sha384,
 };
 
 impl SignatureVerificationAlgorithm for EcdsaVerify {
@@ -678,9 +714,8 @@ impl SignatureVerificationAlgorithm for EcdsaVerify {
         signature: &[u8],
     ) -> Result<(), InvalidSignature> {
         let digest = match self.hash {
-            hash::HashAlgorithm::SHA256 => sha2::Sha256::digest(message).to_vec(),
-            hash::HashAlgorithm::SHA384 => sha2::Sha384::digest(message).to_vec(),
-            _ => return Err(InvalidSignature),
+            Prehash::Sha256 => sha2::Sha256::digest(message).to_vec(),
+            Prehash::Sha384 => sha2::Sha384::digest(message).to_vec(),
         };
         match self.curve {
             Curve::P256 => {
@@ -711,8 +746,8 @@ impl SignatureVerificationAlgorithm for EcdsaVerify {
 
     fn signature_alg_id(&self) -> AlgorithmIdentifier {
         match self.hash {
-            hash::HashAlgorithm::SHA384 => alg_id::ECDSA_SHA384,
-            _ => alg_id::ECDSA_SHA256,
+            Prehash::Sha256 => alg_id::ECDSA_SHA256,
+            Prehash::Sha384 => alg_id::ECDSA_SHA384,
         }
     }
 }

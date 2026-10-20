@@ -14,8 +14,9 @@ const CHAT_TEMPLATE: &str = "chat";
 /// A tokenizer with what it takes to turn requests into prompt tokens and tokens back into text
 pub struct TextPipeline {
     tokenizer: Tokenizer,
-    /// The model's chat template, as Hugging Face's `chat_template` (Jinja)
-    templates: Option<Environment<'static>>,
+    /// The model's chat template, as Hugging Face's `chat_template` (Jinja), compiled into an
+    /// environment that holds it alone
+    chat_template: Option<Environment<'static>>,
     bos_token: Option<String>,
     eos_token: Option<String>,
     /// Tokens that end generation
@@ -26,7 +27,7 @@ impl fmt::Debug for TextPipeline {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TextPipeline")
             .field("vocab_size", &self.tokenizer.get_vocab_size(true))
-            .field("chat_template", &self.templates.is_some())
+            .field("chat_template", &self.chat_template.is_some())
             .field("eos_ids", &self.eos_ids)
             .finish()
     }
@@ -38,7 +39,7 @@ impl TextPipeline {
     pub fn new(tokenizer: Tokenizer) -> Self {
         Self {
             tokenizer,
-            templates: None,
+            chat_template: None,
             bos_token: None,
             eos_token: None,
             eos_ids: Vec::new(),
@@ -117,10 +118,12 @@ impl TextPipeline {
                 })
         });
         env.add_template_owned(CHAT_TEMPLATE, template.to_string())?;
-        self.templates = Some(env);
+        self.chat_template = Some(env);
         Ok(self)
     }
 
+    /// The beginning-of-sequence token a chat template writes as `bos_token`. It only reaches
+    /// the template: raw text gets the tokenizer's own (see [`encode`](Self::encode)).
     pub fn with_bos_token(mut self, token: &str) -> Self {
         self.bos_token = Some(token.to_string());
         self
@@ -146,21 +149,24 @@ impl TextPipeline {
         self
     }
 
+    /// The tokenizer, for detokenizing and for the vocabulary size
     pub fn tokenizer(&self) -> &Tokenizer {
         &self.tokenizer
     }
 
+    /// The tokens that end generation, in the order they were added
     pub fn eos_ids(&self) -> &[u32] {
         &self.eos_ids
     }
 
+    /// Whether chat requests can be served; without a template only raw text can
     pub fn has_chat_template(&self) -> bool {
-        self.templates.is_some()
+        self.chat_template.is_some()
     }
 
     /// The prompt text for a chat, ending where the assistant's answer begins
     pub fn apply_chat_template(&self, messages: &[Message]) -> Result<String, EngineError> {
-        let Some(env) = &self.templates else {
+        let Some(env) = &self.chat_template else {
             return Err(EngineError::Invalid(
                 "this model has no chat template; use /v1/completions".to_string(),
             ));
@@ -185,8 +191,8 @@ impl TextPipeline {
             })
     }
 
-    /// The prompt tokens of a request. A chat's template writes its own special tokens; raw
-    /// text gets the tokenizer's (a BOS token, for many models).
+    /// The prompt tokens of a request: a chat through the chat template, raw text as it is.
+    /// See [`encode`](Self::encode) for the special tokens.
     pub fn encode_input(&self, input: &Input) -> Result<Vec<u32>, EngineError> {
         let (text, add_special_tokens) = match input {
             Input::Chat(messages) => (self.apply_chat_template(messages)?, false),
@@ -195,6 +201,12 @@ impl TextPipeline {
         self.encode(&text, add_special_tokens)
     }
 
+    /// The tokens of `text`.
+    ///
+    /// `add_special_tokens` runs the tokenizer's post-processor, which adds the special tokens
+    /// the model was trained to see around a text: a BOS token, for many models. A chat's
+    /// template writes its own (`bos_token` and the role markers), so a rendered chat is encoded
+    /// without them, or the prompt would start with two BOS tokens; raw text is encoded with them.
     pub fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>, EngineError> {
         self.tokenizer
             .encode_fast(text, add_special_tokens)
