@@ -1,10 +1,10 @@
-// Loading Burnpack (`.bpk`) weight files.
-//
-// The file is memory-mapped read-only and its pages are handed to Burn as shared bytes. The
-// CPU backend (burn-flex) keeps tensor data in that buffer instead of copying it, so the
-// weights are backed by the page cache and do not count toward the process's private memory.
-// If mapping fails (for example on a filesystem without mmap support), the file is read into
-// memory instead.
+//! Loading Burnpack (`.bpk`) weight files.
+//!
+//! The file is memory-mapped read-only and its pages are handed to Burn as shared bytes. The
+//! CPU backend (burn-flex) keeps tensor data in that buffer instead of copying it, so the
+//! weights are backed by the page cache and do not count toward the process's private memory.
+//! If mapping fails (for example on a filesystem without mmap support), the file is read into
+//! memory instead.
 
 use std::fs::File;
 use std::path::Path;
@@ -19,7 +19,13 @@ use crate::error::{ModelError, Result};
 /// Load Burnpack weights from `path` into `model`, reporting errors instead of panicking
 /// (release builds use `panic = "abort"`).
 pub fn load_burnpack<M: ModuleSnapshot>(model: &mut M, path: &Path) -> Result<()> {
-    let mut store = match map_file(path) {
+    let failed = |e: Box<dyn std::error::Error + Send + Sync>| ModelError::LoadFailed {
+        path: path.to_path_buf(),
+        source: e,
+    };
+    // Opened here, so a missing or unreadable file is reported as such, not as a failed mapping
+    let file = File::open(path).map_err(|e| failed(Box::new(e)))?;
+    let mut store = match map_file(&file) {
         Ok(bytes) => BurnpackStore::from_bytes(Some(bytes)),
         Err(e) => {
             warn!(
@@ -31,16 +37,12 @@ pub fn load_burnpack<M: ModuleSnapshot>(model: &mut M, path: &Path) -> Result<()
     };
     model
         .load_from(&mut store)
-        .map_err(|e| ModelError::LoadFailed {
-            path: path.to_path_buf(),
-            source: Box::new(e),
-        })?;
+        .map_err(|e| failed(Box::new(e)))?;
     Ok(())
 }
 
-/// Map `path` read-only and wrap the mapping as shared, zero-copy tensor bytes.
-fn map_file(path: &Path) -> std::io::Result<Bytes> {
-    let file = File::open(path)?;
+/// Map `file` read-only and wrap the mapping as shared, zero-copy tensor bytes.
+fn map_file(file: &File) -> std::io::Result<Bytes> {
     // SAFETY: `Mmap::map` is unsafe because the mapped memory changes if another process
     // writes to the file, which breaks the immutability `&[u8]` promises, and on Unix,
     // truncating it makes later reads fault with SIGBUS. Weight files are read-only deployment
@@ -49,7 +51,7 @@ fn map_file(path: &Path) -> std::io::Result<Bytes> {
     // mapping intact. Windows also refuses to truncate or delete a file while it is mapped.
     // The Burnpack reader checks every tensor's offsets against the mapped length before
     // creating views, so a malformed file is reported as an error, not read out of bounds.
-    let mmap = unsafe { Mmap::map(&file)? };
+    let mmap = unsafe { Mmap::map(file)? };
     // The mapping owns its pages and outlives `file`; `Bytes::from_owner` keeps it alive for
     // as long as any tensor references it.
     let shared = bytes::Bytes::from_owner(mmap);
@@ -90,6 +92,14 @@ mod tests {
         let mut model = linear();
         let err = load_burnpack(&mut model, Path::new("does-not-exist.bpk")).unwrap_err();
         assert!(err.to_string().contains("does-not-exist.bpk"), "{err}");
+        // Reported as the failed open, before any attempt to map or read it
+        let crate::error::FurnaceError::Model(ModelError::LoadFailed { source, .. }) = err else {
+            panic!("{err:?}");
+        };
+        assert!(
+            source.downcast_ref::<std::io::Error>().is_some(),
+            "{source:?}"
+        );
     }
 
     #[test]

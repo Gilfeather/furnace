@@ -1,23 +1,38 @@
-use burn::tensor::{Device, Tensor, TensorData};
+//! Models as the server runs them.
+//!
+//! [`BurnModel`] is the one trait every model implements, however it was defined
+//! ([`Model::from_fn`], [`Model::custom`], a built-in ONNX model). [`Model`] wraps one with its
+//! metadata and statistics and runs requests through a single pipeline: check each request's
+//! tensors against the model's inputs, join the valid ones along the batch dimension, run them
+//! (in chunks of a fixed batch size if the graph has one), check the outputs and split them
+//! back. The flat `Vec<f32>` methods (`predict*`) are thin adapters over that pipeline.
+
+use burn::tensor::Tensor;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::backend::BackendKind;
 use crate::burn_model::{BurnModelContainer, create_sample_model};
-use crate::error::{ModelError, Result};
+use crate::error::{FurnaceError, ModelError, Result};
 use crate::models::{BuiltInModel, resolve_weights};
-use crate::tensor::{DataType, HostTensor, IoSpec, TensorInfo, Values};
-use crate::types::TensorSpec;
+use crate::tensor::{DataType, HostTensor, IoSpec, TensorInfo, TensorSpec, Values};
+
+mod kinds;
+
+use kinds::FnModel;
+pub use kinds::{DummyModel, DummyTensorsModel, MlpModel};
 
 /// Hard upper bound on the number of items in one inference batch
 pub const MAX_BATCH_SIZE: usize = 1000;
 
+/// What `GET /model/info` reports about a model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
+    /// The name clients use: `/v2/models/{name}`, `/models/{name}/predict`
     pub name: String,
     pub version: String,
     /// The first input. For a model with several, see `inputs`
@@ -26,22 +41,39 @@ pub struct ModelInfo {
     pub output_spec: TensorSpec,
     /// Every input, with the names `/v2/models/{model}/infer` takes
     pub inputs: Vec<TensorInfo>,
+    /// Every output, in the order the model returns them
     pub outputs: Vec<TensorInfo>,
+    /// How the model was defined: `burn`, `onnx`, `mlp`, ...
     pub model_type: String,
+    /// The backend it runs on, e.g. `cpu`
     pub backend: String,
+    /// When it was loaded, RFC 3339
     pub created_at: String,
+    /// Size of its weight file; 0 when there is none
     pub model_size_bytes: u64,
 }
 
+/// A model's request counters, as `/metrics` reports them.
+///
+/// Counts are per request; timings are per forward pass, so requests batched together each
+/// record the time of the pass they shared.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelStats {
+    /// Requests answered, successfully or not
     pub inference_count: u64,
+    /// Sum of the forward-pass times recorded for successful requests
     pub total_inference_time_ms: f64,
+    /// When the last successful request finished
     pub last_inference_time: Option<DateTime<Utc>>,
+    /// `total_inference_time_ms / success_count`
     pub average_inference_time_ms: f64,
+    /// Requests that failed, whether their inputs were invalid or the model failed
     pub error_count: u64,
+    /// Requests that got their outputs
     pub success_count: u64,
+    /// Fastest forward pass a successful request was part of
     pub min_inference_time_ms: Option<f64>,
+    /// Slowest forward pass a successful request was part of
     pub max_inference_time_ms: Option<f64>,
     /// Forward passes run. Below `success_count` when requests were batched together
     pub batch_count: u64,
@@ -65,7 +97,8 @@ impl ModelStats {
         }
     }
 
-    fn record_success(&mut self, elapsed_ms: f64) {
+    /// `now` is read before the lock is taken, so the clock is not read while holding it
+    fn record_success(&mut self, elapsed_ms: f64, now: DateTime<Utc>) {
         self.inference_count += 1;
         self.success_count += 1;
         self.total_inference_time_ms += elapsed_ms;
@@ -78,7 +111,7 @@ impl ModelStats {
             self.max_inference_time_ms
                 .map_or(elapsed_ms, |m| m.max(elapsed_ms)),
         );
-        self.last_inference_time = Some(Utc::now());
+        self.last_inference_time = Some(now);
     }
 
     fn record_error(&mut self) {
@@ -95,7 +128,9 @@ impl ModelStats {
 /// One request's input for [`Model::predict_many`]: `batch_size` items back to back
 #[derive(Debug)]
 pub struct FlatInput {
+    /// The items' values, row-major, `batch_size * input size` of them
     pub data: Vec<f32>,
+    /// Items in `data`
     pub batch_size: usize,
 }
 
@@ -151,280 +186,12 @@ pub trait BurnModel: Send + Sync + std::fmt::Debug {
     }
 }
 
-/// [`Model::from_fn`]: a forward function from one float tensor to one
-struct FnModel<F, const DI: usize, const DO: usize> {
-    name: String,
-    backend: BackendKind,
-    device: Device,
-    input: IoSpec,
-    output: IoSpec,
-    forward: F,
-}
-
-impl<F, const DI: usize, const DO: usize> std::fmt::Debug for FnModel<F, DI, DO> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FnModel")
-            .field("name", &self.name)
-            .field("backend", &self.backend)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<F, const DI: usize, const DO: usize> BurnModel for FnModel<F, DI, DO>
-where
-    F: Fn(Tensor<DI>) -> Tensor<DO> + Send + Sync,
-{
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn backend(&self) -> BackendKind {
-        self.backend
-    }
-
-    fn inputs(&self) -> Vec<IoSpec> {
-        vec![self.input.clone()]
-    }
-
-    fn outputs(&self) -> Vec<IoSpec> {
-        vec![self.output.clone()]
-    }
-
-    fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
-        let input = inputs
-            .into_iter()
-            .next()
-            .ok_or_else(|| ModelError::InvalidInput("expected 1 input".to_string()))?;
-        let output = (self.forward)(input.into_float::<DI>(&self.device)?);
-        Ok(vec![HostTensor::from_float(output)?])
-    }
-}
-
-/// One `f32` tensor in, one out, for the models below
-fn single_f32_run(
-    inputs: Vec<HostTensor>,
-    device: &Device,
-    forward: impl FnOnce(Tensor<2>) -> Result<Tensor<2>>,
-    output_shape: &[usize],
-) -> Result<Vec<HostTensor>> {
-    let input = inputs
-        .into_iter()
-        .next()
-        .ok_or_else(|| ModelError::InvalidInput("expected 1 input".to_string()))?;
-    let batch = input.batch();
-    let per_item: usize = input.shape[1..].iter().product();
-    let Values::F32(values) = input.values else {
-        return Err(ModelError::InvalidDataType("expected FP32".to_string()).into());
-    };
-    let output = forward(Tensor::from_data(
-        TensorData::new(values, [batch, per_item]),
-        device,
-    ))?;
-    let mut shape = vec![batch];
-    shape.extend_from_slice(output_shape);
-    Ok(vec![HostTensor {
-        shape,
-        values: HostTensor::from_float(output)?.values,
-    }])
-}
-
-/// File-based MLP model (`.bpk` weights + `.json` metadata)
-#[derive(Debug)]
-pub struct MlpModel {
-    container: BurnModelContainer,
-    input_shape: Vec<usize>,
-    output_shape: Vec<usize>,
-}
-
-impl MlpModel {
-    pub fn new(container: BurnModelContainer) -> Self {
-        let input_shape = container.input_shape();
-        let output_shape = container.output_shape();
-        Self {
-            container,
-            input_shape,
-            output_shape,
-        }
-    }
-}
-
-impl BurnModel for MlpModel {
-    fn name(&self) -> &str {
-        &self.container.metadata.name
-    }
-
-    fn backend(&self) -> BackendKind {
-        self.container.backend
-    }
-
-    fn inputs(&self) -> Vec<IoSpec> {
-        vec![IoSpec::fp32("input", &self.input_shape)]
-    }
-
-    fn outputs(&self) -> Vec<IoSpec> {
-        vec![IoSpec::fp32("output", &self.output_shape)]
-    }
-
-    fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
-        single_f32_run(
-            inputs,
-            self.container.device(),
-            |x| Ok(self.container.predict(x)),
-            &self.output_shape,
-        )
-    }
-}
-
-/// Constant-output model for tests and benchmarking server overhead.
+/// A loaded model plus its metadata and runtime statistics: what the server serves.
 ///
-/// Never used as a silent fallback: if a real model fails to load, loading fails.
-#[derive(Debug)]
-pub struct DummyModel {
-    name: String,
-    input_shape: Vec<usize>,
-    output_shape: Vec<usize>,
-    device: Device,
-}
-
-impl DummyModel {
-    pub fn new(name: String, input_shape: Vec<usize>, output_shape: Vec<usize>) -> Self {
-        Self {
-            name,
-            input_shape,
-            output_shape,
-            device: BackendKind::Cpu.device(),
-        }
-    }
-}
-
-impl BurnModel for DummyModel {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn backend(&self) -> BackendKind {
-        BackendKind::Cpu
-    }
-
-    fn inputs(&self) -> Vec<IoSpec> {
-        vec![IoSpec::fp32("input", &self.input_shape)]
-    }
-
-    fn outputs(&self) -> Vec<IoSpec> {
-        vec![IoSpec::fp32("output", &self.output_shape)]
-    }
-
-    fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
-        let output_size = self.output_shape.iter().product::<usize>();
-        single_f32_run(
-            inputs,
-            &self.device,
-            |input| {
-                let [batch_size, _] = input.dims();
-                Ok(Tensor::from_data(
-                    TensorData::new(
-                        vec![0.5f32; batch_size * output_size],
-                        [batch_size, output_size],
-                    ),
-                    &self.device,
-                ))
-            },
-            &self.output_shape,
-        )
-    }
-}
-
-/// A model of named tensors for tests: `ids` (INT64, 4 per item) and `scale` (FP32, one per
-/// item) in; `scores` (FP32, `ids * scale`) and `count` (INT64, the sum of `ids`) out. With a
-/// fixed batch it refuses any other batch size, like a graph exported that way.
-#[derive(Debug)]
-pub struct DummyTensorsModel {
-    fixed_batch: Option<usize>,
-    runs: std::sync::atomic::AtomicUsize,
-}
-
-impl DummyTensorsModel {
-    pub fn new(fixed_batch: Option<usize>) -> Self {
-        Self {
-            fixed_batch,
-            runs: std::sync::atomic::AtomicUsize::new(0),
-        }
-    }
-
-    /// Forward passes so far
-    pub fn runs(&self) -> usize {
-        self.runs.load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
-
-impl BurnModel for DummyTensorsModel {
-    fn name(&self) -> &str {
-        "tensors"
-    }
-
-    fn backend(&self) -> BackendKind {
-        BackendKind::Cpu
-    }
-
-    fn inputs(&self) -> Vec<IoSpec> {
-        vec![
-            IoSpec {
-                name: "ids".to_string(),
-                dtype: DataType::Int64,
-                shape: vec![Some(4)],
-            },
-            IoSpec {
-                name: "scale".to_string(),
-                dtype: DataType::Fp32,
-                shape: vec![],
-            },
-        ]
-    }
-
-    fn outputs(&self) -> Vec<IoSpec> {
-        vec![
-            IoSpec::fp32("scores", &[4]),
-            IoSpec {
-                name: "count".to_string(),
-                dtype: DataType::Int64,
-                shape: vec![],
-            },
-        ]
-    }
-
-    fn fixed_batch(&self) -> Option<usize> {
-        self.fixed_batch
-    }
-
-    fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
-        self.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let (Values::I64(ids), Values::F32(scale)) = (&inputs[0].values, &inputs[1].values) else {
-            return Err(ModelError::InferenceFailed("unexpected types".to_string()).into());
-        };
-        let batch = inputs[0].batch();
-        if self.fixed_batch.is_some_and(|fixed| fixed != batch) {
-            return Err(ModelError::InferenceFailed(format!("got a batch of {batch}")).into());
-        }
-        let scores = ids
-            .chunks(4)
-            .zip(scale)
-            .flat_map(|(ids, s)| ids.iter().map(move |&id| id as f32 * s))
-            .collect();
-        let counts = ids.chunks(4).map(|ids| ids.iter().sum()).collect();
-        Ok(vec![
-            HostTensor {
-                shape: vec![batch, 4],
-                values: Values::F32(scores),
-            },
-            HostTensor {
-                shape: vec![batch],
-                values: Values::I64(counts),
-            },
-        ])
-    }
-}
-
-/// A loaded model plus its metadata and runtime statistics
+/// Build one with [`Model::from_fn`], [`Model::custom`] or the `load_*` functions. Requests
+/// run through [`Model::infer`] / [`Model::infer_many`] (named tensors), or the flat
+/// [`Model::predict`] family for a model of one `f32` tensor in and one out. All of them block;
+/// call them off the async runtime.
 #[derive(Debug)]
 pub struct Model {
     inner: Box<dyn BurnModel>,
@@ -439,6 +206,14 @@ pub struct Model {
     /// Shared with the model this one replaced on a reload, so requests still running on the
     /// old one are counted too
     stats: std::sync::Arc<Mutex<ModelStats>>,
+}
+
+/// Which entry point a request came in through. It decides only how invalid input is reported:
+/// the flat `predict*` methods keep the error variants and messages they have always returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Door {
+    Named,
+    Flat,
 }
 
 /// The legacy single-tensor description: per-item shape (open dimensions as 0) and dtype
@@ -509,6 +284,7 @@ impl Model {
         }))
     }
 
+    /// Wrap a model; `model_type` and `model_size_bytes` are reported by `/model/info`
     pub fn new(inner: Box<dyn BurnModel>, model_type: &'static str, model_size_bytes: u64) -> Self {
         let inputs = inner.inputs();
         let outputs = inner.outputs();
@@ -558,10 +334,12 @@ impl Model {
         self.simple
     }
 
+    /// The inputs, in the order [`Model::infer`] takes them
     pub fn inputs(&self) -> &[IoSpec] {
         &self.inputs
     }
 
+    /// The outputs, in the order [`Model::infer`] returns them
     pub fn outputs(&self) -> &[IoSpec] {
         &self.outputs
     }
@@ -579,13 +357,27 @@ impl Model {
     /// dimension, the outputs split back. Each request is checked on its own, so an invalid one
     /// gets its own error and the rest still run. Blocking, like [`Model::predict_batch`].
     pub fn infer_many(&self, requests: Vec<Vec<HostTensor>>) -> Vec<Result<Vec<HostTensor>>> {
+        self.run_requests(requests.into_iter().map(Ok).collect(), Door::Named)
+    }
+
+    /// The pipeline behind every entry point. A request that arrives as an error (one the flat
+    /// adapters found) is counted and answered with it.
+    fn run_requests(
+        &self,
+        requests: Vec<Result<Vec<HostTensor>>>,
+        door: Door,
+    ) -> Vec<Result<Vec<HostTensor>>> {
         let mut results: Vec<Option<Result<Vec<HostTensor>>>> =
             (0..requests.len()).map(|_| None).collect();
         let mut valid = Vec::with_capacity(requests.len());
         let mut errors = 0;
         for (i, inputs) in requests.into_iter().enumerate() {
-            match self.check_inputs(&inputs) {
-                Ok(batch) => valid.push((i, inputs, batch)),
+            let checked = inputs.and_then(|inputs| {
+                self.check_inputs(&inputs, door)
+                    .map(|batch| (inputs, batch))
+            });
+            match checked {
+                Ok((inputs, batch)) => valid.push((i, inputs, batch)),
                 Err(e) => {
                     results[i] = Some(Err(e));
                     errors += 1;
@@ -608,6 +400,7 @@ impl Model {
             ),
         };
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let now = Utc::now();
 
         let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
         for _ in 0..errors {
@@ -617,7 +410,7 @@ impl Model {
             stats.record_batch(total);
             match output {
                 Ok(outputs) if batches.len() == 1 => {
-                    stats.record_success(elapsed_ms);
+                    stats.record_success(elapsed_ms, now);
                     results[batches[0].0] = Some(Ok(outputs));
                 }
                 Ok(outputs) => {
@@ -628,7 +421,7 @@ impl Model {
                             .map(|output| output.slice_batch(offset, offset + batch))
                             .collect();
                         offset += batch;
-                        stats.record_success(elapsed_ms);
+                        stats.record_success(elapsed_ms, now);
                         results[i] = Some(Ok(mine));
                     }
                 }
@@ -638,10 +431,9 @@ impl Model {
                     results[batches[0].0] = Some(Err(e));
                 }
                 Err(e) => {
-                    let message = e.to_string();
                     for (i, _) in batches {
                         stats.record_error();
-                        results[i] = Some(Err(ModelError::InferenceFailed(message.clone()).into()));
+                        results[i] = Some(Err(duplicate(&e)));
                     }
                 }
             }
@@ -659,10 +451,9 @@ impl Model {
     }
 
     /// The batch size, if the inputs fit the model
-    fn check_inputs(&self, inputs: &[HostTensor]) -> Result<usize> {
-        let invalid = |message: String| -> crate::error::FurnaceError {
-            ModelError::InvalidInput(message).into()
-        };
+    fn check_inputs(&self, inputs: &[HostTensor], door: Door) -> Result<usize> {
+        let invalid =
+            |message: String| -> FurnaceError { ModelError::InvalidInput(message).into() };
         if inputs.len() != self.inputs.len() {
             return Err(invalid(format!(
                 "expected {} inputs ({}), got {}",
@@ -681,6 +472,16 @@ impl Model {
             match (&tensor.values, spec.dtype.is_int()) {
                 (Values::F32(values), false) => {
                     if let Some(pos) = values.iter().position(|v| !v.is_finite()) {
+                        if door == Door::Flat {
+                            let per_item: usize = tensor.shape.iter().skip(1).product();
+                            return Err(ModelError::InvalidDataType(format!(
+                                "Invalid value at batch[{}][{}]: {} (not finite)",
+                                pos / per_item,
+                                pos % per_item,
+                                values[pos]
+                            ))
+                            .into());
+                        }
                         return Err(invalid(format!(
                             "'{name}' has a non-finite value at index {pos}"
                         )));
@@ -798,6 +599,8 @@ impl Model {
         Ok(())
     }
 
+    /// Run one item of a simple model (see [`Model::is_simple`]): its flattened input in, its
+    /// flattened output back. Blocking, like [`Model::predict_batch`].
     pub fn predict(&self, input: Vec<f32>) -> Result<Vec<f32>> {
         self.predict_batch(vec![input])
             .map(|mut batch| batch.pop().expect("batch of one yields one output"))
@@ -850,88 +653,53 @@ impl Model {
     /// exceed [`MAX_BATCH_SIZE`] items. Statistics count every request, plus one batch
     /// per forward pass. Blocking, like [`Model::predict_batch`].
     pub fn predict_many(&self, requests: Vec<FlatInput>) -> Vec<Result<Vec<f32>>> {
-        let mut results: Vec<Option<Result<Vec<f32>>>> = Vec::with_capacity(requests.len());
-        let mut valid = Vec::with_capacity(requests.len());
-        let mut errors = 0;
-        for (i, request) in requests.into_iter().enumerate() {
-            match self.validate_flat(&request.data, request.batch_size) {
-                Ok(()) => {
-                    results.push(None);
-                    valid.push((i, request));
-                }
-                Err(e) => {
-                    results.push(Some(Err(e)));
-                    errors += 1;
-                }
-            }
-        }
-
-        let start = Instant::now();
-        let items: usize = valid.iter().map(|(_, r)| r.batch_size).sum();
-        let output = match valid.as_mut_slice() {
-            [] => None,
-            // A lone request runs on its own buffer, without a copy
-            [(_, only)] => Some(self.forward(std::mem::take(&mut only.data), items)),
-            many => {
-                let mut input = Vec::with_capacity(many.iter().map(|(_, r)| r.data.len()).sum());
-                for (_, request) in many.iter_mut() {
-                    input.append(&mut request.data);
-                }
-                Some(self.forward(input, items))
-            }
-        };
-        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-
-        let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
-        for _ in 0..errors {
-            stats.record_error();
-        }
-        if let Some(output) = output {
-            stats.record_batch(items);
-            match output {
-                Ok(output) => {
-                    debug!(
-                        "Batch inference completed in {:.2}ms, {} request(s), batch size: {}, backend: {}",
-                        elapsed_ms,
-                        valid.len(),
-                        items,
-                        self.info.backend
-                    );
-                    if let [(i, _)] = valid.as_slice() {
-                        // A lone request takes the whole buffer
-                        stats.record_success(elapsed_ms);
-                        results[*i] = Some(Ok(output));
-                    } else {
-                        let output_size: usize = self.info.output_spec.shape.iter().product();
-                        let mut rest = output.as_slice();
-                        for (i, request) in &valid {
-                            let (mine, tail) = rest.split_at(request.batch_size * output_size);
-                            rest = tail;
-                            stats.record_success(elapsed_ms);
-                            results[*i] = Some(Ok(mine.to_vec()));
-                        }
-                    }
-                }
-                // A lone request keeps its error; a shared failure is reported to each
-                Err(e) if valid.len() == 1 => {
-                    stats.record_error();
-                    results[valid[0].0] = Some(Err(e));
-                }
-                Err(e) => {
-                    let message = e.to_string();
-                    for (i, _) in &valid {
-                        stats.record_error();
-                        results[*i] =
-                            Some(Err(ModelError::InferenceFailed(message.clone()).into()));
-                    }
-                }
-            }
-        }
-
-        results
+        let batches: Vec<usize> = requests.iter().map(|r| r.batch_size).collect();
+        let requests = requests.into_iter().map(|r| self.flat_request(r)).collect();
+        self.run_requests(requests, Door::Flat)
             .into_iter()
-            .map(|r| r.expect("every request has a result"))
+            .zip(batches)
+            .map(|(result, batch)| result.and_then(|outputs| self.flat_output(outputs, batch)))
             .collect()
+    }
+
+    /// A flat request as the one tensor of a simple model, without copying its buffer. The
+    /// batch size and length are checked here, first, as the flat methods always have.
+    fn flat_request(&self, FlatInput { data, batch_size }: FlatInput) -> Result<Vec<HostTensor>> {
+        Self::check_batch_size(batch_size)?;
+        let item = &self.info.input_spec.shape;
+        if data.len() != batch_size * item.iter().product::<usize>() {
+            let mut expected = vec![batch_size];
+            expected.extend_from_slice(item);
+            return Err(ModelError::InputValidation {
+                expected,
+                actual: vec![data.len()],
+            }
+            .into());
+        }
+        let mut shape = Vec::with_capacity(item.len() + 1);
+        shape.push(batch_size);
+        shape.extend_from_slice(item);
+        Ok(vec![HostTensor {
+            shape,
+            values: Values::F32(data),
+        }])
+    }
+
+    /// The flat values of a simple model's one output
+    fn flat_output(&self, outputs: Vec<HostTensor>, batch_size: usize) -> Result<Vec<f32>> {
+        let output_size: usize = self.info.output_spec.shape.iter().product();
+        match outputs.into_iter().next() {
+            Some(HostTensor {
+                values: Values::F32(values),
+                ..
+            }) if values.len() == batch_size * output_size => Ok(values),
+            Some(output) => Err(ModelError::InferenceFailed(format!(
+                "model returned shape {:?}, expected [{batch_size}, ..{:?}]",
+                output.shape, self.info.output_spec.shape
+            ))
+            .into()),
+            None => Err(ModelError::InferenceFailed("model returned no output".to_string()).into()),
+        }
     }
 
     fn check_batch_size(batch_size: usize) -> Result<()> {
@@ -961,32 +729,6 @@ impl Model {
             flattened.extend_from_slice(&input);
         }
         Ok(flattened)
-    }
-
-    /// Checks one request's flat input: batch size, length and finite values
-    fn validate_flat(&self, input: &[f32], batch_size: usize) -> Result<()> {
-        Self::check_batch_size(batch_size)?;
-
-        let input_size: usize = self.info.input_spec.shape.iter().product();
-        if input.len() != batch_size * input_size {
-            let mut expected = vec![batch_size];
-            expected.extend_from_slice(&self.info.input_spec.shape);
-            return Err(ModelError::InputValidation {
-                expected,
-                actual: vec![input.len()],
-            }
-            .into());
-        }
-        if let Some(pos) = input.iter().position(|x| !x.is_finite()) {
-            return Err(ModelError::InvalidDataType(format!(
-                "Invalid value at batch[{}][{}]: {} (not finite)",
-                pos / input_size,
-                pos % input_size,
-                input[pos]
-            ))
-            .into());
-        }
-        Ok(())
     }
 
     /// Continue `previous`'s statistics, so a reloaded model's counters do not restart at zero.
@@ -1027,38 +769,17 @@ impl Model {
         Ok(Some(start.elapsed()))
     }
 
-    /// One forward pass over validated input
-    fn forward(&self, input: Vec<f32>, batch_size: usize) -> Result<Vec<f32>> {
-        let mut shape = vec![batch_size];
-        shape.extend_from_slice(&self.info.input_spec.shape);
-        let input = HostTensor {
-            shape,
-            values: Values::F32(input),
-        };
-        let outputs = self.run_in_chunks(vec![input], batch_size)?;
-        let output_size: usize = self.info.output_spec.shape.iter().product();
-        match outputs.into_iter().next() {
-            Some(HostTensor {
-                values: Values::F32(values),
-                ..
-            }) if values.len() == batch_size * output_size => Ok(values),
-            Some(output) => Err(ModelError::InferenceFailed(format!(
-                "model returned shape {:?}, expected [{batch_size}, ..{:?}]",
-                output.shape, self.info.output_spec.shape
-            ))
-            .into()),
-            None => Err(ModelError::InferenceFailed("model returned no output".to_string()).into()),
-        }
-    }
-
+    /// Name, shapes, backend and the rest of what `GET /model/info` reports
     pub fn get_info(&self) -> &ModelInfo {
         &self.info
     }
 
+    /// A snapshot of the request counters
     pub fn get_stats(&self) -> ModelStats {
         self.stats.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// Whether `input` has one item's worth of values for a simple model's input
     pub fn validate_input_shape(&self, input: &[f32]) -> Result<()> {
         let expected_size: usize = self.info.input_spec.shape.iter().product();
         if input.len() != expected_size {
@@ -1071,10 +792,12 @@ impl Model {
         Ok(())
     }
 
+    /// The backend's name, as in [`ModelInfo::backend`]
     pub fn get_backend_info(&self) -> String {
         self.info.backend.clone()
     }
 
+    /// How the model was defined, as in [`ModelInfo::model_type`]
     pub fn model_type(&self) -> &'static str {
         self.model_type
     }
@@ -1090,6 +813,35 @@ fn join_requests(requests: Vec<Vec<HostTensor>>) -> Result<Vec<HostTensor>> {
         }
     }
     columns.into_iter().map(HostTensor::concat_batch).collect()
+}
+
+/// The error of a forward pass, for each request that shared it. `FurnaceError` is not `Clone`
+/// (`LoadFailed` boxes its source), so the variant is rebuilt with the source kept as text.
+fn duplicate(error: &FurnaceError) -> FurnaceError {
+    let FurnaceError::Model(error) = error else {
+        return ModelError::InferenceFailed(error.to_string()).into();
+    };
+    match error {
+        ModelError::LoadFailed { path, source } => ModelError::LoadFailed {
+            path: path.clone(),
+            source: source.to_string().into(),
+        },
+        ModelError::InvalidFormat(m) => ModelError::InvalidFormat(m.clone()),
+        ModelError::FileNotFound(path) => ModelError::FileNotFound(path.clone()),
+        ModelError::InferenceFailed(m) => ModelError::InferenceFailed(m.clone()),
+        ModelError::InputValidation { expected, actual } => ModelError::InputValidation {
+            expected: expected.clone(),
+            actual: actual.clone(),
+        },
+        ModelError::InvalidDataType(m) => ModelError::InvalidDataType(m.clone()),
+        ModelError::InvalidInput(m) => ModelError::InvalidInput(m.clone()),
+        ModelError::InvalidArgument { arg, value, reason } => ModelError::InvalidArgument {
+            arg: arg.clone(),
+            value: value.clone(),
+            reason: reason.clone(),
+        },
+    }
+    .into()
 }
 
 /// Load a file-based MLP model from `<path>.bpk` + `<path>.json` on the CPU backend
@@ -1351,6 +1103,29 @@ mod tests {
         }]);
         assert_eq!(pairs[0].as_ref().unwrap().len(), 8);
         assert!(model.warm_up().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_shared_failure_keeps_its_error_for_every_request() {
+        // Three items for a graph of pairs: the joined pass fails, and each request gets the
+        // client error itself rather than its text as an inference failure
+        let model = Model::new(Box::new(DummyTensorsModel::new(Some(2))), "dummy", 0);
+        let results = model.infer_many(vec![
+            tensors(vec![1, 2, 3, 4], vec![1.0]),
+            tensors(vec![1, 2, 3, 4, 5, 6, 7, 8], vec![1.0, 2.0]),
+        ]);
+        for result in results {
+            let err = result.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    crate::error::FurnaceError::Model(ModelError::InvalidInput(_))
+                ),
+                "{err:?}"
+            );
+            assert!(err.to_string().contains("runs batches of 2"), "{err}");
+        }
+        assert_eq!(model.get_stats().error_count, 2);
     }
 
     #[test]
