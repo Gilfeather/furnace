@@ -2,7 +2,8 @@
 //!
 //! Requires `models/resnet18.onnx` and `models/mnist.onnx` at build time (see README).
 
-use furnace::api::{ServerConfig, router};
+use furnace::Server;
+use furnace::api::ServerConfig;
 use furnace::model::load_built_in_model;
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -26,7 +27,7 @@ async fn spawn_model_server(name: &'static str, config: ServerConfig) -> String 
         .unwrap_or_else(|e| {
             panic!("{name} must be compiled in (place models/{name}.onnx before building): {e}")
         });
-    let app = router(model, &config).unwrap();
+    let app = Server::with_config(config).model(model).router().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -310,7 +311,7 @@ async fn test_backpressure_returns_503() {
         max_concurrent_requests: 1,
         ..ServerConfig::default()
     };
-    let app = router(model, &config).unwrap();
+    let app = Server::with_config(config).model(model).router().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });

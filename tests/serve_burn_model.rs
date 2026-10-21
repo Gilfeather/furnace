@@ -207,5 +207,6 @@ fn from_fn_checks_the_shapes_against_the_ranks() {
 #[tokio::test]
 async fn serving_needs_a_model() {
     let err = Server::new().serve().await.unwrap_err().to_string();
-    assert!(err.contains("no model"), "{err}");
+    assert!(err.contains("nothing to serve"), "{err}");
+    assert!(err.contains("Server::model"), "{err}");
 }

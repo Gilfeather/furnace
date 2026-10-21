@@ -1,4 +1,4 @@
-//! The nervous system (feature `nerve`): the layer between sensors, small fast models, the
+//! The nervous system: the layer between sensors, small fast models, the
 //! large slow model (the brain, an LLM) and actuators.
 //!
 //! Not a server that loads models and answers requests, but what moves signals between

@@ -36,10 +36,12 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> furnace::Result<()> {
+//!     // Logs to stderr: where the server listens, what it serves, why it stopped
+//!     tracing_subscriber::fmt::init();
 //!     let device = BackendKind::Cpu.device();
 //!     let mut net = Net::new(&device);
 //!     // The weights saved after training, as a Burnpack file (burn-store)
-//!     furnace::weights::load_burnpack(&mut net, "net.bpk".as_ref())?;
+//!     furnace::weights::load_burnpack(&mut net, "net.bpk")?;
 //!
 //!     // Per-item shapes, without the batch: [batch, 784] in, [batch, 10] out
 //!     let model = Model::from_fn("digits", BackendKind::Cpu, &[784], &[10],
@@ -75,9 +77,10 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     tracing_subscriber::fmt::init();
 //!     let device = BackendKind::Cpu.device();
 //!     let mut net = Net::new(&device);
-//!     furnace::weights::load_burnpack(&mut net, "net.bpk".as_ref())?;
+//!     furnace::weights::load_burnpack(&mut net, "net.bpk")?;
 //!     let model = Model::from_fn("digits", BackendKind::Cpu, &[784], &[10],
 //!         move |images: Tensor<2>| net.forward(images))?;
 //!
@@ -143,17 +146,52 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> furnace::Result<()> {
+//!     tracing_subscriber::fmt::init();
 //!     let device = BackendKind::Cpu.device();
 //!     let model = Model::custom(Classifier { net: TextNet, device });
 //!     Server::new().model(model).serve().await
 //! }
 //! ```
 //!
+//! # The nervous system
+//!
+//! The [`nerve`] module connects receptors (an HTTP route, a channel, a timer, a stream) to
+//! neurons (a closure, a Burn model, an LLM) and effectors (a webhook, a command, a file).
+//! Most signals stop at a fast reflex; only what needs it reaches the slow brain.
+//! [`Server::nerve`] serves the neurons next to the models, on the same port.
+//!
+//! ```no_run
+//! use furnace::Server;
+//! use furnace::nerve::prelude::*;
+//! use serde_json::json;
+//!
+//! #[tokio::main]
+//! async fn main() -> furnace::Result<()> {
+//!     tracing_subscriber::fmt::init();
+//!     let mut b = Fabric::builder();
+//!     // POST /events: each body is a signal
+//!     let events = b.receptor(Http::new("events", "/events").text());
+//!     // A reflex: alerts become a command to the `alert` effector, the rest stop here
+//!     let triage = b.neuron(FnNeuron::reflex("triage", |signal, _| {
+//!         let text = signal.payload.as_text()?.to_string();
+//!         text.contains("ALERT")
+//!             .then(|| signal.command("alert", json!({ "text": text })))
+//!     }));
+//!     b.effector(Webhook::new("alert", "http://127.0.0.1:9000/hook")?);
+//!     b.reflex(events, triage);
+//!     Server::new().port(3000).nerve(b).serve().await
+//! }
+//! ```
+//!
+//! See [docs/NERVE.md](https://github.com/Gilfeather/furnace/blob/main/docs/NERVE.md) for
+//! habituation, thresholds, deliberative pathways and the brain.
+//!
 //! # Configuration
 //!
-//! [`Server::configure`] reaches every [`ServerConfig`] setting: limits, timeouts, batching,
-//! gRPC (feature `grpc`), TLS (feature `tls`), API keys, rate limits, the admin token for
-//! [`Server::reloadable_model`]. [`Server::router`] returns the HTTP API as an axum `Router`
+//! The common settings have their own methods: [`Server::host`], [`Server::port`],
+//! [`Server::max_batch_size`], [`Server::request_timeout`]. [`Server::configure`] reaches
+//! every [`ServerConfig`] setting: limits, timeouts, batching, gRPC (feature `grpc`), TLS
+//! (feature `tls`), API keys, rate limits, the admin token for [`Server::reloadable_model`]. [`Server::router`] returns the HTTP API as an axum `Router`
 //! to mount in your own application. The HTTP API is described in
 //! [docs/API.md](https://github.com/Gilfeather/furnace/blob/main/docs/API.md).
 //!
@@ -166,39 +204,42 @@
 //! - `image`: JPEG / PNG input on `/predict`, with ImageNet preprocessing.
 //! - `llm`: serve LLMs with the OpenAI chat and completions API, streaming included, next to
 //!   the other models; see the `llm` module.
-//! - `nerve`: kept for compatibility. The nervous system (the `nerve` module) is always
-//!   built, since the server's own routes run on it.
 //! - `wgpu`, `metal`, `cuda`: Burn's GPU backends, chosen with [`BackendKind`].
 //! - `embed-weights`: compile built-in models' weights into the binary.
 //! - `test-models`: `model::DummyModel` and `model::DummyTensorsModel`, constant models for
 //!   testing and benchmarking the server itself.
 
 pub mod access;
+// The `furnace` command's own parts: its allocator, its TOML file, its thread pool and its
+// built-in models. Public for the binary and the benches only; not part of the library's API.
+#[doc(hidden)]
 pub mod allocator;
 pub mod api;
 pub mod backend;
 pub mod batching;
 pub mod burn_model;
+#[doc(hidden)]
 pub mod config;
 pub mod error;
 mod json_fast;
 #[cfg(feature = "llm")]
 pub mod llm;
 pub mod model;
+#[doc(hidden)]
 pub mod models;
 pub mod nerve;
 #[cfg(feature = "image")]
 pub mod preprocess;
 pub mod telemetry;
 pub mod tensor;
+#[doc(hidden)]
 pub mod threads;
 #[cfg(feature = "tls")]
 pub mod tls;
-pub mod types;
 pub mod weights;
 
-pub use api::{Server, ServerConfig, start_server, start_server_with_config};
+pub use api::{Server, ServerConfig};
 pub use backend::BackendKind;
-pub use error::{ApiError, CliError, FurnaceError, ModelError, Result};
+pub use error::{ApiError, FurnaceError, ModelError, Result};
 pub use model::{BurnModel, Model, ModelInfo, load_built_in_model, load_model};
 pub use tensor::{DataType, HostTensor, IoSpec, TensorSpec, Values};

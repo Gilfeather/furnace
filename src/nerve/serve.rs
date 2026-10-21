@@ -199,7 +199,7 @@ impl Neuron for Speaking {
 }
 
 /// A model to wire into the fabric
-pub(crate) struct ServedModel {
+pub(crate) struct ServedNeuron {
     pub name: String,
     pub source: ModelSource,
     /// Whether concurrent requests can be joined into one forward pass
@@ -245,7 +245,7 @@ impl Serving {
     /// concurrency limit already bounds what can wait).
     pub(crate) fn build(
         mut builder: FabricBuilder,
-        models: Vec<ServedModel>,
+        models: Vec<ServedNeuron>,
         #[cfg(feature = "llm")] llms: &[Arc<dyn crate::llm::LlmEngine>],
         batching: BatchConfig,
         capacity: usize,
@@ -529,7 +529,7 @@ mod tests {
         Arc::new(
             Serving::build(
                 FabricBuilder::new(),
-                vec![ServedModel {
+                vec![ServedNeuron {
                     name,
                     batches: model.is_simple() || model.batches_named(),
                     source: Arc::new(move || source.clone()),
@@ -919,7 +919,7 @@ mod tests {
         let source = model.clone();
         let serving = Serving::build(
             yours,
-            vec![ServedModel {
+            vec![ServedNeuron {
                 name: "m".into(),
                 batches: true,
                 source: Arc::new(move || source.clone()),

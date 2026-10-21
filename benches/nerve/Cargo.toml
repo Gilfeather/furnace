@@ -13,7 +13,7 @@ license = "MIT"
 [workspace]
 
 [dependencies]
-furnace = { package = "furnace-server", path = "../..", default-features = false, features = ["nerve"] }
+furnace = { package = "furnace-server", path = "../..", default-features = false }
 furnace-bench-common = { path = "../common", features = ["load"] }
 axum = "0.8"
 tokio = { version = "1.53", features = ["full"] }

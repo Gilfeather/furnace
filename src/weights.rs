@@ -18,7 +18,8 @@ use crate::error::{ModelError, Result};
 
 /// Load Burnpack weights from `path` into `model`, reporting errors instead of panicking
 /// (release builds use `panic = "abort"`).
-pub fn load_burnpack<M: ModuleSnapshot>(model: &mut M, path: &Path) -> Result<()> {
+pub fn load_burnpack<M: ModuleSnapshot>(model: &mut M, path: impl AsRef<Path>) -> Result<()> {
+    let path = path.as_ref();
     let failed = |e: Box<dyn std::error::Error + Send + Sync>| ModelError::LoadFailed {
         path: path.to_path_buf(),
         source: e,

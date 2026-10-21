@@ -445,7 +445,8 @@ pub fn describe(settings: &TlsSettings) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::api::{ClientAddr, ServerConfig, router};
+    use crate::api::tests::router;
+    use crate::api::{ClientAddr, ServerConfig};
     use crate::model::{DummyModel, Model};
     use std::path::PathBuf;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

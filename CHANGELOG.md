@@ -13,10 +13,55 @@ The server runs on the nervous system: every model is a neuron, every route a re
 The public API changes below break code written for 0.10; furnace keeps no compatibility
 aliases before 1.0. Renames are listed as old name -> new name.
 
-- `Server::router()`, `api::router()` and `api::router_with_models()` return
-  `Result<Router>`: an error for a server with nothing to serve, as `serve()` gives (0.10
-  panicked). Add `?` or `.expect(..)`:
+- `Server::router()` returns `Result<Router>`: an error for a server with nothing to serve,
+  as `serve()` gives (0.10 panicked). Add `?` or `.expect(..)`:
   `Router::new().merge(Server::new().model(model).router()?)`.
+- `Server` is the one way to build an inference server; the free functions are gone, old ->
+  new:
+  - `start_server(host, port, model)` ->
+    `Server::new().host(host).port(port).model(model).serve()`.
+  - `start_server_with_config(config, model)` ->
+    `Server::with_config(config).model(model).serve()`.
+  - `api::start_server_with_models(config, models)` -> one `.model(m)` per model, or
+    `.reloadable_model(m, reload)` for a `ServedModel` with a `reload`.
+  - `api::router(model, &config)` -> `Server::with_config(config).model(model).router()`;
+    `api::router_with_models(models, &config)` likewise, one `.model(m)` per model.
+  - `api::ServedModel` and `api::Reloader` are internal: `Server::reloadable_model` takes the
+    model and its reload closure.
+- The `nerve` feature is gone: the nervous system was always built. Drop `nerve` from
+  `--features` and from `features = [..]` in Cargo.toml.
+- `nerve::brain::Llm::new(name, engine)` takes the engine itself (any `LlmEngine`), as
+  `Server::llm` does: `Llm::new("brain", Arc::new(engine))` -> `Llm::new("brain", engine)`.
+  An `Arc` still works, to share one engine between the two: `LlmEngine` is implemented for
+  `Arc<E>`.
+- `nerve::brain::ModelNeuron::reflex` and `brain` take `impl Into<Arc<Model>>`: pass the
+  `Model` itself (`ModelNeuron::reflex("m", model, ..)`) or an `Arc<Model>` as before.
+- `weights::load_burnpack`, `load_model` and `model::load_model_with_backend` take
+  `impl AsRef<Path>`: `load_burnpack(&mut net, "net.bpk".as_ref())` ->
+  `load_burnpack(&mut net, "net.bpk")`. Code passing `&Path` or `&PathBuf` still compiles.
+- Errors:
+  - `FurnaceError::Cli` and `CliError` are gone: they belonged to the `furnace` command.
+  - `FurnaceError::Nerve(nerve::BuildError)` is new, so `?` on `Webhook::new(..)` and the
+    other nerve constructors works in a function returning `furnace::Result`. A fabric
+    given to `Server::nerve` that cannot be built is this error (was
+    `ApiError::ServerStartup("the nervous system: ..")`).
+  - `FurnaceError`'s message is its inner error's: no `Model error: ` / `API error: ` in
+    front, as docs/API.md shows them.
+  - `ModelError::InputValidation { expected, actual }` ->
+    `ModelError::InputValidation { batch, item, got }`, counting values:
+    `expected 150528 values (batch 1 × [3, 224, 224]), got 150527` (was
+    `Input validation failed: expected shape [3, 224, 224], got [150527]`).
+  - An empty batch is `ModelError::EmptyBatch` and one over `MAX_BATCH_SIZE` is
+    `ModelError::BatchTooLarge { size, max }` (both were `InputValidation` with made-up
+    shapes); over HTTP they are 400 `INVALID_INPUT` and 400 `BATCH_TOO_LARGE`, the codes
+    `/predict` already gave before reaching the model. A tensor of the wrong rank given to
+    `HostTensor::into_float` / `into_int` is `ModelError::InvalidInput`.
+- No longer public, for the `furnace` command only: `furnace::types` (removed; use
+  `furnace::TensorSpec`), and hidden from the documentation: `furnace::allocator`,
+  `furnace::config`, `furnace::threads`, `furnace::models`. Internal: `access::Access`,
+  `access::Rejection`, `access::constant_time_eq`, `access::presented_key`
+  (`access::ClientRateLimit` stays). `models::BuiltInModel::default_model` returns an
+  `Option`.
 - `Model::warm_up()` returns `furnace::Result<Option<Duration>>` (was a `String` error): the
   model's own error, as `infer` gives.
 - `model::DummyModel` and `model::DummyTensorsModel` need the new `test-models` feature. They
@@ -113,6 +158,8 @@ aliases before 1.0. Renames are listed as old name -> new name.
     `PathwayKind`, `NeuronKind` and `Quiet` (their JSON is the same text).
 
 ### Added
+- `Server::max_batch_size(n)` and `Server::request_timeout(d)`: the two settings most often
+  changed, without `configure`.
 - `furnace::nerve::prelude`: what building a fabric usually takes, in one `use`.
 - `FabricBuilder::effector`, `FabricBuilder::gate` and `nerve::Link` (`weight`,
   `summation`), see above. `Effector` converts from any `Act`.
@@ -127,6 +174,21 @@ aliases before 1.0. Renames are listed as old name -> new name.
   hold an unbounded number of tasks and sockets.
 
 ### Changed
+- The `furnace` command reports what stops it from starting as one line,
+  `furnace: <message>`, and exits with code 2 (was the error's debug form, or a log line and
+  code 1). Options it rejects no longer repeat `Invalid argument '..'` twice, and running it
+  with no model says to pass `--model-name` or `--model-path`.
+- Startup errors say what to do: a port in use names `--port` / `Server::port` (or
+  `--grpc-port` / `ServerConfig::grpc_port`) and stopping the other process; TLS or gRPC in a
+  build without the feature names the setting (`ServerConfig::tls`,
+  `ServerConfig::grpc_port`), `--features tls` / `--features grpc`, and that the released
+  binaries and the Docker image have it; a server with nothing to serve names
+  `Server::model`, `Server::llm` and `Server::nerve`; no built-in models points at
+  `$FURNACE_MODELS_DIR` and `--model-path` as well as `models/`.
+- A request the model refuses for its input (a 4xx) is logged at `debug`, not `error`; the
+  server's own failures stay at `error`. The response of an inference that ended without an
+  answer says so (`The inference ended without an answer (see the server log)`) instead of
+  `Inference task panicked`, since a pathway that drops the request ends the same way.
 - `/predict`, v2 over HTTP and v2 over gRPC share one inference path: the concurrency slot,
   the timeout, the latency of a success and the request counters are taken in one place, and
   one mapping turns an error into an HTTP status and `code`. What changes on the wire:
@@ -197,6 +259,9 @@ aliases before 1.0. Renames are listed as old name -> new name.
   The rest of the `furnace_nerve_*` text is unchanged byte for byte.
 
 ### Removed
+- The `nerve` feature, `furnace::types`, `start_server`, `start_server_with_config`,
+  `api::start_server_with_models`, `api::router`, `api::router_with_models`,
+  `FurnaceError::Cli` and `CliError`; see "Migrating from 0.10".
 - `ApiError::{InvalidRequest, JsonParsing, ModelNotLoaded}` and
   `CliError::{MissingArgument, InvalidModelPath}`: nothing constructed them.
 - `FurnaceError` no longer implements axum's `IntoResponse`; no handler returned it, and its

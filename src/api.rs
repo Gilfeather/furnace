@@ -38,7 +38,7 @@ pub use crate::batching::BatchConfig;
 use crate::error::{ApiError, FurnaceError, ModelError, Result};
 use crate::model::{MAX_BATCH_SIZE, Model, ModelInfo, ModelStats};
 use crate::nerve::Announced;
-use crate::nerve::serve::{Refused, ServedModel as ServedNeuron, Serving};
+use crate::nerve::serve::{Refused, ServedNeuron, Serving};
 #[cfg(feature = "image")]
 use crate::preprocess::{ImageKind, image_input_size, preprocess_image};
 use crate::telemetry::{Histogram, Percentiles};
@@ -384,12 +384,12 @@ pub(crate) type AppState = Arc<ServerState>;
 
 /// Loads a model again for `POST /admin/models/{model}/reload`, from the given weight file or,
 /// with `None`, from where it was loaded before. Blocking.
-pub type Reloader = Arc<dyn Fn(Option<&std::path::Path>) -> Result<Model> + Send + Sync>;
+pub(crate) type Reloader = Arc<dyn Fn(Option<&std::path::Path>) -> Result<Model> + Send + Sync>;
 
 /// A model to serve, and how to reload it (`None`: it cannot be reloaded)
-pub struct ServedModel {
-    pub model: Model,
-    pub reload: Option<Reloader>,
+pub(crate) struct ServedModel {
+    pub(crate) model: Model,
+    pub(crate) reload: Option<Reloader>,
 }
 
 impl From<Model> for ServedModel {
@@ -480,6 +480,20 @@ impl Server {
         self
     }
 
+    /// The most items one batch carries, for the dynamic batching of concurrent requests
+    /// ([`BatchConfig::max_batch_size`]); 1 turns batching off
+    pub fn max_batch_size(mut self, items: usize) -> Self {
+        self.config.batching.max_batch_size = items;
+        self
+    }
+
+    /// How long one inference may take before its request gets 504 Gateway Timeout
+    /// ([`ServerConfig::request_timeout`]; none by default)
+    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+        self.config.request_timeout = Some(timeout);
+        self
+    }
+
     /// Change any other setting
     pub fn configure(mut self, change: impl FnOnce(&mut ServerConfig)) -> Self {
         change(&mut self.config);
@@ -494,15 +508,18 @@ impl Server {
 
     /// Serve an LLM (feature `llm`) on `POST /v1/chat/completions`, `POST /v1/completions` and
     /// `GET /v1/models`, next to the other models: a [`Scheduled`](crate::llm::Scheduled) step
-    /// model, or any [`LlmEngine`](crate::llm::LlmEngine). A request without `model` goes to the
-    /// first LLM added.
+    /// model, or any [`LlmEngine`](crate::llm::LlmEngine), or an `Arc` of one shared with a
+    /// nerve [`Llm`](crate::nerve::brain::Llm). A request without `model` goes to the first LLM
+    /// added.
     #[cfg(feature = "llm")]
     pub fn llm(mut self, engine: impl crate::llm::LlmEngine) -> Self {
         self.contents.llms.push(Arc::new(engine));
         self
     }
 
-    /// Add neurons of your own to the server's nervous system. The server wires its models
+    /// Add neurons of your own to the server's nervous system; a fabric that cannot be built
+    /// makes [`serve`](Self::serve) and [`router`](Self::router) return
+    /// [`FurnaceError::Nerve`](crate::FurnaceError::Nerve). The server wires its models
     /// into the same fabric (an entrance `in:{model}`, a neuron `model:{model}` and the
     /// `serve:respond` effector), so your pathways and its requests share one system. The HTTP
     /// receptors become routes, the receptors start with the server, `GET /nerve` describes
@@ -564,7 +581,9 @@ impl Server {
 fn check_contents(contents: &Contents) -> Result<()> {
     if contents.is_empty() {
         return Err(ApiError::ServerStartup(
-            "no model to serve; add one with Server::model".to_string(),
+            "nothing to serve; add a model with Server::model, an LLM with Server::llm \
+             (feature `llm`) or neurons with Server::nerve"
+                .to_string(),
         )
         .into());
     }
@@ -692,20 +711,6 @@ impl ServerState {
     }
 }
 
-/// Build the application router with all middleware applied. Serve it with [`ClientAddr`]
-/// as connect info for a rate limit by address, as [`Server::router`] explains.
-pub fn router(model: Model, config: &ServerConfig) -> Result<Router> {
-    router_with_models(vec![model.into()], config)
-}
-
-/// [`router`] for several models; the first is the default for `/predict`. Without any, an
-/// error, as from [`Server::router`].
-pub fn router_with_models(models: Vec<ServedModel>, config: &ServerConfig) -> Result<Router> {
-    let mut server = Server::with_config(config.clone());
-    server.contents = models.into();
-    server.router()
-}
-
 /// A router served by its user may lack the peer address the rate limit needs; say so once,
 /// at startup, rather than let every client silently share one budget
 fn warn_if_limited_by_address(config: &ServerConfig) {
@@ -753,8 +758,7 @@ fn server_state(contents: Contents, config: &ServerConfig) -> Result<AppState> {
         &contents.llms,
         batching,
         config.max_concurrent_requests,
-    )
-    .map_err(|e| ApiError::ServerStartup(format!("the nervous system: {e}")))?;
+    )?;
     let serving = Arc::new(serving);
     #[cfg(feature = "llm")]
     let llm = (!contents.llms.is_empty()).then(|| {
@@ -1003,27 +1007,6 @@ fn new_request_id() -> HeaderValue {
         .expect("a UUID is a valid header value")
 }
 
-pub async fn start_server(host: &str, port: u16, model: Model) -> Result<()> {
-    let config = ServerConfig {
-        host: host.to_string(),
-        port,
-        ..ServerConfig::default()
-    };
-    start_server_with_config(config, model).await
-}
-
-pub async fn start_server_with_config(config: ServerConfig, model: Model) -> Result<()> {
-    start_server_with_models(config, vec![model.into()]).await
-}
-
-/// [`start_server_with_config`] for several models; the first is the default for `/predict`
-pub async fn start_server_with_models(
-    config: ServerConfig,
-    models: Vec<ServedModel>,
-) -> Result<()> {
-    serve(config, models.into()).await
-}
-
 async fn serve(config: ServerConfig, contents: Contents) -> Result<()> {
     check_contents(&contents)?;
     let state = server_state(contents, &config)?;
@@ -1065,16 +1048,19 @@ async fn serve(config: ServerConfig, contents: Contents) -> Result<()> {
     };
     #[cfg(not(feature = "tls"))]
     if config.tls.is_some() {
-        return Err(ApiError::ServerStartup(
-            "--tls-cert needs a build with the `tls` feature".to_string(),
-        )
+        return Err(ApiError::ServerStartup(missing_feature(
+            "TLS (--tls-cert, ServerConfig::tls)",
+            "tls",
+        ))
         .into());
     }
 
     let bind_addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
-        .map_err(|e| ApiError::ServerStartup(format!("Failed to bind to {bind_addr}: {e}")))?;
+        .map_err(|e| {
+            ApiError::ServerStartup(bind_error(&bind_addr, &e, "--port / Server::port"))
+        })?;
 
     let scheme = if config.tls.is_some() {
         "https"
@@ -1114,9 +1100,10 @@ async fn serve(config: ServerConfig, contents: Contents) -> Result<()> {
     });
     #[cfg(not(feature = "grpc"))]
     if config.grpc_port.is_some() {
-        return Err(ApiError::ServerStartup(
-            "--grpc-port needs a build with the `grpc` feature".to_string(),
-        )
+        return Err(ApiError::ServerStartup(missing_feature(
+            "gRPC (--grpc-port, ServerConfig::grpc_port)",
+            "grpc",
+        ))
         .into());
     }
 
@@ -1166,6 +1153,27 @@ async fn serve(config: ServerConfig, contents: Contents) -> Result<()> {
 
     info!("🛑 Server stopped gracefully");
     Ok(())
+}
+
+/// Why a listener could not bind, with what to do when the port is taken
+pub(crate) fn bind_error(addr: &str, e: &std::io::Error, setting: &str) -> String {
+    if e.kind() == std::io::ErrorKind::AddrInUse {
+        format!(
+            "cannot listen on {addr}: the port is already in use; choose another with {setting}, \
+             or stop the process that uses it"
+        )
+    } else {
+        format!("cannot listen on {addr}: {e}")
+    }
+}
+
+/// A setting that needs a feature this build lacks
+#[cfg(any(not(feature = "tls"), not(feature = "grpc")))]
+fn missing_feature(setting: &str, feature: &str) -> String {
+    format!(
+        "{setting} needs the `{feature}` feature: rebuild with `--features {feature}` (the \
+         released binaries and the Docker image have it)"
+    )
 }
 
 /// Ctrl-C or SIGTERM. A handler that cannot be installed is logged and waits forever, so the
@@ -2237,6 +2245,18 @@ pub(crate) mod tests {
         Model::new(Box::new(dummy), "dummy", 0)
     }
 
+    /// The router of a server with `config`, serving `model`
+    pub(crate) fn router(model: Model, config: &ServerConfig) -> Result<Router> {
+        Server::with_config(config.clone()).model(model).router()
+    }
+
+    /// [`router`] for several models, reloadable or not
+    fn router_with_models(models: Vec<ServedModel>, config: &ServerConfig) -> Result<Router> {
+        let mut server = Server::with_config(config.clone());
+        server.contents = models.into();
+        server.router()
+    }
+
     pub(super) fn test_app() -> Router {
         router(dummy_model(), &ServerConfig::default()).unwrap()
     }
@@ -2905,12 +2925,41 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_taken_port_says_what_to_do() {
+        let taken = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let refused = Server::new()
+            .port(port)
+            .model(dummy_model())
+            .serve()
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("already in use"), "{refused}");
+        assert!(refused.contains("Server::port"), "{refused}");
+    }
+
+    #[test]
+    fn the_shortcuts_set_the_config() {
+        let server = Server::new()
+            .max_batch_size(8)
+            .request_timeout(Duration::from_millis(250));
+        assert_eq!(server.config.batching.max_batch_size, 8);
+        assert_eq!(
+            server.config.request_timeout,
+            Some(Duration::from_millis(250))
+        );
+    }
+
+    #[tokio::test]
     async fn an_empty_server_is_an_error() {
         assert!(Server::new().router().is_err());
         assert!(router_with_models(Vec::new(), &ServerConfig::default()).is_err());
-        // serve() and the start_server functions refuse it
-        let refused = start_server_with_models(ServerConfig::default(), Vec::new()).await;
-        assert!(refused.is_err());
+        // serve() refuses it, naming what a server can serve
+        let refused = Server::new().serve().await.unwrap_err().to_string();
+        assert!(refused.contains("Server::model"), "{refused}");
+        assert!(refused.contains("Server::llm"), "{refused}");
+        assert!(refused.contains("Server::nerve"), "{refused}");
     }
 
     #[tokio::test]

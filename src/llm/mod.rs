@@ -98,7 +98,7 @@
 //!     let pipeline = TextPipeline::from_files("tokenizer.json", Some("tokenizer_config.json".as_ref()))?;
 //!     let device = BackendKind::Cpu.device();
 //!     let mut net = TinyLm::new(pipeline.tokenizer().get_vocab_size(true), &device);
-//!     furnace::weights::load_burnpack(&mut net, "tiny-lm.bpk".as_ref())?;
+//!     furnace::weights::load_burnpack(&mut net, "tiny-lm.bpk")?;
 //!
 //!     let engine = Scheduled::new(BurnLm { net, device }, pipeline);
 //!     Server::new().port(8080).llm(engine).serve().await?;
@@ -115,6 +115,7 @@ mod scheduler;
 mod stop;
 
 use std::fmt;
+use std::sync::Arc;
 
 pub(crate) use http::{LlmState, routes};
 pub use metrics::{FinishedCounts, LlmMetrics};
@@ -365,5 +366,28 @@ pub trait LlmEngine: Send + Sync + fmt::Debug + 'static {
     /// [`Scheduled`]'s; an engine with nothing to report keeps the default, `None`.
     fn scheduler_stats(&self) -> Option<&SchedulerCounters> {
         None
+    }
+}
+
+/// A shared engine is an engine, so [`Server::llm`](crate::Server::llm) and the nerve's
+/// [`Llm`](crate::nerve::brain::Llm) take an `Arc` as well as the engine itself
+impl<E: LlmEngine + ?Sized> LlmEngine for Arc<E> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn max_context(&self) -> usize {
+        (**self).max_context()
+    }
+
+    fn generate(
+        &self,
+        request: GenerateRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<Event>, EngineError> {
+        (**self).generate(request)
+    }
+
+    fn scheduler_stats(&self) -> Option<&SchedulerCounters> {
+        (**self).scheduler_stats()
     }
 }
