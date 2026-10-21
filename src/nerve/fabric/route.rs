@@ -13,8 +13,8 @@ use crate::nerve::signal::{NeuronId, PathwayId, Signal};
 
 impl Fabric {
     /// Hand a signal to a receptor: the whole synchronous chain runs before this returns.
-    /// Receptors call this through their [`Afferent`] handle; tests and in-process sources
-    /// call it directly.
+    /// Receptors call this through their [`Afferent`](crate::nerve::receptor::Afferent)
+    /// handle; tests and in-process sources call it directly.
     pub fn stimulate(&self, receptor: NeuronId, signal: Signal) -> Outcome {
         self.stimulate_announced(receptor, signal, None)
     }
