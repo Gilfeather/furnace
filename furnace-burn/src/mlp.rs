@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tracing::info;
 
-use crate::backend::BackendKind;
-use crate::error::{ModelError, Result as FurnaceResult};
+use furnace::error::{ModelError, Result as FurnaceResult};
+
+use crate::BackendKind;
 
 /// Simple MLP model configuration
 #[derive(Config, Debug)]

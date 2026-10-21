@@ -48,7 +48,7 @@ jobs:
           ./furnace --model-name resnet18 --weights /path/to/resnet18.bpk
           ```
 
-          Or `cargo binstall furnace-server`, or `docker run -p 3000:3000 ghcr.io/gilfeather/furnace`.
+          Or `brew install gilfeather/tap/furnace`, or `docker run -p 3000:3000 ghcr.io/gilfeather/furnace`.
 
           **Verifying a download**: `SHA256SUMS` lists every asset's checksum, `furnace.spdx.json`
           is the software bill of materials, and every binary and image carries a build provenance
@@ -109,11 +109,11 @@ jobs:
     - name: Download ResNet-18 ONNX model
       shell: bash
       run: |
-        mkdir -p models
-        curl -fsSL "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
+        mkdir -p furnace-burn/models
+        curl -fsSL "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o furnace-burn/models/resnet18.onnx
 
     - name: Build release binary
-      run: cargo build --release --locked --target ${{ matrix.target }} --features "grpc tls"
+      run: cargo build --release --locked --target ${{ matrix.target }} -p furnace-cli --features "grpc tls"
 
     - name: Rename binary
       shell: bash
@@ -137,7 +137,7 @@ jobs:
       if: matrix.target == 'x86_64-unknown-linux-gnu'
       uses: softprops/action-gh-release@v3
       with:
-        files: target/${{ matrix.target }}/release/build/furnace-server-*/out/models/resnet18.bpk
+        files: target/${{ matrix.target }}/release/build/furnace-burn-*/out/models/resnet18.bpk
 
   # Checksums of every asset, and a software bill of materials of the source tree
   release-checksums:
@@ -234,11 +234,28 @@ jobs:
       id: auth
       uses: rust-lang/crates-io-auth-action@v1
 
-    # Published without models; `cargo install` users compile their own in with FURNACE_MODELS_DIR
     - name: Publish furnace-server
       env:
         CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-      run: cargo publish --locked
+      run: cargo publish --locked -p furnace-server
+
+    # furnace-burn and furnace-cli are not on crates.io yet. Their first release is published by
+    # hand (`cargo publish -p furnace-burn`, then `-p furnace-cli`, once furnace-server of the
+    # same version is up), which also lets crates.io's Trusted Publishing be set up for them;
+    # from then on, the repository variable PUBLISH_BURN_CRATES=true has these steps publish
+    # them with every release. furnace-cli is published without models: `cargo install` users
+    # compile their own in with FURNACE_MODELS_DIR.
+    - name: Publish furnace-burn
+      if: vars.PUBLISH_BURN_CRATES == 'true'
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      run: cargo publish --locked -p furnace-burn
+
+    - name: Publish furnace-cli
+      if: vars.PUBLISH_BURN_CRATES == 'true'
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      run: cargo publish --locked -p furnace-cli
 
   # Container image on GitHub Container Registry: ghcr.io/<owner>/furnace:<version> and :latest,
   # for linux/amd64 and linux/arm64. Each architecture builds natively on its own runner (no
@@ -265,9 +282,9 @@ jobs:
 
     - name: Download ONNX models
       run: |
-        mkdir -p models
-        curl -fsSL "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
-        curl -fsSL "https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx" -o models/mnist.onnx
+        mkdir -p furnace-burn/models
+        curl -fsSL "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o furnace-burn/models/resnet18.onnx
+        curl -fsSL "https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx" -o furnace-burn/models/mnist.onnx
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v4

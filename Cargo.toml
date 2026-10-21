@@ -1,17 +1,18 @@
 [package]
 # Published as `furnace-server` (the `furnace` crate name belongs to another project); the
-# library and the binary are both still called `furnace`.
+# library is still called `furnace`. Burn models are served through furnace-burn, the `furnace`
+# command is furnace-cli.
 name = "furnace-server"
 version = "0.11.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Furnace Contributors"]
-description = "Fast, unified, Rust-native, Axum-compatible inference endpoints for Burn models and LLMs: KServe / Triton and OpenAI APIs from one pure-Rust server"
+description = "Fast, unified, Rust-native, Axum-compatible inference endpoints and nervous system for tensor models and LLMs: KServe / Triton and OpenAI APIs from one pure-Rust server"
 documentation = "https://docs.rs/furnace-server"
 homepage = "https://github.com/Gilfeather/furnace"
 repository = "https://github.com/Gilfeather/furnace"
 license = "MIT"
-keywords = ["machine-learning", "inference", "onnx", "server", "burn"]
+keywords = ["machine-learning", "inference", "server", "llm", "axum"]
 categories = ["web-programming::http-server", "science"]
 readme = "README.md"
 exclude = [
@@ -23,8 +24,6 @@ exclude = [
     "/benches/*/",
     "/benches/ci-summary.sh",
     "/models/",
-    # crates.io builds use upstream burn-flex; [patch.crates-io] only applies in this repo
-    "/vendor/",
     "/sample_model.*",
     ".gitignore",
     "/Dockerfile",
@@ -32,39 +31,21 @@ exclude = [
     "deny.toml",
     "default.nix",
     "flake.nix",
-    # The candle adapter is its own crate (not published yet)
+    # The other crates of the workspace are published on their own (or not yet)
+    "/furnace-burn/",
+    "/furnace-cli/",
     "/furnace-candle/",
 ]
-
-# `cargo binstall furnace-server` downloads the release binary instead of compiling
-[package.metadata.binstall]
-pkg-fmt = "bin"
-bin-dir = "furnace{ binary-ext }"
-
-[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
-pkg-url = "{ repo }/releases/download/v{ version }/furnace-linux-x86_64"
-
-[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
-pkg-url = "{ repo }/releases/download/v{ version }/furnace-linux-x86_64-musl"
-
-[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
-pkg-url = "{ repo }/releases/download/v{ version }/furnace-linux-aarch64"
-
-[package.metadata.binstall.overrides.x86_64-apple-darwin]
-pkg-url = "{ repo }/releases/download/v{ version }/furnace-macos-x86_64"
-
-[package.metadata.binstall.overrides.aarch64-apple-darwin]
-pkg-url = "{ repo }/releases/download/v{ version }/furnace-macos-aarch64"
-
-[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
-pkg-url = "{ repo }/releases/download/v{ version }/furnace-windows-x86_64.exe"
 
 [package.metadata.docs.rs]
 # Document the gRPC, TLS and image input APIs too
 features = ["grpc", "tls", "image", "llm"]
 
 [workspace]
-members = [".", "furnace-candle"]
+members = [".", "furnace-burn", "furnace-cli", "furnace-candle"]
+# `cargo build`, `cargo test` and `cargo clippy` at the root cover the server, the Burn adapter
+# and the `furnace` command; furnace-candle (candle from git) only with `-p furnace-candle`
+default-members = [".", "furnace-burn", "furnace-cli"]
 # Benchmarks with their own workspaces, lockfiles and targets, and the helpers they share
 exclude = ["benches/burn", "benches/common", "benches/compare", "benches/llm", "benches/nerve"]
 
@@ -72,19 +53,8 @@ exclude = ["benches/burn", "benches/common", "benches/compare", "benches/llm", "
 name = "furnace"
 path = "src/lib.rs"
 
-[[bin]]
-name = "furnace"
-path = "src/main.rs"
-
-
-
 [features]
-default = ["onnx"]
-# Generate built-in models from ONNX files in models/ at build time
-onnx = ["dep:burn-onnx", "dep:onnx-ir"]
-# Compile built-in model weights into the binary (single-file deploys).
-# Default: weights stay in a separate <name>.bpk file loaded at startup.
-embed-weights = ["onnx"]
+default = []
 # Accept `image/jpeg` and `image/png` on POST /predict, with ImageNet preprocessing done by
 # the server. Off by default to keep the binary small.
 image = ["dep:image"]
@@ -99,19 +69,9 @@ llm = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib"]
 # `model::DummyModel` and `model::DummyTensorsModel`: constant models for testing and
 # benchmarking the server itself, not for serving
 test-models = []
-wgpu = ["burn/wgpu"]
-metal = ["burn/metal"]
-cuda = ["burn/cuda"]
 
 [dependencies]
-# ML Framework
-# `rayon` and `simd` are burn-flex defaults that `default-features = false` would drop:
-# without them the CPU backend runs single-threaded on scalar kernels
-burn = { version = "0.22", default-features = false, features = ["std", "flex", "store", "rayon", "simd"] }
-burn-store = { version = "0.22", default-features = false, features = ["std", "memmap"] }
-# Zero-copy weight loading: .bpk files are memory-mapped and shared with tensors
 bytes = "1.9"
-memmap2 = "0.9"
 
 # Web Framework
 axum = "0.8"
@@ -168,12 +128,9 @@ minijinja-contrib = { version = "2.24", default-features = false, features = ["p
 futures-util = { version = "0.3", default-features = false }
 
 [build-dependencies]
-burn-onnx = { version = "0.22", optional = true }
 # gRPC: a pure-Rust protobuf compiler, so building needs no `protoc`
 protox = { version = "0.10", optional = true }
 tonic-prost-build = { version = "0.14", optional = true }
-# Reads model input/output shapes for the built-in model registry (already a burn-onnx dependency)
-onnx-ir = { version = "0.22", optional = true }
 
 [dev-dependencies]
 tempfile = "3.12"
@@ -183,27 +140,14 @@ tower = { version = "0.5", features = ["util"] }
 # Serves the gRPC tests on an ephemeral port; the nerve unit tests use `tokio_stream::iter`
 # from it too, so keep it next to the optional `grpc` dependency rather than merging the two
 tokio-stream = { version = "0.1", features = ["net"] }
-criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 # Connects the gRPC-over-TLS test's client through the test's own TLS stream
 hyper-util = { version = "0.1", features = ["tokio"] }
 rand = "0.10"
-# Builds ONNX graphs for the build/optimize.rs tests (already a build dependency)
-onnx-ir = "0.22"
 
 [[test]]
 name = "llm"
 required-features = ["llm"]
 
-
-[[example]]
-name = "nerve"
-path = "examples/nerve/main.rs"
-required-features = ["llm"]
-
-[[bench]]
-name = "inference_benchmark"
-harness = false
-required-features = ["test-models"]
 
 [profile.release]
 # Maximum performance optimizations
@@ -260,7 +204,8 @@ lto = true
 inherits = "release"
 lto = "thin"
 
-# Faster 2D convolutions on the CPU backend, pending upstream review in tracel-ai/burn.
-# vendor/burn-flex is burn-flex 0.22.0 plus that patch; see vendor/README.md.
+# Faster 2D convolutions on Burn's CPU backend, for furnace-burn, pending upstream review in
+# tracel-ai/burn. furnace-burn/vendor/burn-flex is burn-flex 0.22.0 plus that patch; see
+# furnace-burn/vendor/README.md.
 [patch.crates-io]
-burn-flex = { path = "vendor/burn-flex" }
+burn-flex = { path = "furnace-burn/vendor/burn-flex" }

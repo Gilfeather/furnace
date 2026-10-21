@@ -2,7 +2,7 @@ use burn::tensor::Device;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::error::{ModelError, Result};
+use furnace::error::{ModelError, Result};
 
 /// Compute backends that can be selected at runtime.
 ///

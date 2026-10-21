@@ -8,7 +8,9 @@ use std::time::Duration;
 use tracing::{Level, info, warn};
 use uuid::Uuid;
 
-use furnace::{BackendKind, Server, api, config, model, models::BuiltInModel};
+use furnace::{Server, api, config, model};
+use furnace_burn::BackendKind;
+use furnace_burn::models::BuiltInModel;
 
 /// What stops the command before it serves: shown as `furnace: <message>`, exit code 2
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -101,7 +103,7 @@ fn build_cli() -> Command {
                 .action(clap::ArgAction::Append)
                 .value_delimiter(',')
                 .help(format!(
-                    "Built-in model compiled into the binary from models/<NAME>.onnx (default: the only one, if there is just one). \
+                    "Built-in model compiled into the binary from furnace-burn/models/<NAME>.onnx (default: the only one, if there is just one). \
                     Several (comma-separated or repeated) are served side by side, the first by /predict. {}",
                     BuiltInModel::describe_available()
                 )),
@@ -742,7 +744,7 @@ fn reloaders(args: &CliArgs) -> Vec<Reloader> {
         let name = name.clone();
         let weights = args.weights.clone();
         Arc::new(move |new_weights: Option<&Path>| {
-            model::load_built_in_model_with_backend(
+            furnace_burn::load_built_in_model_with_backend(
                 &name,
                 backend,
                 new_weights.or(weights.as_deref()),
@@ -753,8 +755,8 @@ fn reloaders(args: &CliArgs) -> Vec<Reloader> {
         let path = path.clone();
         Arc::new(move |new_weights: Option<&Path>| match new_weights {
             // A file model is a .bpk/.json pair; a new path names another pair
-            Some(other) => model::load_model_with_backend(other, backend),
-            None => model::load_model_with_backend(&path, backend),
+            Some(other) => furnace_burn::load_model_with_backend(other, backend),
+            None => furnace_burn::load_model_with_backend(&path, backend),
         }) as Reloader
     });
     built_in.chain(files).collect()

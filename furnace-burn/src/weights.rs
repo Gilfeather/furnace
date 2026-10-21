@@ -14,7 +14,7 @@ use burn_store::{BurnpackStore, ModuleSnapshot};
 use memmap2::Mmap;
 use tracing::warn;
 
-use crate::error::{ModelError, Result};
+use furnace::error::{ModelError, Result};
 
 /// Load Burnpack weights from `path` into `model`, reporting errors instead of panicking
 /// (release builds use `panic = "abort"`).
@@ -94,7 +94,7 @@ mod tests {
         let err = load_burnpack(&mut model, Path::new("does-not-exist.bpk")).unwrap_err();
         assert!(err.to_string().contains("does-not-exist.bpk"), "{err}");
         // Reported as the failed open, before any attempt to map or read it
-        let crate::error::FurnaceError::Model(ModelError::LoadFailed { source, .. }) = err else {
+        let furnace::FurnaceError::Model(ModelError::LoadFailed { source, .. }) = err else {
             panic!("{err:?}");
         };
         assert!(

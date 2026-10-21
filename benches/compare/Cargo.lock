@@ -2897,10 +2897,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "furnace-burn"
+version = "0.11.0"
+dependencies = [
+ "burn",
+ "burn-onnx",
+ "burn-store",
+ "bytes",
+ "chrono",
+ "furnace-server",
+ "memmap2",
+ "onnx-ir",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "furnace-compare"
 version = "0.1.0"
 dependencies = [
  "furnace-bench-common",
+ "furnace-burn",
  "furnace-server",
  "image",
  "ort",
@@ -2916,17 +2934,12 @@ name = "furnace-server"
 version = "0.11.0"
 dependencies = [
  "axum",
- "burn",
- "burn-onnx",
- "burn-store",
  "bytes",
  "chrono",
  "clap",
  "fast-float2",
  "futures-util",
- "memmap2",
  "num_cpus",
- "onnx-ir",
  "rayon",
  "serde",
  "serde_json",

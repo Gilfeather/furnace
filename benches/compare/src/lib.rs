@@ -52,7 +52,7 @@ impl Args {
     pub fn parse(extra_name: &str) -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut args = Args {
-            model: root.join("../../models/resnet18.onnx"),
+            model: root.join("../../furnace-burn/models/resnet18.onnx"),
             image: root.join("dog.jpg"),
             warmup: 5,
             iters: 30,

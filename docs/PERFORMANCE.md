@@ -36,7 +36,7 @@ Furnace is a server, so the question is what it adds around a model, and how it 
 the other ways to put one behind HTTP. [`benches/burn`](../benches/burn) serves the same models
 three ways, each in its own process:
 
-- **Furnace**, through the library API (`Model::from_fn`, or a `BurnModel` for the two-input
+- **Furnace**, through furnace-burn (`from_fn`, or a `BurnModel` for the two-input
   text model), with default settings. Requests use the KServe / Triton v2 protocol with binary
   tensors.
 - **Hand-written axum**: one route taking raw tensor bytes and calling `forward` on
@@ -95,9 +95,9 @@ the default: off, matching a hand-written server, with batching one flag away fo
 it helps.
 
 **The engine.** These numbers use stock burn-flex. This repository's binaries and Docker image
-use a patched copy ([`vendor/burn-flex`](../vendor/README.md)) with faster convolutions: the same
-Burn ResNet-18 takes 12 ms per image instead of 47 ms. A crate depending on `furnace-server` gets
-stock burn-flex until those changes reach a Burn release.
+use a patched copy ([`furnace-burn/vendor/burn-flex`](../furnace-burn/vendor/README.md)) with
+faster convolutions: the same Burn ResNet-18 takes 12 ms per image instead of 47 ms. A crate
+depending on `furnace-burn` gets stock burn-flex until those changes reach a Burn release.
 
 ```bash
 cd benches/burn
@@ -106,7 +106,7 @@ target/release/furnace-burn-bench                          # all models, 1, 4 an
 target/release/furnace-burn-bench --max-batch 8            # with batching on
 target/release/furnace-burn-bench overhead echo            # the server's own work, in process
 # the patched engine:
-cargo build --release --config 'patch.crates-io.burn-flex.path="../../vendor/burn-flex"'
+cargo build --release --config 'patch.crates-io.burn-flex.path="../../furnace-burn/vendor/burn-flex"'
 ```
 
 The FastAPI rows need Python with FastAPI, uvicorn and numpy: the virtual environment of
@@ -114,7 +114,7 @@ The FastAPI rows need Python with FastAPI, uvicorn and numpy: the virtual enviro
 
 ## ResNet-18 compared with other engines
 
-The same `models/resnet18.onnx` (resnet18-v1-7 from the ONNX Model Zoo) on Furnace,
+The same `resnet18.onnx` (resnet18-v1-7 from the ONNX Model Zoo) on Furnace,
 [tract](https://github.com/sonos/tract), [ONNX Runtime](https://onnxruntime.ai) (through the
 [`ort`](https://crates.io/crates/ort) crate) and FastAPI + ONNX Runtime. The input is PyTorch
 Hub's [`dog.jpg`](https://github.com/pytorch/hub/raw/master/images/dog.jpg), and every engine
@@ -161,8 +161,8 @@ rather than across releases.
 The harness is its own Cargo workspace, so `ort` and `tract` never become Furnace dependencies.
 
 ```bash
-mkdir -p models
-curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
+mkdir -p furnace-burn/models
+curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o furnace-burn/models/resnet18.onnx
 curl -L https://github.com/pytorch/hub/raw/master/images/dog.jpg -o benches/compare/dog.jpg
 cargo build --release            # the server, for the HTTP row
 cd benches/compare
@@ -196,7 +196,8 @@ here). `furnace-burn-bench cold-start` reproduces both Furnace rows (see
 ## Where Furnace's speed comes from
 
 Furnace's CPU backend is [burn-flex](https://github.com/tracel-ai/burn) with faster
-convolutions and pooling, vendored in [`vendor/burn-flex`](../vendor/README.md):
+convolutions and pooling, vendored in
+[`furnace-burn/vendor/burn-flex`](../furnace-burn/vendor/README.md):
 
 - **Direct convolution, no im2col.** The input is copied once into a zero-padded buffer (split
   into phase planes for strides above 1), so every kernel tap is a plain vector load. AVX2 and
@@ -290,7 +291,7 @@ body in process takes 27 µs as binary and 4 ms as JSON. Sending a JPEG
 (`--features image`, 1546 × 1213) adds about 30 ms of decoding and resizing.
 
 ```bash
-cargo bench --bench inference_benchmark --features test-models       # in-process criterion benches
+cargo bench -p furnace-burn --bench inference_benchmark --features onnx   # in-process criterion benches
 cargo run --release --example http_bench -- 3000 json1 json4 bin1 bin4   # against a running server
 ```
 

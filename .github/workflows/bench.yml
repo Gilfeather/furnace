@@ -94,14 +94,14 @@ jobs:
     - name: Cache ONNX models
       uses: actions/cache@v5
       with:
-        path: models
+        path: furnace-burn/models
         key: onnx-models-resnet18-v1-7
 
     - name: Download ResNet-18 ONNX model
       shell: bash
       run: |
-        mkdir -p models
-        [ -f models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o models/resnet18.onnx
+        mkdir -p furnace-burn/models
+        [ -f furnace-burn/models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o furnace-burn/models/resnet18.onnx
 
     # The furnace binary as released, with its ResNet-18 weights next to it
     - name: Build furnace
@@ -110,7 +110,7 @@ jobs:
         cargo build --release --locked --bin furnace --features "grpc tls"
         mkdir -p dist
         cp target/release/furnace dist/
-        cp "$(ls -t target/release/build/furnace-server-*/out/models/resnet18.bpk | head -1)" dist/
+        cp "$(ls -t target/release/build/furnace-burn-*/out/models/resnet18.bpk | head -1)" dist/
 
     - name: Build the harnesses
       shell: bash

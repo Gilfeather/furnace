@@ -406,7 +406,8 @@ impl From<Model> for ServedModel {
 /// keys, rate limits and TLS, all configured through [`ServerConfig`].
 ///
 /// ```ignore
-/// let model = Model::from_fn("digits", BackendKind::Cpu, &[1, 28, 28], &[10],
+/// // A Burn model's forward function, through furnace-burn
+/// let model = furnace_burn::from_fn("digits", BackendKind::Cpu, &[1, 28, 28], &[10],
 ///     move |x: Tensor<4>| net.forward(x))?;
 /// Server::new().port(8080).model(model).serve().await?;
 /// ```
@@ -3230,11 +3231,11 @@ pub(crate) mod tests {
         delay: Duration,
     }
 
-    impl crate::BurnModel for Misbehaving {
+    impl crate::TensorModel for Misbehaving {
         fn name(&self) -> &str {
             self.dummy.name()
         }
-        fn backend(&self) -> crate::BackendKind {
+        fn backend(&self) -> &str {
             self.dummy.backend()
         }
         fn inputs(&self) -> Vec<crate::IoSpec> {
@@ -3299,11 +3300,11 @@ pub(crate) mod tests {
         waiting: Arc<AtomicU64>,
     }
 
-    impl crate::BurnModel for Gated {
+    impl crate::TensorModel for Gated {
         fn name(&self) -> &str {
             self.dummy.name()
         }
-        fn backend(&self) -> crate::BackendKind {
+        fn backend(&self) -> &str {
             self.dummy.backend()
         }
         fn inputs(&self) -> Vec<crate::IoSpec> {

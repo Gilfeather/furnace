@@ -26,12 +26,12 @@ ResNet-18 on CPU goes from ~57 ms with stock burn-flex 0.22.0 to ~8 ms per image
 
 The im2col and max pooling changes are proposed upstream in tracel-ai/burn. Once a Burn release
 includes everything here, delete this directory and the `[patch.crates-io]` entries in
-`Cargo.toml` and `benches/compare/Cargo.toml`.
+the root `Cargo.toml` and `benches/compare/Cargo.toml`.
 
 To check the vendored copy against upstream:
 
 ```bash
-diff -r ~/.cargo/registry/src/*/burn-flex-0.22.0 vendor/burn-flex
+diff -r ~/.cargo/registry/src/*/burn-flex-0.22.0 furnace-burn/vendor/burn-flex
 ```
 
 Only the files listed above should differ, plus `src/ops/mod.rs`, which declares the new

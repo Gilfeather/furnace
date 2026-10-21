@@ -25,7 +25,7 @@ read-only container, and gRPC on port 8001. [`values.yaml`](helm/furnace/values.
 | `extraArgs` | Any other `furnace` option |
 
 To serve your own models, build an image from the [Dockerfile](../Dockerfile) with them in
-`models/` and set `image.repository`.
+`furnace-burn/models/` and set `image.repository`.
 
 ## KServe
 

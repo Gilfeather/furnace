@@ -1,4 +1,4 @@
-# Everything the build does not need; models/ stays, it is compiled in
+# Everything the build does not need; furnace-burn/models/ stays, it is compiled in
 .git
 .github
 .claude

@@ -4,7 +4,7 @@
 
 use furnace::Server;
 use furnace::api::ServerConfig;
-use furnace::model::load_built_in_model;
+use furnace_burn::load_built_in_model;
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::process::{Child, Command, Stdio};
@@ -266,12 +266,12 @@ struct Held {
     entered: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl furnace::BurnModel for Held {
+impl furnace::TensorModel for Held {
     fn name(&self) -> &str {
         "held"
     }
-    fn backend(&self) -> furnace::BackendKind {
-        furnace::BackendKind::Cpu
+    fn backend(&self) -> &str {
+        "cpu"
     }
     fn inputs(&self) -> Vec<furnace::IoSpec> {
         vec![furnace::IoSpec::fp32("input", &[4])]

@@ -503,10 +503,10 @@ The admin API's codes (`ADMIN_API_DISABLED`, `NOT_RELOADABLE`, `RELOAD_IN_PROGRE
 
 ## Troubleshooting
 
-**`unknown built-in model` / model missing**: `models/<name>.onnx` wasn't present at
-build time, or it was skipped: look for `skipping model '<name>'` warnings in the build
-output. Download it (see the README's quick start), then `cargo build --release`.
-`touch build.rs` forces regeneration.
+**`unknown built-in model` / model missing**: `furnace-burn/models/<name>.onnx` (or
+`$FURNACE_MODELS_DIR/<name>.onnx`) wasn't present at build time, or it was skipped: look for
+`skipping model '<name>'` warnings in the build output. Download it (see the README's quick
+start), then `cargo build --release`. `touch furnace-burn/build.rs` forces regeneration.
 
 **`no model selected`**: the build has several built-in models; pick one with `--model-name`.
 
@@ -530,7 +530,7 @@ it says so or refuses the request:
 | ``Server startup failed: --tls-cert needs a build with the `tls` feature`` | `--features tls` |
 | `415` for `Content-Type: image/jpeg` or `image/png` | `--features image` |
 | Your code does not compile: `furnace::llm`, `nerve::Llm` or `Server::llm` not found | `features = ["llm"]` on `furnace-server` |
-| `unknown built-in model` for a model whose `.onnx` is in `models/` | the default `onnx` feature, without `--no-default-features` |
+| `unknown built-in model` for a model whose `.onnx` is in `furnace-burn/models/` | furnace-cli's default `onnx` feature, without `--no-default-features` |
 
 The release binaries and the Docker image are built with `grpc` and `tls`, not `image`. LLMs
 are served from the library only ([LLM.md](LLM.md)).

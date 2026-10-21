@@ -1,7 +1,7 @@
 //! Criterion benchmarks.
 //!
 //! - `resnet18/*`: real ResNet-18 inference through `Model::predict_batch`
-//!   (requires `models/resnet18.onnx` at build time)
+//!   (requires the `onnx` feature and `models/resnet18.onnx` at build time)
 //! - `mlp/*`: file-format MLP (784 -> 128 -> 10)
 //! - `overhead/*`: constant-output dummy model with ResNet-sized I/O, i.e. the cost of
 //!   validation and tensor conversion alone, excluding the network itself
@@ -10,7 +10,8 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use furnace::api::PredictRequest;
-use furnace::model::{DummyModel, Model, load_model};
+use furnace::model::{DummyModel, Model};
+use furnace_burn::load_model;
 use std::hint::black_box;
 use std::path::Path;
 
@@ -35,7 +36,7 @@ fn bench_model(c: &mut Criterion, group_name: &str, model: &Model, batch_sizes: 
 }
 
 fn bench_resnet18(c: &mut Criterion) {
-    let Ok(model) = furnace::model::load_built_in_model("resnet18") else {
+    let Ok(model) = furnace_burn::load_built_in_model("resnet18") else {
         eprintln!("resnet18 not compiled in; skipping (place models/resnet18.onnx and rebuild)");
         return;
     };

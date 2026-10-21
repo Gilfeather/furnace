@@ -1,8 +1,8 @@
 //! Create an MNIST-shaped MLP (784 -> 128 -> 10) and save it in the format
 //! `furnace --model-path` loads: `model.bpk` (Burnpack weights) + `model.json` (metadata).
 
-use furnace::BackendKind;
-use furnace::burn_model::{BurnModelContainer, MlpConfig};
+use furnace_burn::BackendKind;
+use furnace_burn::mlp::{BurnModelContainer, MlpConfig};
 use std::fs;
 use std::path::Path;
 

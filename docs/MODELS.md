@@ -13,8 +13,8 @@ this table was written (2026-10-19), not checked again since. Burn is 0.22 throu
 
 | Model | Tensors | Checked | Last checked | Where |
 |---|---|---|---|---|
-| CNN, 28x28 images | 1 FP32 in, 1 out | outputs match `forward`, CPU and wgpu | every CI run (`tests/serve_burn_model.rs`, CPU) | [`examples/serve_burn_model`](../examples/serve_burn_model/models.rs) |
-| Text classifier (embedding + mean + linear) | 2 INT64 in, 1 FP32 out | outputs match `forward`, CPU and wgpu | every CI run (`tests/serve_burn_model.rs`, CPU) | [`examples/serve_burn_model`](../examples/serve_burn_model/models.rs) |
+| CNN, 28x28 images | 1 FP32 in, 1 out | outputs match `forward`, CPU and wgpu | every CI run (`furnace-burn/tests/serve_burn_model.rs`, CPU) | [`serve_burn_model`](../furnace-burn/examples/serve_burn_model/models.rs) |
+| Text classifier (embedding + mean + linear) | 2 INT64 in, 1 FP32 out | outputs match `forward`, CPU and wgpu | every CI run (`furnace-burn/tests/serve_burn_model.rs`, CPU) | [`serve_burn_model`](../furnace-burn/examples/serve_burn_model/models.rs) |
 
 ## ONNX models (built in at build time)
 
@@ -23,7 +23,7 @@ From the [ONNX Model Zoo](https://github.com/onnx/models) unless noted.
 | Model | File | Tensors | Checked | Last checked |
 |---|---|---|---|---|
 | ResNet-18 | `resnet18-v1-7.onnx` | 1 FP32 in, 1 out | outputs match ONNX Runtime (same top class and logit) | 0.10.0 ([`benches/compare`](PERFORMANCE.md)); serves on every CI run |
-| MNIST | `mnist-8.onnx` | 1 FP32 in, 1 out | serves | every CI run (`tests/integration_tests.rs`) |
+| MNIST | `mnist-8.onnx` | 1 FP32 in, 1 out | serves | every CI run (`furnace-cli/tests/integration_tests.rs`) |
 | MobileNetV2 | `mobilenetv2-12.onnx` | 1 FP32 in, 1 out | builds | before 0.10.0 |
 | EfficientNet-Lite4 | `efficientnet-lite4-11.onnx` | 1 FP32 in (NHWC), 1 out | builds | before 0.10.0 |
 | Tiny YOLOv2 | `tinyyolov2-8.onnx` | 1 FP32 in, 1 out | builds | before 0.10.0 |

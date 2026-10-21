@@ -6,13 +6,12 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use burn::tensor::Tensor;
 use furnace::llm::mock::{self, MockEngine, MockStepModel};
 use furnace::llm::{
     Event, FinishReason, GenerateRequest, LlmEngine, Message, SamplingParams, Scheduled,
     SchedulerConfig,
 };
-use furnace::{BackendKind, Model, Server};
+use furnace::{HostTensor, IoSpec, Model, Server, TensorModel, Values};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -307,15 +306,42 @@ async fn max_tokens_ends_with_length() {
     }
 }
 
+/// `[batch, 4] -> [batch, 2]`: the first two values of each item
+#[derive(Debug)]
+struct FirstTwo;
+
+impl TensorModel for FirstTwo {
+    fn name(&self) -> &str {
+        "digits"
+    }
+    fn backend(&self) -> &str {
+        "cpu"
+    }
+    fn inputs(&self) -> Vec<IoSpec> {
+        vec![IoSpec::fp32("input", &[4])]
+    }
+    fn outputs(&self) -> Vec<IoSpec> {
+        vec![IoSpec::fp32("output", &[2])]
+    }
+    fn run(&self, inputs: Vec<HostTensor>) -> furnace::Result<Vec<HostTensor>> {
+        let Values::F32(values) = &inputs[0].values else {
+            unreachable!("checked against inputs()")
+        };
+        let firsts: Vec<f32> = values
+            .chunks(4)
+            .flat_map(|item| [item[0], item[1]])
+            .collect();
+        Ok(vec![HostTensor {
+            shape: vec![inputs[0].batch(), 2],
+            values: Values::F32(firsts),
+        }])
+    }
+}
+
 #[tokio::test]
 async fn llms_and_tensor_models_share_one_server() {
     let app = Server::new()
-        .model(
-            Model::from_fn("digits", BackendKind::Cpu, &[4], &[2], |x: Tensor<2>| {
-                x.narrow(1, 0, 2)
-            })
-            .unwrap(),
-        )
+        .model(Model::custom(FirstTwo))
         .llm(scheduled(MockStepModel::new("mock", REPLY)))
         .llm(MockEngine::new("other", &["a", "b"]))
         .router()

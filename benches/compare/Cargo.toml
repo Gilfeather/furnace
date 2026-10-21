@@ -19,10 +19,12 @@ path = "src/main.rs"
 [features]
 default = []
 # Also benchmark furnace on its wgpu backend (Vulkan / DX12 / Metal)
-wgpu = ["furnace/wgpu"]
+wgpu = ["furnace-burn/wgpu"]
 
 [dependencies]
 furnace = { package = "furnace-server", path = "../.." }
+# The built-in ResNet-18, from furnace-burn/models/resnet18.onnx
+furnace-burn = { path = "../../furnace-burn", features = ["onnx"] }
 furnace-bench-common = { path = "../common" }
 # No `transformers` feature: ResNet-18 does not need it and it doubles the binary
 tract-onnx = { version = "0.23.8", default-features = false }
@@ -44,6 +46,6 @@ panic = "abort"
 strip = true
 debug = false
 
-# Same patched CPU backend as furnace itself (see vendor/README.md)
+# Same patched CPU backend as furnace itself (see furnace-burn/vendor/README.md)
 [patch.crates-io]
-burn-flex = { path = "../../vendor/burn-flex" }
+burn-flex = { path = "../../furnace-burn/vendor/burn-flex" }

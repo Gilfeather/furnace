@@ -5,9 +5,9 @@
 //! receptor and never reach anything.
 //!
 //! ```bash
-//! cargo run --release --features llm --example nerve
+//! cargo run --release -p furnace-burn --example nerve
 //! # Keep serving after the demo stream, to poke at it with curl:
-//! cargo run --release --features llm --example nerve -- --serve
+//! cargo run --release -p furnace-burn --example nerve -- --serve
 //! curl -X POST localhost:3000/events -d 'ALERT: smoke in rack 4'
 //! curl localhost:3000/nerve | jq .
 //! ```
@@ -29,7 +29,8 @@ use furnace::nerve::prelude::*;
 use furnace::nerve::receptor::{ChannelSender, kinds};
 use furnace::nerve::{FabricBuilder, Feature};
 use furnace::tensor::{HostTensor, Values};
-use furnace::{BackendKind, Model, Server};
+use furnace::{Model, Server};
+use furnace_burn::BackendKind;
 use serde_json::json;
 
 const PORT: u16 = 3000;
@@ -63,7 +64,7 @@ fn frame_classifier() -> furnace::Result<Model> {
         TensorData::new(vec![0.5 * s, 0.2 * s, -0.5 * s], [1, 3]),
         &device,
     );
-    Model::from_fn(
+    furnace_burn::from_fn(
         "frame-classifier",
         BackendKind::Cpu,
         &[784],

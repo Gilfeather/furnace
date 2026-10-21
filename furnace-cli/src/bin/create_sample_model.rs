@@ -1,5 +1,5 @@
 use burn::tensor::{Tensor, TensorData};
-use furnace::burn_model::create_sample_model;
+use furnace_burn::mlp::create_sample_model;
 use std::path::PathBuf;
 use tracing::info;
 

@@ -10,7 +10,8 @@ use axum::http::{Request, StatusCode};
 use burn::module::Module;
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_store::{BurnpackStore, ModuleSnapshot};
-use furnace::{BackendKind, Model, Server};
+use furnace::Server;
+use furnace_burn::BackendKind;
 use models::{DigitNet, Sentiment, SentimentNet};
 use tower::ServiceExt;
 
@@ -60,7 +61,7 @@ fn to_device<M: Module + ModuleSnapshot>(module: &M, mut copy: M, dir: &std::pat
     module
         .save_into(&mut BurnpackStore::from_file(&path).overwrite(true))
         .unwrap();
-    furnace::weights::load_burnpack(&mut copy, &path).unwrap();
+    furnace_burn::weights::load_burnpack(&mut copy, &path).unwrap();
     copy
 }
 
@@ -76,7 +77,7 @@ async fn burn_models_on_wgpu_match_the_cpu() {
 
     let app = Server::new()
         .model(
-            Model::from_fn(
+            furnace_burn::from_fn(
                 "digits",
                 BackendKind::Wgpu,
                 &[1, 28, 28],
@@ -85,7 +86,7 @@ async fn burn_models_on_wgpu_match_the_cpu() {
             )
             .unwrap(),
         )
-        .model(Model::custom(Sentiment {
+        .model(furnace_burn::custom(Sentiment {
             net: sentiment_gpu,
             backend: BackendKind::Wgpu,
             device: gpu,
