@@ -104,25 +104,25 @@ are what carries over.
 
 <!-- bench:server-table:start -->
 
-On GitHub's `ubuntu-latest` runner (AMD EPYC 7763 64-Core Processor, 4 cores), 2026-10-19, commit [`25896c0`](https://github.com/Gilfeather/furnace/commit/25896c045fdc2ae4d188012be971a09fc66a43d8),
-16 concurrent clients, medians of 3 runs ([workflow run](https://github.com/Gilfeather/furnace/actions/runs/39277593270)):
+On GitHub's `ubuntu-latest` runner (Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz, 4 cores), 2026-10-21, commit [`db85c42`](https://github.com/Gilfeather/furnace/commit/db85c42548c2120f50097d9f0ff72a3ad5cc6a0e),
+16 concurrent clients, medians of 3 runs ([workflow run](https://github.com/Gilfeather/furnace/actions/runs/39536457897)):
 
 | | **Furnace** | Hand-written axum | FastAPI (uvicorn, 4 workers) |
 |---|---|---|---|
-| Model that returns its input: requests/s, median latency | **33,151, 0.43 ms** | 39,917, 0.36 ms | 10,518, 1.3 ms |
-| Small CNN digit classifier in Burn: requests/s, p95 | **17,238, 1.8 ms** | 19,648, 1.5 ms |  |
-| ResNet-18 in Burn: requests/s, p95 | **25, 938 ms** | 25, 939 ms |  |
-| Transformer text classifier in Burn: requests/s, p95 | **116, 167 ms** | 114, 168 ms |  |
-| Ready after start, returning its input | **7.1 ms** | 7 ms | 1.2 s (454 ms with 1 worker) |
-| Memory (peak private), returning its input | **1.9 MB** | 1.6 MB | 46 MB with 1 worker |
+| Model that returns its input: requests/s, median latency | **48,299, 0.29 ms** | 60,758, 0.24 ms | 13,487, 1 ms |
+| Small CNN digit classifier in Burn: requests/s, p95 | **18,572, 1.6 ms** | 22,142, 1.4 ms |  |
+| ResNet-18 in Burn: requests/s, p95 | **21, 1.1 s** | 21, 1 s |  |
+| Transformer text classifier in Burn: requests/s, p95 | **100, 194 ms** | 100, 194 ms |  |
+| Ready after start, returning its input | **5.8 ms** | 5.7 ms | 1.1 s (422 ms with 1 worker) |
+| Memory (peak private), returning its input | **2.2 MB** | 1.7 MB | 46 MB with 1 worker |
 
 <!-- bench:server-table:end -->
 
 <!-- bench:server-notes:start -->
 
-Furnace adds request IDs, metrics, input checks, backpressure and the Triton protocol to the hand-written server: 9.9 µs per request in process, one request at a time (41.9 µs against 32.0 µs).
-Under load it serves 83% of the hand-written server's requests per second with the model that returns its input and 100% with ResNet-18.
-The release binary with ResNet-18 built in is ready 52 ms after it starts and has answered its first inference at 94 ms.
+Furnace adds request IDs, metrics, input checks, backpressure and the Triton protocol to the hand-written server: 7.9 µs per request in process, one request at a time (30.0 µs against 22.1 µs).
+Under load it serves 79% of the hand-written server's requests per second with the model that returns its input and 100% with ResNet-18.
+The release binary with ResNet-18 built in is ready 46 ms after it starts and has answered its first inference at 79 ms.
 
 <!-- bench:server-notes:end -->
 
@@ -240,8 +240,8 @@ loops.
 
 <!-- bench:nerve:start -->
 
-On a Windows laptop (furnace 0.9.0, 2026-10-20), against a hand-written server doing the same work: 146 ns per hop, 0.8 µs from stimulus to effector call on a reflex arc, a brain fraction of 0.46 on a stream with half repeats, 47 µs added to a webhook.
-At 16 clients the fabric server serves 11% fewer requests per second than the bare handler (the server layer around it, not the fabric).
+On the same run, against a hand-written server doing the same work: 194 ns per hop, 0.9 µs from stimulus to effector call on a reflex arc, a brain fraction of 0.46 on a stream with half repeats, 39 µs added to a webhook.
+At 16 clients the fabric server serves 20% fewer requests per second than the bare handler (the server layer around it, not the fabric).
 
 <!-- bench:nerve:end -->
 
