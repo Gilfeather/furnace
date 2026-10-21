@@ -41,7 +41,7 @@ use crate::nerve::serve::{Refused, ServedNeuron, Serving};
 #[cfg(feature = "image")]
 use crate::preprocess::{ImageKind, image_input_size, preprocess_image};
 use crate::tensor::{HostTensor, Values};
-use furnace_metrics::{Histogram, Percentiles};
+use kuebiko::{Histogram, Percentiles};
 
 /// Media type of the raw little-endian `f32` input/output format
 pub const OCTET_STREAM: &str = "application/octet-stream";
@@ -1772,7 +1772,7 @@ fn wants_prometheus(headers: &HeaderMap) -> bool {
 }
 
 fn prometheus_metrics(state: &ServerState) -> String {
-    use furnace_metrics::{label, render_value};
+    use kuebiko::{label, render_value};
     use std::fmt::Write as _;
     let mut out = String::with_capacity(8192);
     let _ = writeln!(out, "# HELP furnace_build_info Furnace version");

@@ -1,5 +1,8 @@
 //! Dynamic batching on worker threads, with no dependencies.
 //!
+//! Named after Amaterasu, the sun goddess of Japanese myth, who gathers scattered light and
+//! sends it out at once, as amate gathers waiting requests into one batch.
+//!
 //! Items queue to a few worker threads, each running one batch at a time. While some worker
 //! is idle, every item gets a batch of its own, started at once. Once all workers are busy,
 //! the queue fills, and the next worker to finish takes everything queued, up to
@@ -19,7 +22,7 @@
 //! ```
 //! use std::sync::mpsc;
 //! use std::time::Duration;
-//! use furnace_batch::{Batching, Config, Engine, Queued};
+//! use amate::{Batching, Config, Engine, Queued};
 //!
 //! /// Sums the numbers of each batch and sends the totals on
 //! struct Sum(mpsc::Sender<u64>);

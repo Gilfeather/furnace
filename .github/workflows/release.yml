@@ -239,38 +239,38 @@ jobs:
     # furnace's parts, which furnace-server depends on. Like furnace-burn below, their first
     # version is published by hand; PUBLISH_PART_CRATES=true then publishes them with every
     # release (see DEVELOPMENT.md). Until they are on crates.io, furnace-server cannot be.
-    - name: Authenticate with crates.io (furnace-batch)
+    - name: Authenticate with crates.io (amate)
       if: vars.PUBLISH_PART_CRATES == 'true'
       id: auth-batch
       uses: rust-lang/crates-io-auth-action@v1
 
-    - name: Publish furnace-batch
+    - name: Publish amate
       if: vars.PUBLISH_PART_CRATES == 'true'
       env:
         CARGO_REGISTRY_TOKEN: ${{ steps.auth-batch.outputs.token }}
-      run: cargo publish --locked -p furnace-batch
+      run: cargo publish --locked -p amate
 
-    - name: Authenticate with crates.io (furnace-metrics)
+    - name: Authenticate with crates.io (kuebiko)
       if: vars.PUBLISH_PART_CRATES == 'true'
       id: auth-metrics
       uses: rust-lang/crates-io-auth-action@v1
 
-    - name: Publish furnace-metrics
+    - name: Publish kuebiko
       if: vars.PUBLISH_PART_CRATES == 'true'
       env:
         CARGO_REGISTRY_TOKEN: ${{ steps.auth-metrics.outputs.token }}
-      run: cargo publish --locked -p furnace-metrics
+      run: cargo publish --locked -p kuebiko
 
-    - name: Authenticate with crates.io (furnace-alloc)
+    - name: Authenticate with crates.io (kamui)
       if: vars.PUBLISH_PART_CRATES == 'true'
       id: auth-alloc
       uses: rust-lang/crates-io-auth-action@v1
 
-    - name: Publish furnace-alloc
+    - name: Publish kamui
       if: vars.PUBLISH_PART_CRATES == 'true'
       env:
         CARGO_REGISTRY_TOKEN: ${{ steps.auth-alloc.outputs.token }}
-      run: cargo publish --locked -p furnace-alloc
+      run: cargo publish --locked -p kamui
 
     - name: Authenticate with crates.io (furnace-server)
       id: auth-server

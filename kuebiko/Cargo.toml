@@ -1,11 +1,11 @@
 [package]
-name = "furnace-metrics"
+name = "kuebiko"
 version = "0.12.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Furnace Contributors"]
 description = "Lock-free latency histograms with percentile estimates, and the Prometheus text format, with no dependencies"
-documentation = "https://docs.rs/furnace-metrics"
+documentation = "https://docs.rs/kuebiko"
 homepage = "https://github.com/Gilfeather/furnace"
 repository = "https://github.com/Gilfeather/furnace"
 license = "MIT"

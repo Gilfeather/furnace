@@ -1,5 +1,8 @@
 //! A global allocator that keeps freed large blocks for reuse, with no dependencies.
 //!
+//! Named after Kamui (神威), the power to put things away in another space and bring them back,
+//! as kamui keeps freed memory and hands it out again.
+//!
 //! Every operator of a model allocates its output, and a ResNet-18 forward pass makes dozens of
 //! allocations between 100 KB and a few MB. The system allocators hand blocks that large
 //! straight back to the OS on free (Windows' heap past its threshold, glibc past
@@ -41,7 +44,7 @@ struct Cache {
 ///
 /// ```no_run
 /// #[global_allocator]
-/// static ALLOCATOR: furnace_alloc::BlockCache = furnace_alloc::BlockCache::new();
+/// static ALLOCATOR: kamui::BlockCache = kamui::BlockCache::new();
 /// ```
 pub struct BlockCache {
     // `std::sync::Mutex` does not allocate (SRW lock on Windows, futex on Linux), so it can be

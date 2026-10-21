@@ -37,7 +37,7 @@ use serde::Serialize;
 use super::latency::LatencyEstimate;
 use super::neuron::{Cx, Firing, Neuron, NeuronKind};
 use super::signal::{Command, Signal};
-use furnace_metrics::{render_family, render_labelled};
+use kuebiko::{render_family, render_labelled};
 
 pub use channel::{ChannelOut, Delivery};
 pub use file_append::FileAppend;

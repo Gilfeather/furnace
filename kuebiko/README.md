@@ -1,4 +1,9 @@
-# furnace-metrics
+# kuebiko
+
+Named after Kuebiko, the scarecrow god of Japanese myth who cannot walk yet knows everything
+under heaven, as a metric stands in one place and sees every request.
+Built for and maintained in [Furnace](https://github.com/Gilfeather/furnace), the pure-Rust
+inference server.
 
 Lock-free latency histograms with percentile estimates, and the Prometheus text format, with no
 dependencies.
@@ -11,7 +16,7 @@ dependencies.
 - Feature `serde`: `Serialize` and `Deserialize` for `Percentiles`.
 
 ```rust
-use furnace_metrics::{Histogram, render_value};
+use kuebiko::{Histogram, render_value};
 use std::time::Duration;
 
 let latency = Histogram::new();
@@ -25,4 +30,4 @@ println!("{:?}", latency.percentiles_ms()); // Percentiles { p50: Some(..), .. }
 ```
 
 It serves the metrics of [Furnace](https://github.com/Gilfeather/furnace). The API
-documentation is on [docs.rs](https://docs.rs/furnace-metrics). MIT licensed.
+documentation is on [docs.rs](https://docs.rs/kuebiko). MIT licensed.

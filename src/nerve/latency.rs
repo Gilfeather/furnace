@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use furnace_metrics::{FINE_LATENCY_BUCKETS, Histogram, Percentiles};
+use kuebiko::{FINE_LATENCY_BUCKETS, Histogram, Percentiles};
 
 /// Samples kept; the percentiles are of the most recent ones
 const WINDOW: usize = 128;
