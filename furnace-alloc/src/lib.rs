@@ -1,4 +1,4 @@
-//! A global allocator that keeps freed large blocks for reuse.
+//! A global allocator that keeps freed large blocks for reuse, with no dependencies.
 //!
 //! Every operator of a model allocates its output, and a ResNet-18 forward pass makes dozens of
 //! allocations between 100 KB and a few MB. The system allocators hand blocks that large
@@ -10,6 +10,8 @@
 //! batch-1 latency by about 15%.
 //!
 //! Small allocations go straight to [`System`].
+//!
+//! The `furnace` command of [furnace](https://github.com/Gilfeather/furnace) runs on it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
@@ -39,7 +41,7 @@ struct Cache {
 ///
 /// ```no_run
 /// #[global_allocator]
-/// static ALLOCATOR: furnace::allocator::BlockCache = furnace::allocator::BlockCache::new();
+/// static ALLOCATOR: furnace_alloc::BlockCache = furnace_alloc::BlockCache::new();
 /// ```
 pub struct BlockCache {
     // `std::sync::Mutex` does not allocate (SRW lock on Windows, futex on Linux), so it can be

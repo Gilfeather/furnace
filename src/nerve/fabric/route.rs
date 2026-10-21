@@ -6,7 +6,6 @@ use std::time::Instant;
 use tracing::{debug, warn};
 
 use super::{Cell, Fabric, MAX_HOPS, Outcome, Pathway};
-use crate::batching::engine;
 use crate::nerve::latency::LatencyEstimate;
 use crate::nerve::neuron::{Cx, Firing, NeuronKind, Quiet};
 use crate::nerve::signal::{NeuronId, PathwayId, Signal};
@@ -292,5 +291,5 @@ impl Fabric {
 /// A signal announced on a deliberative pathway, see [`Fabric::announce`]
 pub(crate) struct Announced<'a> {
     pathway: PathwayId,
-    arrival: engine::Arrival<'a, Signal>,
+    arrival: furnace_batch::Arrival<'a, Signal>,
 }

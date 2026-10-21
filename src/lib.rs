@@ -161,11 +161,6 @@
 //!   testing and benchmarking the server itself.
 
 pub mod access;
-// The `furnace` command's allocator. Public for the binary (crate furnace-cli) and
-// benches/compare only; not part of the library's API. It has no dependencies, so it stays here,
-// where a harness can use it too.
-#[doc(hidden)]
-pub mod allocator;
 pub mod api;
 pub mod batching;
 pub mod error;
@@ -176,7 +171,6 @@ pub mod model;
 pub mod nerve;
 #[cfg(feature = "image")]
 pub mod preprocess;
-pub mod telemetry;
 pub mod tensor;
 // RFC 3339 timestamps; public for furnace-burn's model metadata
 #[doc(hidden)]

@@ -1,0 +1,25 @@
+[package]
+name = "furnace-metrics"
+version = "0.12.0"
+edition = "2024"
+rust-version = "1.95"
+authors = ["Furnace Contributors"]
+description = "Lock-free latency histograms with percentile estimates, and the Prometheus text format, with no dependencies"
+documentation = "https://docs.rs/furnace-metrics"
+homepage = "https://github.com/Gilfeather/furnace"
+repository = "https://github.com/Gilfeather/furnace"
+license = "MIT"
+keywords = ["metrics", "prometheus", "histogram", "latency", "percentile"]
+categories = ["development-tools::profiling"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+features = ["serde"]
+
+[features]
+default = []
+# `Serialize` and `Deserialize` for `Percentiles`
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"], optional = true }

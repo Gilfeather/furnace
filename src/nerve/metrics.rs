@@ -10,7 +10,7 @@ use super::fabric::{Fabric, PathwayKind};
 use super::latency::LatencySnapshot;
 use super::neuron::{NeuronKind, Quiet};
 use super::signal::NeuronId;
-use crate::telemetry::{label, render_family, render_labelled, render_value};
+use furnace_metrics::{label, render_family, render_labelled, render_value};
 
 /// The fabric's metrics (the `nerve` part of `GET /metrics`)
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -513,7 +513,7 @@ mod tests {
     /// The series of a histogram with no observations, in the fine buckets
     fn empty_histogram(name: &str, labels: &str) -> String {
         let mut out = String::new();
-        for le in crate::telemetry::FINE_LATENCY_BUCKETS
+        for le in furnace_metrics::FINE_LATENCY_BUCKETS
             .iter()
             .map(f64::to_string)
             .chain(["+Inf".to_string()])

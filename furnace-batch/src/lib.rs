@@ -1,5 +1,4 @@
-//! The batching engine: the one algorithm behind the nervous system's deliberative pathways,
-//! the served models' among them.
+//! Dynamic batching on worker threads, with no dependencies.
 //!
 //! Items queue to a few worker threads, each running one batch at a time. While some worker
 //! is idle, every item gets a batch of its own, started at once. Once all workers are busy,
@@ -7,24 +6,59 @@
 //! [`Config::max_batch`] by weight, as one batch. If the queue runs dry before the batch is
 //! full, the worker waits for more, but never longer than the [`Batching::window`] after
 //! the first item was queued: a server waits only while an announced item is still on its
-//! way in (its body is being received or decoded), a deliberative pathway waits out its
-//! summation window. Items nobody wants any more (their client gave up) are skipped, and a
-//! batch that panics loses only its own items, where panics unwind: with `panic = "abort"`
-//! (furnace's own release profile) the process stops.
+//! way in (its body is being received or decoded, see [`Engine::arrival`]), a batch that sums
+//! over time waits out its window ([`Config::waits_unannounced`]). Items nobody wants any
+//! more (their client gave up) are skipped, and a batch that panics loses only its own items,
+//! where panics unwind: with `panic = "abort"` the process stops.
 //!
 //! What a batch is made of, how heavy each item is, how long the window is and what to do
-//! with the batch are the [`Batching`]'s: the engine knows nothing about models, replies or
-//! signals.
+//! with the batch are the [`Batching`]'s: the engine knows nothing about models or replies.
+//! It is the algorithm behind [furnace](https://github.com/Gilfeather/furnace)'s dynamic
+//! batching.
+//!
+//! ```
+//! use std::sync::mpsc;
+//! use std::time::Duration;
+//! use furnace_batch::{Batching, Config, Engine, Queued};
+//!
+//! /// Sums the numbers of each batch and sends the totals on
+//! struct Sum(mpsc::Sender<u64>);
+//!
+//! impl Batching for Sum {
+//!     type Item = u64;
+//!
+//!     fn weight(&self, _: &u64) -> usize {
+//!         1
+//!     }
+//!
+//!     fn window(&self) -> Duration {
+//!         Duration::from_millis(2)
+//!     }
+//!
+//!     fn run(&self, batch: Vec<Queued<u64>>) {
+//!         let _ = self.0.send(batch.iter().map(|queued| queued.item).sum());
+//!     }
+//! }
+//!
+//! let (totals, received) = mpsc::channel();
+//! let config = Config { max_batch: 8, workers: 2, capacity: Some(1024), waits_unannounced: false };
+//! let engine = Engine::start(Sum(totals), config, |i| format!("sum-{i}"));
+//! for n in 1..=10 {
+//!     engine.submit(None, n).unwrap();
+//! }
+//! // The workers run what is queued, then stop, and `Sum` with them
+//! drop(engine);
+//! assert_eq!(received.iter().sum::<u64>(), 55);
+//! ```
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::error;
 
 /// What a batch is made of and what to do with one
-pub(crate) trait Batching: Send + Sync + 'static {
+pub trait Batching: Send + Sync + 'static {
     type Item: Send + 'static;
 
     /// The item's share of a batch, counted against [`Config::max_batch`]. An item heavier
@@ -42,10 +76,15 @@ pub(crate) trait Batching: Send + Sync + 'static {
 
     /// Run a batch; its results are the implementor's to deliver
     fn run(&self, batch: Vec<Queued<Self::Item>>);
+
+    /// A batch of this total weight panicked, and whatever it would have delivered is lost.
+    /// Called only where panics unwind; the panic hook has reported the panic itself. Does
+    /// nothing by default.
+    fn panicked(&self, _weight: usize) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Config {
+pub struct Config {
     /// Most weight in one batch
     pub max_batch: usize,
     /// Batches that may run at the same time; items are merged only while all of the
@@ -59,7 +98,7 @@ pub(crate) struct Config {
 }
 
 /// An item and when it was queued
-pub(crate) struct Queued<I> {
+pub struct Queued<I> {
     pub item: I,
     pub queued_at: Instant,
 }
@@ -91,7 +130,7 @@ impl<I> Sender<I> {
 }
 
 /// Handle to the workers; they stop when it is dropped
-pub(crate) struct Engine<I> {
+pub struct Engine<I> {
     sender: Sender<I>,
     /// Items announced and not yet received by a worker
     arriving: Arc<AtomicUsize>,
@@ -199,7 +238,7 @@ impl<I: Send + 'static> Engine<I> {
 }
 
 /// See [`Engine::arrival`]
-pub(crate) struct Arrival<'a, I> {
+pub struct Arrival<'a, I> {
     engine: &'a Engine<I>,
     submitted: bool,
 }
@@ -248,7 +287,7 @@ impl<B: Batching> Worker<B> {
         // a panicking batch is dropped with whatever it would have delivered, and the
         // worker goes on.
         if catch_unwind(AssertUnwindSafe(|| self.batching.run(batch))).is_err() {
-            error!("A batch of {weight} item(s) panicked; its results are lost");
+            self.batching.panicked(weight);
         }
     }
 

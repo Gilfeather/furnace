@@ -23,6 +23,7 @@ wgpu = ["furnace-burn/wgpu"]
 
 [dependencies]
 furnace = { package = "furnace-server", path = "../.." }
+furnace-alloc = { path = "../../furnace-alloc" }
 # The built-in ResNet-18, from furnace-burn/models/resnet18.onnx
 furnace-burn = { path = "../../furnace-burn", features = ["onnx"] }
 furnace-bench-common = { path = "../common" }

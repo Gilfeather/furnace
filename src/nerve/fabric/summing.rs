@@ -5,9 +5,9 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use super::{Fabric, Inner};
-use crate::batching::engine::{Batching, Queued};
 use crate::nerve::neuron::{Cx, Firing, NeuronKind};
 use crate::nerve::signal::{PathwayId, ReplyHandle, Signal};
+use furnace_batch::{Batching, Queued};
 
 impl Fabric {
     /// Fire `to` with a batch a worker summed, and propagate the results
@@ -95,5 +95,9 @@ impl Batching for Summing {
         if let Some(inner) = self.fabric.upgrade() {
             Fabric(inner).fire_summed(self.pathway, batch);
         }
+    }
+
+    fn panicked(&self, weight: usize) {
+        tracing::error!("A batch of {weight} item(s) panicked; its results are lost");
     }
 }

@@ -1,14 +1,36 @@
-//! Latency histograms and the Prometheus text format for `GET /metrics`.
+//! Latency histograms and the Prometheus text format, with no dependencies.
 //!
 //! The histograms are lock-free (one atomic counter per bucket), cheap enough to update on
 //! every request, and give both the Prometheus `_bucket`/`_sum`/`_count` series and estimated
-//! percentiles for the JSON metrics.
+//! percentiles. The `render_*` functions append counters, gauges and labelled samples to a
+//! `String` in the [Prometheus text format], for a `GET /metrics` handler to return as is.
+//! [furnace](https://github.com/Gilfeather/furnace) serves its metrics with them.
+//!
+//! ```
+//! use std::time::Duration;
+//! use furnace_metrics::{Histogram, label, render_family, render_labelled, render_value};
+//!
+//! let latency = Histogram::new();
+//! latency.observe(Duration::from_millis(8));
+//! latency.observe(Duration::from_millis(12));
+//! assert!(latency.percentiles_ms().p50.is_some());
+//!
+//! let mut out = String::new();
+//! latency.render(&mut out, "app_request_duration_seconds", "Time to answer a request");
+//! render_value(&mut out, "app_up", "gauge", "Whether the app is up", 1);
+//! render_family(&mut out, "app_requests_total", "counter", "Requests by model");
+//! render_labelled(&mut out, "app_requests_total", &format!("model=\"{}\"", label("a\"b")), 2);
+//! assert!(out.contains("app_request_duration_seconds_count 2\n"));
+//! assert!(out.contains("app_requests_total{model=\"a\\\"b\"} 2\n"));
+//! ```
+//!
+//! Feature `serde`: `Serialize` and `Deserialize` for [`Percentiles`].
+//!
+//! [Prometheus text format]: https://prometheus.io/docs/instrumenting/exposition_formats/
 
 use std::fmt::{Display, Write as _};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-
-use serde::Serialize;
 
 /// Bucket upper bounds in seconds, from 0.5 ms to 10 s
 pub const LATENCY_BUCKETS: &[f64] = &[
@@ -53,7 +75,8 @@ pub struct Histogram {
 }
 
 /// Estimated percentiles of a histogram, in milliseconds (`None` before the first observation)
-#[derive(Debug, Clone, Copy, Default, Serialize, serde::Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Percentiles {
     /// The median
     pub p50: Option<f64>,

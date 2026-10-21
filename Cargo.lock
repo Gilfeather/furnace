@@ -3300,6 +3300,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
+name = "furnace-alloc"
+version = "0.12.0"
+
+[[package]]
+name = "furnace-batch"
+version = "0.12.0"
+
+[[package]]
 name = "furnace-burn"
 version = "0.12.0"
 dependencies = [
@@ -3345,6 +3353,7 @@ dependencies = [
  "axum",
  "burn",
  "clap",
+ "furnace-alloc",
  "furnace-burn",
  "furnace-server",
  "image",
@@ -3361,6 +3370,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "furnace-metrics"
+version = "0.12.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "furnace-server"
 version = "0.12.0"
 dependencies = [
@@ -3370,6 +3386,8 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "ed25519-dalek",
+ "furnace-batch",
+ "furnace-metrics",
  "futures-util",
  "getrandom 0.4.3",
  "hmac 0.13.0",

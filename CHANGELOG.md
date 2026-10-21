@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Three crates of furnace's own parts, with no dependencies, for anyone to use on their own:
+  `furnace-batch` (the dynamic batching engine), `furnace-metrics` (lock-free latency
+  histograms, percentile estimates and the Prometheus text format; `Percentiles` serializes
+  with its `serde` feature) and `furnace-alloc` (`BlockCache`, the global allocator that keeps
+  freed large blocks for reuse). Not on crates.io yet.
+
 ### Changed
+- `furnace::telemetry` moves to the crate `furnace-metrics`: `furnace::telemetry::X` ->
+  `furnace_metrics::X`, unchanged. The `Percentiles` in furnace's metrics types is
+  `furnace_metrics::Percentiles`.
+- `furnace::allocator::BlockCache` moves to the crate `furnace-alloc`:
+  `furnace_alloc::BlockCache`, unchanged.
 - `furnace-server` depends on fewer crates: 45 instead of 63 with no features, 204 instead of
   211 with `grpc`, `tls`, `llm` and `image` (counted with `cargo tree` on Windows; 46 and 205
   instead of 64 and 212 on Linux).
