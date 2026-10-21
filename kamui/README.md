@@ -14,6 +14,11 @@ first touch, plus zeroing. `BlockCache` keeps up to 128 MiB of freed blocks of 2
 and hands them out again to allocations of the same size and alignment, which a repeated
 forward pass makes in the same order. Smaller allocations go straight to the system allocator.
 
+```toml
+[dependencies]
+kamui = "0.13"
+```
+
 ```rust
 #[global_allocator]
 static ALLOCATOR: kamui::BlockCache = kamui::BlockCache::new();

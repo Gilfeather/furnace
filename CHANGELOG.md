@@ -7,12 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-21
+
+furnace-server depends on fewer crates (45 instead of 63 with no features), and three of its
+own parts become crates with no dependencies of their own: amate, kuebiko and kamui.
+
 ### Added
 - Three crates of furnace's own parts, with no dependencies, for anyone to use on their own:
-  `amate` (the dynamic batching engine), `kuebiko` (lock-free latency
-  histograms, percentile estimates and the Prometheus text format; `Percentiles` serializes
-  with its `serde` feature) and `kamui` (`BlockCache`, the global allocator that keeps
-  freed large blocks for reuse). Not on crates.io yet.
+  `amate` (the dynamic batching engine), `kuebiko` (lock-free latency histograms, percentile
+  estimates and the Prometheus text format; `Percentiles` serializes with its `serde` feature)
+  and `kamui` (`BlockCache`, the global allocator that keeps freed large blocks for reuse).
+  furnace-server depends on amate and kuebiko, furnace-cli on kamui.
 
 ### Changed
 - `furnace::telemetry` moves to the crate `kuebiko`: `furnace::telemetry::X` ->

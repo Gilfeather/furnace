@@ -19,6 +19,11 @@ leaves idle, which gains more than merging the two. Past a few passes at once, b
 It is the batching behind [Furnace](https://github.com/Gilfeather/furnace)'s model server and
 nervous system.
 
+```toml
+[dependencies]
+amate = "0.13"
+```
+
 ```rust
 use amate::{Batching, Config, Engine, Queued};
 use std::time::Duration;
