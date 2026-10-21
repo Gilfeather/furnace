@@ -65,7 +65,7 @@ grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost", "dep:tonic-prost-build", "d
 tls = ["dep:rustls", "dep:tokio-rustls", "dep:aes-gcm", "dep:chacha20poly1305", "dep:p256", "dep:p384", "dep:ed25519-dalek", "dep:x25519-dalek", "dep:sha2", "dep:hmac", "dep:getrandom"]
 # Serve LLMs: OpenAI-compatible chat and completions with streaming, behind the `LlmEngine` and
 # `StepModel` traits (src/llm). Engines come from other crates, such as furnace-candle.
-llm = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib"]
+llm = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:chrono"]
 # `model::DummyModel` and `model::DummyTensorsModel`: constant models for testing and
 # benchmarking the server itself, not for serving
 test-models = []
@@ -77,28 +77,16 @@ bytes = "1.9"
 axum = "0.8"
 tokio = { version = "1.53", features = ["full"] }
 
-# CLI
-clap = { version = "4.5", features = ["derive"] }
-
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "chrono"] }
-uuid = { version = "1.0", features = ["v4"] }
 
 # Image input (`image` feature)
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 
-# Error Handling
-thiserror = "2.0"
-
-# Utilities
-chrono = { version = "0.4", features = ["serde"] }
-toml = "1"
-num_cpus = "1"
 # Parses the numbers of JSON request bodies straight to f32 (see src/json_fast.rs)
 fast-float2 = "0.2"
 # gRPC transport for the Open Inference Protocol (feature `grpc`)
@@ -107,6 +95,7 @@ tonic = { version = "0.14", optional = true }
 tonic-prost = { version = "0.14", optional = true }
 # gRPC over TLS: the accepted connections as the stream tonic serves (feature `grpc`)
 tokio-stream = { version = "0.1", optional = true }
+# Parses large JSON bodies on several threads (see src/json_fast.rs)
 rayon = "1"
 # TLS (feature `tls`): rustls without its C-based providers, and RustCrypto primitives
 rustls = { version = "0.23.46", default-features = false, features = ["std", "logging"], optional = true }
@@ -125,6 +114,8 @@ getrandom = { version = "0.4", optional = true }
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"], optional = true }
 minijinja = { version = "2.24", default-features = false, features = ["builtins", "json", "serde", "macros", "loop_controls", "multi_template"], optional = true }
 minijinja-contrib = { version = "2.24", default-features = false, features = ["pycompat"], optional = true }
+# The chat templates' `strftime_now`: any strftime format, in the local time zone (feature `llm`)
+chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
 futures-util = { version = "0.3", default-features = false }
 
 [build-dependencies]
@@ -134,6 +125,8 @@ tonic-prost-build = { version = "0.14", optional = true }
 
 [dev-dependencies]
 tempfile = "3.12"
+# The examples in the documentation install a log subscriber, as a program would
+tracing-subscriber = "0.3"
 # The tests only call http://127.0.0.1: no TLS stack (its default pulls in aws-lc-sys, C)
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 tower = { version = "0.5", features = ["util"] }

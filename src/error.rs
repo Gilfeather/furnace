@@ -1,19 +1,16 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
-use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum FurnaceError {
-    #[error(transparent)]
-    Model(#[from] ModelError),
+    Model(ModelError),
 
-    #[error(transparent)]
-    Api(#[from] ApiError),
+    Api(ApiError),
 
     /// A nervous system that cannot be built, from [`Server::nerve`](crate::Server::nerve) or
     /// a receptor or effector's constructor
-    #[error(transparent)]
-    Nerve(#[from] crate::nerve::BuildError),
+    Nerve(crate::nerve::BuildError),
 }
 
 impl FurnaceError {
@@ -34,29 +31,59 @@ impl FurnaceError {
     }
 }
 
-#[derive(Debug, Error)]
+// Each variant is its inner error, message and source alike
+impl fmt::Display for FurnaceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Model(e) => fmt::Display::fmt(e, f),
+            Self::Api(e) => fmt::Display::fmt(e, f),
+            Self::Nerve(e) => fmt::Display::fmt(e, f),
+        }
+    }
+}
+
+impl std::error::Error for FurnaceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Model(e) => e.source(),
+            Self::Api(e) => e.source(),
+            Self::Nerve(e) => e.source(),
+        }
+    }
+}
+
+impl From<ModelError> for FurnaceError {
+    fn from(e: ModelError) -> Self {
+        Self::Model(e)
+    }
+}
+
+impl From<ApiError> for FurnaceError {
+    fn from(e: ApiError) -> Self {
+        Self::Api(e)
+    }
+}
+
+impl From<crate::nerve::BuildError> for FurnaceError {
+    fn from(e: crate::nerve::BuildError) -> Self {
+        Self::Nerve(e)
+    }
+}
+
+#[derive(Debug)]
 pub enum ModelError {
-    #[error("Failed to load model from {path}: {source}")]
     LoadFailed {
         path: PathBuf,
-        #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    #[error("Invalid model format: {0}")]
     InvalidFormat(String),
 
-    #[error("Model file not found: {0}")]
     FileNotFound(PathBuf),
 
-    #[error("Inference failed: {0}")]
     InferenceFailed(String),
 
     /// A simple model's input with the wrong number of values
-    #[error(
-        "expected {} values (batch {batch} × {item:?}), got {got}",
-        .batch * .item.iter().product::<usize>()
-    )]
     InputValidation {
         /// Items in the request
         batch: usize,
@@ -67,21 +94,19 @@ pub enum ModelError {
     },
 
     /// A request with no item
-    #[error("a request needs at least one item, got an empty batch")]
     EmptyBatch,
 
     /// A request with more items than one request may carry
-    #[error("batch size {size} exceeds the limit of {max} items per request")]
-    BatchTooLarge { size: usize, max: usize },
+    BatchTooLarge {
+        size: usize,
+        max: usize,
+    },
 
-    #[error("Invalid input data type: {0}")]
     InvalidDataType(String),
 
     /// A named input tensor that does not fit the model (multi-tensor models)
-    #[error("Invalid input: {0}")]
     InvalidInput(String),
 
-    #[error("Invalid argument '{arg}': {value} - {reason}")]
     InvalidArgument {
         arg: String,
         value: String,
@@ -89,11 +114,59 @@ pub enum ModelError {
     },
 }
 
-#[derive(Debug, Error)]
+impl fmt::Display for ModelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LoadFailed { path, source } => {
+                write!(f, "Failed to load model from {}: {source}", path.display())
+            }
+            Self::InvalidFormat(m) => write!(f, "Invalid model format: {m}"),
+            Self::FileNotFound(path) => write!(f, "Model file not found: {}", path.display()),
+            Self::InferenceFailed(m) => write!(f, "Inference failed: {m}"),
+            Self::InputValidation { batch, item, got } => write!(
+                f,
+                "expected {} values (batch {batch} × {item:?}), got {got}",
+                batch * item.iter().product::<usize>()
+            ),
+            Self::EmptyBatch => {
+                f.write_str("a request needs at least one item, got an empty batch")
+            }
+            Self::BatchTooLarge { size, max } => write!(
+                f,
+                "batch size {size} exceeds the limit of {max} items per request"
+            ),
+            Self::InvalidDataType(m) => write!(f, "Invalid input data type: {m}"),
+            Self::InvalidInput(m) => write!(f, "Invalid input: {m}"),
+            Self::InvalidArgument { arg, value, reason } => {
+                write!(f, "Invalid argument '{arg}': {value} - {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ModelError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::LoadFailed { source, .. } => Some(&**source),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum ApiError {
-    #[error("Server startup failed: {0}")]
     ServerStartup(String),
 }
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ServerStartup(m) => write!(f, "Server startup failed: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for ApiError {}
 
 pub type Result<T> = std::result::Result<T, FurnaceError>;
 
@@ -112,7 +185,7 @@ impl ErrorResponse {
             error,
             code,
             details,
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: crate::time::rfc3339_now(),
         }
     }
 }

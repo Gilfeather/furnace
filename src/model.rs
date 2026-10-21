@@ -7,10 +7,9 @@
 //! (in chunks of a fixed batch size if the graph has one), check the outputs and split them
 //! back. The flat `Vec<f32>` methods (`predict*`) are thin adapters over that pipeline.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use crate::error::{FurnaceError, ModelError, Result};
 use crate::tensor::{DataType, HostTensor, IoSpec, TensorInfo, TensorSpec, Values};
@@ -58,8 +57,9 @@ pub struct ModelStats {
     pub inference_count: u64,
     /// Sum of the forward-pass times recorded for successful requests
     pub total_inference_time_ms: f64,
-    /// When the last successful request finished
-    pub last_inference_time: Option<DateTime<Utc>>,
+    /// When the last successful request finished; RFC 3339 in JSON
+    #[serde(with = "crate::time::serde_utc")]
+    pub last_inference_time: Option<SystemTime>,
     /// `total_inference_time_ms / success_count`
     pub average_inference_time_ms: f64,
     /// Requests that failed, whether their inputs were invalid or the model failed
@@ -93,7 +93,7 @@ impl ModelStats {
     }
 
     /// `now` is read before the lock is taken, so the clock is not read while holding it
-    fn record_success(&mut self, elapsed_ms: f64, now: DateTime<Utc>) {
+    fn record_success(&mut self, elapsed_ms: f64, now: SystemTime) {
         self.inference_count += 1;
         self.success_count += 1;
         self.total_inference_time_ms += elapsed_ms;
@@ -271,7 +271,7 @@ impl Model {
             outputs: outputs.iter().map(TensorInfo::from).collect(),
             model_type: model_type.to_string(),
             backend: inner.backend().to_string(),
-            created_at: Utc::now().to_rfc3339(),
+            created_at: crate::time::rfc3339_now(),
             model_size_bytes,
         };
 
@@ -366,7 +366,7 @@ impl Model {
             ),
         };
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let now = Utc::now();
+        let now = SystemTime::now();
 
         let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
         for _ in 0..errors {

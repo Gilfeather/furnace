@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn example_file_parses_and_maps_to_flags() {
-        let config = ConfigFile::parse(include_str!("../furnace.example.toml")).unwrap();
+        let config = ConfigFile::parse(include_str!("../../furnace.example.toml")).unwrap();
         let flags = config.to_args(true);
         let flags: Vec<_> = flags
             .iter()

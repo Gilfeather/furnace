@@ -50,25 +50,32 @@ pub use webhook::Webhook;
 
 /// Why an act failed. [`retryable`](Self::retryable) says whether trying again could help;
 /// the effector's loop retries those.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ActError {
     /// The target answered with this HTTP status, not a 2xx. 429 and 5xx are retryable.
-    #[error("status {0}")]
     Status(u16),
     /// The act did not finish in time: a call, a process
-    #[error("{0}: timed out")]
     Timeout(String),
     /// The target could not be reached, or the connection broke
-    #[error("{0}")]
     Unreachable(String),
     /// Any other failure that may pass: a full queue, a busy device
-    #[error("{0}")]
     Transient(String),
     /// A failure that will not pass: a bad command, a missing program
-    #[error("{0}")]
     Fatal(String),
 }
+
+impl std::fmt::Display for ActError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Status(status) => write!(f, "status {status}"),
+            Self::Timeout(what) => write!(f, "{what}: timed out"),
+            Self::Unreachable(m) | Self::Transient(m) | Self::Fatal(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for ActError {}
 
 impl ActError {
     /// A failure that may pass ([`Transient`](Self::Transient))

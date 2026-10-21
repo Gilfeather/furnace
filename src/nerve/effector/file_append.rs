@@ -79,7 +79,7 @@ impl Act for FileAppend {
         let mut line = match command.args.get("line").and_then(|l| l.as_str()) {
             Some(line) => line.to_string(),
             None => serde_json::json!({
-                "at": chrono::Utc::now().to_rfc3339(),
+                "at": crate::time::rfc3339_now(),
                 "signal": signal.id.0,
                 "args": command.args,
             })

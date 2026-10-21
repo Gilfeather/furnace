@@ -162,7 +162,8 @@ furnace-cli/src/main.rs  # The `furnace` command
 
 ### Error Handling
 
-- Use `thiserror` for error types
+- Write error types as enums with their own `Display` and `std::error::Error` impls (no
+  `thiserror`: every dependency of the server reaches every user)
 - Provide meaningful error messages
 - Include context when propagating errors
 - Handle errors gracefully in the API layer

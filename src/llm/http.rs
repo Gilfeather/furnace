@@ -952,7 +952,7 @@ fn unix_seconds() -> u64 {
 /// the OS for randomness per request
 fn completion_id(kind: Kind) -> String {
     static SEED: std::sync::LazyLock<u64> =
-        std::sync::LazyLock::new(|| uuid::Uuid::new_v4().as_u64_pair().0);
+        std::sync::LazyLock::new(|| crate::api::process_random(2));
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let prefix = match kind {
         Kind::Chat => "chatcmpl",
