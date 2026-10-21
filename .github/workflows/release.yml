@@ -235,6 +235,43 @@ jobs:
     # uploaded is in the index before it returns, so the next one finds it. Each crate gets its
     # own token: a Trusted Publishing token expires after 30 minutes, and verifying furnace-burn
     # and furnace-cli (a build of Burn each) can take longer than that.
+    #
+    # furnace's parts, which furnace-server depends on. Like furnace-burn below, their first
+    # version is published by hand; PUBLISH_PART_CRATES=true then publishes them with every
+    # release (see DEVELOPMENT.md). Until they are on crates.io, furnace-server cannot be.
+    - name: Authenticate with crates.io (furnace-batch)
+      if: vars.PUBLISH_PART_CRATES == 'true'
+      id: auth-batch
+      uses: rust-lang/crates-io-auth-action@v1
+
+    - name: Publish furnace-batch
+      if: vars.PUBLISH_PART_CRATES == 'true'
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ steps.auth-batch.outputs.token }}
+      run: cargo publish --locked -p furnace-batch
+
+    - name: Authenticate with crates.io (furnace-metrics)
+      if: vars.PUBLISH_PART_CRATES == 'true'
+      id: auth-metrics
+      uses: rust-lang/crates-io-auth-action@v1
+
+    - name: Publish furnace-metrics
+      if: vars.PUBLISH_PART_CRATES == 'true'
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ steps.auth-metrics.outputs.token }}
+      run: cargo publish --locked -p furnace-metrics
+
+    - name: Authenticate with crates.io (furnace-alloc)
+      if: vars.PUBLISH_PART_CRATES == 'true'
+      id: auth-alloc
+      uses: rust-lang/crates-io-auth-action@v1
+
+    - name: Publish furnace-alloc
+      if: vars.PUBLISH_PART_CRATES == 'true'
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ steps.auth-alloc.outputs.token }}
+      run: cargo publish --locked -p furnace-alloc
+
     - name: Authenticate with crates.io (furnace-server)
       id: auth-server
       uses: rust-lang/crates-io-auth-action@v1

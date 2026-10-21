@@ -8,12 +8,12 @@ use std::time::Instant;
 use super::pathway::{Pathway, PathwayKind, Summation};
 use super::summing::Summing;
 use super::{Cell, Counters, Fabric, Inner};
-use crate::batching::engine::{self, Engine};
 use crate::nerve::effector::Effector;
 use crate::nerve::latency::LatencyEstimate;
 use crate::nerve::neuron::{Gate, Mechanisms, Neuron, NeuronKind};
 use crate::nerve::receptor::{Receptor, Stop};
 use crate::nerve::signal::{NeuronId, PathwayId};
+use furnace_batch::Engine;
 
 /// Why a part of the nervous system cannot be built
 #[derive(Debug)]
@@ -258,7 +258,7 @@ impl FabricBuilder {
                                 fabric: weak.clone(),
                                 pathway: id,
                             },
-                            engine::Config {
+                            furnace_batch::Config {
                                 max_batch: s.max_batch,
                                 workers: s.workers,
                                 capacity: Some(s.capacity),

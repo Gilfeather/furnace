@@ -14,10 +14,9 @@
 //! batching wins: more passes only compete for the same cores, and with no limit every
 //! request slows down together.
 //!
-//! The algorithm is the batching engine's. The server runs it on its models' deliberative pathways
-//! in the nervous system (`nerve::serve`); [`BatchConfig`] is how those pathways sum requests.
-
-pub(crate) mod engine;
+//! The algorithm is the batching engine's, the crate furnace-batch. The server runs it on its
+//! models' deliberative pathways in the nervous system (`nerve::serve`); [`BatchConfig`] is how
+//! those pathways sum requests.
 
 use std::time::Duration;
 

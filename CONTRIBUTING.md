@@ -158,6 +158,9 @@ furnace-burn/src/        # Burn models
 ├── mlp.rs               # File-based MLP
 └── models/mod.rs        # Built-in models generated from ONNX (feature `onnx`)
 furnace-cli/src/main.rs  # The `furnace` command
+furnace-batch/           # The batching engine (no dependencies)
+furnace-metrics/         # Latency histograms and the Prometheus text format (no dependencies)
+furnace-alloc/           # The `furnace` command's global allocator (no dependencies)
 ```
 
 ### Error Handling

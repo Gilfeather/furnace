@@ -48,9 +48,9 @@ impl std::error::Error for CliError {}
 /// with `None`, as configured. Blocking.
 type Reloader = Arc<dyn Fn(Option<&Path>) -> furnace::Result<model::Model> + Send + Sync>;
 
-// Freed operator outputs are reused instead of returned to the OS (see `furnace::allocator`)
+// Freed operator outputs are reused instead of returned to the OS (see furnace-alloc)
 #[global_allocator]
-static ALLOCATOR: furnace::allocator::BlockCache = furnace::allocator::BlockCache::new();
+static ALLOCATOR: furnace_alloc::BlockCache = furnace_alloc::BlockCache::new();
 
 #[derive(Debug)]
 struct CliArgs {

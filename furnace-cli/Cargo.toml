@@ -58,6 +58,7 @@ furnace = { package = "furnace-server", path = "..", version = "0.12.0", default
 furnace-burn = { path = "../furnace-burn", version = "0.12.0" }
 burn = { version = "0.22", default-features = false, features = ["std"] }
 clap = { version = "4.5", features = ["derive"] }
+furnace-alloc = { path = "../furnace-alloc", version = "0.12.0" }
 tokio = { version = "1.53", features = ["full"] }
 tracing = "0.1"
 # Log lines with RFC 3339 timestamps, in UTC (JSON) or the local time zone
