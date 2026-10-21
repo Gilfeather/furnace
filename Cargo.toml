@@ -61,7 +61,7 @@ pkg-url = "{ repo }/releases/download/v{ version }/furnace-windows-x86_64.exe"
 
 [package.metadata.docs.rs]
 # Document the gRPC, TLS and image input APIs too
-features = ["grpc", "tls", "image", "llm", "nerve"]
+features = ["grpc", "tls", "image", "llm"]
 
 [workspace]
 members = [".", "furnace-candle"]
@@ -96,9 +96,6 @@ tls = ["dep:rustls", "dep:tokio-rustls", "dep:aes-gcm", "dep:chacha20poly1305", 
 # Serve LLMs: OpenAI-compatible chat and completions with streaming, behind the `LlmEngine` and
 # `StepModel` traits (src/llm). Engines come from other crates, such as furnace-candle.
 llm = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib"]
-# The nervous system (src/nerve) is always built: the server's own routes run on it. The
-# feature is kept so that existing `--features nerve` builds still work.
-nerve = []
 # `model::DummyModel` and `model::DummyTensorsModel`: constant models for testing and
 # benchmarking the server itself, not for serving
 test-models = []

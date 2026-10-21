@@ -1027,7 +1027,7 @@ mod tests {
             "dummy",
             0,
         );
-        crate::api::router(model, &ServerConfig::default()).unwrap()
+        crate::api::tests::router(model, &ServerConfig::default()).unwrap()
     }
 
     fn infer_at(model: &str, body: serde_json::Value) -> Request<Body> {

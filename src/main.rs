@@ -5,11 +5,34 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{Level, error, info, warn};
+use tracing::{Level, info, warn};
 use uuid::Uuid;
 
-use error::{CliError, Result};
-use furnace::{BackendKind, api, config, error, model, models::BuiltInModel};
+use furnace::{BackendKind, Server, api, config, model, models::BuiltInModel};
+
+/// What stops the command before it serves: shown as `furnace: <message>`, exit code 2
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// A command-line option, or the config file, that cannot be used
+#[derive(Debug, thiserror::Error)]
+enum CliError {
+    #[error("Invalid argument '{arg}': {value} - {reason}")]
+    Argument {
+        arg: String,
+        value: String,
+        reason: String,
+    },
+
+    #[error("Invalid port number: {0}")]
+    Port(String),
+
+    #[error("Invalid host address: {0}")]
+    Host(String),
+}
+
+/// Loads a model again for `POST /admin/models/{model}/reload`, from the given weight file or,
+/// with `None`, as configured. Blocking.
+type Reloader = Arc<dyn Fn(Option<&Path>) -> furnace::Result<model::Model> + Send + Sync>;
 
 // Freed operator outputs are reused instead of returned to the OS (see `furnace::allocator`)
 #[global_allocator]
@@ -307,7 +330,7 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
     let (program, given) = given.split_first().expect("program name");
     let mut argv = vec![program.clone()];
     if let Some(path) = config::config_path(given) {
-        let file = config::ConfigFile::load(&path).map_err(|reason| CliError::InvalidArgument {
+        let file = config::ConfigFile::load(&path).map_err(|reason| CliError::Argument {
             arg: "config".to_string(),
             value: path.display().to_string(),
             reason,
@@ -327,7 +350,7 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
 
     let port = *matches.get_one::<u16>("port").unwrap();
     if port < 1024 {
-        return Err(CliError::InvalidPort(format!(
+        return Err(CliError::Port(format!(
             "Port {port} is below 1024 (requires root privileges)"
         ))
         .into());
@@ -337,7 +360,7 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
     validate_host(&host)?;
 
     let backend_name = matches.get_one::<String>("backend").unwrap();
-    let backend = BackendKind::from_name(backend_name).map_err(|e| CliError::InvalidArgument {
+    let backend = BackendKind::from_name(backend_name).map_err(|e| CliError::Argument {
         arg: "backend".to_string(),
         value: backend_name.clone(),
         reason: e.to_string(),
@@ -345,7 +368,7 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
 
     let max_concurrent_requests = *matches.get_one::<usize>("max-concurrent-requests").unwrap();
     if !(1..=10000).contains(&max_concurrent_requests) {
-        return Err(CliError::InvalidArgument {
+        return Err(CliError::Argument {
             arg: "max-concurrent-requests".to_string(),
             value: max_concurrent_requests.to_string(),
             reason: "must be between 1 and 10000".to_string(),
@@ -355,7 +378,7 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
 
     let max_body_mb = *matches.get_one::<usize>("max-body-mb").unwrap();
     if !(1..=1024).contains(&max_body_mb) {
-        return Err(CliError::InvalidArgument {
+        return Err(CliError::Argument {
             arg: "max-body-mb".to_string(),
             value: max_body_mb.to_string(),
             reason: "must be between 1 and 1024".to_string(),
@@ -365,7 +388,7 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
 
     let max_batch_size = *matches.get_one::<usize>("max-batch-size").unwrap();
     if !(1..=model::MAX_BATCH_SIZE).contains(&max_batch_size) {
-        return Err(CliError::InvalidArgument {
+        return Err(CliError::Argument {
             arg: "max-batch-size".to_string(),
             value: max_batch_size.to_string(),
             reason: format!("must be between 1 and {}", model::MAX_BATCH_SIZE),
@@ -385,16 +408,10 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
         .into_iter()
         .flatten()
     {
-        let name = BuiltInModel::from_name(name)
-            .map_err(|e| CliError::InvalidArgument {
-                arg: "model-name".to_string(),
-                value: name.clone(),
-                reason: e.to_string(),
-            })?
-            .name()
-            .to_string();
+        // Its error names the option already
+        let name = BuiltInModel::from_name(name)?.name().to_string();
         if model_names.contains(&name) {
-            return Err(CliError::InvalidArgument {
+            return Err(CliError::Argument {
                 arg: "model-name".to_string(),
                 value: name,
                 reason: "given twice".to_string(),
@@ -407,10 +424,11 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
     if model_names.is_empty() && model_paths.is_empty() {
         model_names.push(
             BuiltInModel::default_model()
-                .map_err(|e| CliError::InvalidArgument {
-                    arg: "model-name".to_string(),
-                    value: String::new(),
-                    reason: e.to_string(),
+                .ok_or_else(|| {
+                    format!(
+                        "no model to serve: choose one with --model-name or --model-path. {}",
+                        BuiltInModel::describe_available()
+                    )
                 })?
                 .name()
                 .to_string(),
@@ -421,7 +439,7 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
     if let Some(weights) = &weights
         && model_names.len() > 1
     {
-        return Err(CliError::InvalidArgument {
+        return Err(CliError::Argument {
             arg: "weights".to_string(),
             value: weights.display().to_string(),
             reason: "applies to a single built-in model; with several, reload one with new \
@@ -447,7 +465,7 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
     }
     api_keys.retain(|key| !key.is_empty());
     if api_keys.iter().any(|key| key.len() < 16) {
-        return Err(CliError::InvalidArgument {
+        return Err(CliError::Argument {
             arg: "api-key".to_string(),
             value: "<hidden>".to_string(),
             reason: "keys must be at least 16 characters".to_string(),
@@ -480,7 +498,7 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
             })
         }
         Some(per_second) => {
-            return Err(CliError::InvalidArgument {
+            return Err(CliError::Argument {
                 arg: "rate-limit".to_string(),
                 value: per_second.to_string(),
                 reason: "must be a positive number".to_string(),
@@ -492,7 +510,7 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
     if let Some(token) = &admin_token
         && token.len() < 16
     {
-        return Err(CliError::InvalidArgument {
+        return Err(CliError::Argument {
             arg: "admin-token".to_string(),
             value: "<hidden>".to_string(),
             reason: "must be at least 16 characters".to_string(),
@@ -529,29 +547,24 @@ fn parse_args() -> Result<(CliArgs, Vec<&'static str>)> {
 /// Validate host address format
 fn validate_host(host: &str) -> Result<()> {
     if host.is_empty() {
-        return Err(CliError::InvalidHost("Host cannot be empty".to_string()).into());
+        return Err(CliError::Host("Host cannot be empty".to_string()).into());
     }
     if IpAddr::from_str(host).is_ok() || host == "localhost" {
         return Ok(());
     }
     if host.len() > 253 {
-        return Err(
-            CliError::InvalidHost("Hostname too long (max 253 characters)".to_string()).into(),
-        );
+        return Err(CliError::Host("Hostname too long (max 253 characters)".to_string()).into());
     }
     if !host
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
     {
-        return Err(
-            CliError::InvalidHost("Hostname contains invalid characters".to_string()).into(),
-        );
+        return Err(CliError::Host("Hostname contains invalid characters".to_string()).into());
     }
     if host.starts_with(['-', '.']) || host.ends_with(['-', '.']) {
-        return Err(CliError::InvalidHost(
-            "Hostname cannot start or end with hyphen or dot".to_string(),
-        )
-        .into());
+        return Err(
+            CliError::Host("Hostname cannot start or end with hyphen or dot".to_string()).into(),
+        );
     }
     Ok(())
 }
@@ -573,7 +586,7 @@ fn setup_logging(log_level: &str) -> Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(level.into())
         .from_env()
-        .map_err(|e| CliError::InvalidArgument {
+        .map_err(|e| CliError::Argument {
             arg: "log-level".to_string(),
             value: log_level.to_string(),
             reason: format!("failed to create log filter: {e}"),
@@ -607,7 +620,17 @@ fn setup_logging(log_level: &str) -> Result<()> {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("furnace: {e}");
+            std::process::ExitCode::from(2)
+        }
+    }
+}
+
+async fn run() -> Result<()> {
     let (args, deprecated) = parse_args()?;
     setup_logging(&args.log_level)?;
 
@@ -639,30 +662,18 @@ async fn main() -> Result<()> {
     let loaded = tokio::task::spawn_blocking(move || {
         reloaders
             .into_iter()
-            .map(|reload| {
-                reload(None).map(|model| api::ServedModel {
-                    model,
-                    reload: Some(reload),
-                })
-            })
-            .collect::<furnace::error::Result<Vec<_>>>()
+            .map(|reload| reload(None).map(|model| (model, reload)))
+            .collect::<furnace::Result<Vec<_>>>()
     })
     .await
     .expect("model loading task panicked");
 
-    let models = match loaded {
-        Ok(models) => models,
-        Err(e) => {
-            error!(session_id = %session_id, error = %e, "❌ Failed to load model");
-            std::process::exit(1);
-        }
-    };
+    let models = loaded.map_err(|e| format!("cannot load the model: {e}"))?;
     let mut names = Vec::new();
-    for served in &models {
-        let model_info = served.model.get_info();
+    for (model, _) in &models {
+        let model_info = model.get_info();
         if names.contains(&model_info.name) {
-            error!(session_id = %session_id, "❌ Two models are named '{}'", model_info.name);
-            std::process::exit(1);
+            return Err(format!("two models are named '{}'", model_info.name).into());
         }
         names.push(model_info.name.clone());
         info!(
@@ -710,11 +721,11 @@ async fn main() -> Result<()> {
         "🚀 Starting HTTP server"
     );
 
-    if let Err(e) = api::start_server_with_models(server_config, models).await {
-        error!(session_id = %session_id, error = %e, "❌ Server failed to start");
-        std::process::exit(1);
-    }
-
+    let server = models.into_iter().fold(
+        Server::with_config(server_config),
+        |server, (model, reload)| server.reloadable_model(model, move |weights| reload(weights)),
+    );
+    server.serve().await?;
     Ok(())
 }
 
@@ -725,7 +736,7 @@ const API_KEYS_ENV: &str = "FURNACE_API_KEYS";
 
 /// One loader per model to serve. Called with `None` it loads the model as configured; the
 /// admin API calls it again to reload, possibly with a new weight file.
-fn reloaders(args: &CliArgs) -> Vec<api::Reloader> {
+fn reloaders(args: &CliArgs) -> Vec<Reloader> {
     let backend = args.backend;
     let built_in = args.model_names.iter().map(|name| {
         let name = name.clone();
@@ -736,7 +747,7 @@ fn reloaders(args: &CliArgs) -> Vec<api::Reloader> {
                 backend,
                 new_weights.or(weights.as_deref()),
             )
-        }) as api::Reloader
+        }) as Reloader
     });
     let files = args.model_paths.iter().map(|path| {
         let path = path.clone();
@@ -744,7 +755,7 @@ fn reloaders(args: &CliArgs) -> Vec<api::Reloader> {
             // A file model is a .bpk/.json pair; a new path names another pair
             Some(other) => model::load_model_with_backend(other, backend),
             None => model::load_model_with_backend(&path, backend),
-        }) as api::Reloader
+        }) as Reloader
     });
     built_in.chain(files).collect()
 }

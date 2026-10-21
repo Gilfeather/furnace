@@ -78,18 +78,18 @@ jobs:
     - name: Run clippy
       run: |
         cargo clippy --all-targets -- -D warnings
-        cargo clippy --all-targets --features "image grpc tls llm nerve" -- -D warnings
+        cargo clippy --all-targets --features "image grpc tls llm" -- -D warnings
 
     # With the optional image input; the default build's only extra test is its 415. Examples and
     # benches are left to clippy above, which type-checks them without an optimized build.
     - name: Run tests
-      run: cargo test --profile ci --lib --bins --tests --features "image grpc tls llm nerve"
+      run: cargo test --profile ci --lib --bins --tests --features "image grpc tls llm"
 
     # The examples in the API docs (the crate's front page among them) compile against the
     # current API; once, they don't depend on the platform
     - name: Run doc-tests
       if: matrix.os == 'ubuntu-latest'
-      run: cargo test --profile ci --doc --features "image grpc tls llm nerve"
+      run: cargo test --profile ci --doc --features "image grpc tls llm"
 
   # Each optional feature on its own, so a `cfg(feature)` path that only one of them reaches is
   # compiled somewhere, one after another in one job sharing one cache. Clippy without codegen:
@@ -124,7 +124,6 @@ jobs:
         for features in "--no-default-features" \
                         "--no-default-features --features tls" \
                         "--no-default-features --features grpc" \
-                        "--no-default-features --features nerve" \
                         "--no-default-features --features llm" \
                         "--no-default-features --features image" \
                         "--features embed-weights"; do
@@ -151,7 +150,7 @@ jobs:
         # libraries or bindings to them, or GPU kernels compiled by nvcc
         banned='^(cc|cmake|bindgen|pkg-config|ring|aws-lc-rs|aws-lc-sys|openssl|openssl-sys|onig|onig_sys|cudarc|intel-mkl-src|accelerate-src|candle-kernels|candle-flash-attn|candle-metal-kernels|zstd-sys|libz-sys|bzip2-sys|lzma-sys)$'
         failed=0
-        for package in "-p furnace-server --features llm,nerve" "-p furnace-server --no-default-features --features llm,nerve" \
+        for package in "-p furnace-server --features llm" "-p furnace-server --no-default-features --features llm" \
                        "-p furnace-server --features grpc,tls" "-p furnace-server --features image" "-p furnace-candle"; do
           crates=$(cargo tree $package -e normal,build "${targets[@]}" --prefix none -f '{p}' | awk '{print $1}' | sort -u)
           found=$(grep -E "$banned" <<<"$crates" || true)
@@ -199,7 +198,7 @@ jobs:
         curl -fsSL "$MNIST_URL" -o models/mnist.onnx
 
     - name: Type check
-      run: cargo check --all-targets --features "image grpc tls llm nerve"
+      run: cargo check --all-targets --features "image grpc tls llm"
 
   metal:
     name: Features (metal, macOS)
@@ -410,7 +409,7 @@ jobs:
         [ -f models/mnist.onnx ] || curl -fsSL "$MNIST_URL" -o models/mnist.onnx
 
     - name: Generate code coverage
-      run: cargo llvm-cov --profile ci --workspace --features "image grpc tls llm nerve" --lcov --output-path lcov.info
+      run: cargo llvm-cov --profile ci --workspace --features "image grpc tls llm" --lcov --output-path lcov.info
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v5

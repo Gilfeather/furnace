@@ -263,10 +263,10 @@ impl HostTensor {
 
     fn checked_shape<const D: usize>(&self) -> Result<[usize; D]> {
         self.shape.as_slice().try_into().map_err(|_| {
-            ModelError::InputValidation {
-                expected: vec![D],
-                actual: self.shape.clone(),
-            }
+            ModelError::InvalidInput(format!(
+                "expected a tensor of rank {D}, got shape {:?}",
+                self.shape
+            ))
             .into()
         })
     }

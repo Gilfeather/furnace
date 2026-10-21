@@ -75,6 +75,12 @@ pub(crate) fn model_error_status(e: &FurnaceError) -> (StatusCode, Code) {
         FurnaceError::Model(ModelError::InputValidation { .. }) => {
             (StatusCode::BAD_REQUEST, Code::InputValidationFailed)
         }
+        FurnaceError::Model(ModelError::EmptyBatch) => {
+            (StatusCode::BAD_REQUEST, Code::InvalidInput)
+        }
+        FurnaceError::Model(ModelError::BatchTooLarge { .. }) => {
+            (StatusCode::BAD_REQUEST, Code::BatchTooLarge)
+        }
         e if e.is_client_error() => (StatusCode::BAD_REQUEST, Code::InvalidInputValue),
         FurnaceError::Model(ModelError::InferenceFailed(_)) => {
             (StatusCode::INTERNAL_SERVER_ERROR, Code::InferenceFailed)
@@ -116,7 +122,7 @@ impl InferError {
             Self::Timeout(timeout) => {
                 format!("Inference exceeded timeout of {}ms", timeout.as_millis())
             }
-            Self::Lost => "Inference task panicked".to_string(),
+            Self::Lost => "The inference ended without an answer (see the server log)".to_string(),
             Self::Model(e) => e.to_string(),
         }
     }
@@ -126,7 +132,10 @@ impl InferError {
         match &self {
             Self::Busy => warn!("All inference slots busy, rejecting request"),
             Self::Timeout(timeout) => warn!("Inference exceeded timeout of {timeout:?}"),
-            Self::Lost | Self::Model(_) => error!("Prediction error: {}", self.message()),
+            Self::Lost => error!("Prediction error: {}", self.message()),
+            // The request is at fault, not the server
+            Self::Model(e) if e.is_client_error() => debug!("Rejected input: {e}"),
+            Self::Model(e) => error!("Prediction error: {e}"),
         }
         let (status, code) = self.status();
         let mut response = create_error_response(status, code, &self.message(), None);

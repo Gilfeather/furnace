@@ -4,14 +4,16 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum FurnaceError {
-    #[error("Model error: {0}")]
+    #[error(transparent)]
     Model(#[from] ModelError),
 
-    #[error("API error: {0}")]
+    #[error(transparent)]
     Api(#[from] ApiError),
 
-    #[error("CLI error: {0}")]
-    Cli(#[from] CliError),
+    /// A nervous system that cannot be built, from [`Server::nerve`](crate::Server::nerve) or
+    /// a receptor or effector's constructor
+    #[error(transparent)]
+    Nerve(#[from] crate::nerve::BuildError),
 }
 
 impl FurnaceError {
@@ -22,6 +24,8 @@ impl FurnaceError {
             self,
             Self::Model(
                 ModelError::InputValidation { .. }
+                    | ModelError::EmptyBatch
+                    | ModelError::BatchTooLarge { .. }
                     | ModelError::InvalidDataType(_)
                     | ModelError::InvalidInput(_)
                     | ModelError::InvalidArgument { .. }
@@ -48,11 +52,27 @@ pub enum ModelError {
     #[error("Inference failed: {0}")]
     InferenceFailed(String),
 
-    #[error("Input validation failed: expected shape {expected:?}, got {actual:?}")]
+    /// A simple model's input with the wrong number of values
+    #[error(
+        "expected {} values (batch {batch} × {item:?}), got {got}",
+        .batch * .item.iter().product::<usize>()
+    )]
     InputValidation {
-        expected: Vec<usize>,
-        actual: Vec<usize>,
+        /// Items in the request
+        batch: usize,
+        /// One item's shape
+        item: Vec<usize>,
+        /// Values received
+        got: usize,
     },
+
+    /// A request with no item
+    #[error("a request needs at least one item, got an empty batch")]
+    EmptyBatch,
+
+    /// A request with more items than one request may carry
+    #[error("batch size {size} exceeds the limit of {max} items per request")]
+    BatchTooLarge { size: usize, max: usize },
 
     #[error("Invalid input data type: {0}")]
     InvalidDataType(String),
@@ -73,22 +93,6 @@ pub enum ModelError {
 pub enum ApiError {
     #[error("Server startup failed: {0}")]
     ServerStartup(String),
-}
-
-#[derive(Debug, Error)]
-pub enum CliError {
-    #[error("Invalid argument '{arg}': {value} - {reason}")]
-    InvalidArgument {
-        arg: String,
-        value: String,
-        reason: String,
-    },
-
-    #[error("Invalid port number: {0}")]
-    InvalidPort(String),
-
-    #[error("Invalid host address: {0}")]
-    InvalidHost(String),
 }
 
 pub type Result<T> = std::result::Result<T, FurnaceError>;

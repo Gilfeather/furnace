@@ -46,11 +46,11 @@ async fn main() -> furnace::Result<()> {
 
     let mut digits = DigitNet::new(&device);
     if let Some(path) = weights_arg("--digits-weights") {
-        furnace::weights::load_burnpack(&mut digits, &path)?;
+        furnace::weights::load_burnpack(&mut digits, path)?;
     }
     let mut sentiment = SentimentNet::new(&device);
     if let Some(path) = weights_arg("--sentiment-weights") {
-        furnace::weights::load_burnpack(&mut sentiment, &path)?;
+        furnace::weights::load_burnpack(&mut sentiment, path)?;
     }
 
     Server::new()

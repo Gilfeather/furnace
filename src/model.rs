@@ -672,11 +672,10 @@ impl Model {
         Self::check_batch_size(batch_size)?;
         let item = &self.info.input_spec.shape;
         if data.len() != batch_size * item.iter().product::<usize>() {
-            let mut expected = vec![batch_size];
-            expected.extend_from_slice(item);
             return Err(ModelError::InputValidation {
-                expected,
-                actual: vec![data.len()],
+                batch: batch_size,
+                item: item.clone(),
+                got: data.len(),
             }
             .into());
         }
@@ -708,16 +707,12 @@ impl Model {
 
     fn check_batch_size(batch_size: usize) -> Result<()> {
         if batch_size == 0 {
-            return Err(ModelError::InputValidation {
-                expected: vec![1],
-                actual: vec![0],
-            }
-            .into());
+            return Err(ModelError::EmptyBatch.into());
         }
         if batch_size > MAX_BATCH_SIZE {
-            return Err(ModelError::InputValidation {
-                expected: vec![MAX_BATCH_SIZE],
-                actual: vec![batch_size],
+            return Err(ModelError::BatchTooLarge {
+                size: batch_size,
+                max: MAX_BATCH_SIZE,
             }
             .into());
         }
@@ -788,8 +783,9 @@ impl Model {
         let expected_size: usize = self.info.input_spec.shape.iter().product();
         if input.len() != expected_size {
             return Err(ModelError::InputValidation {
-                expected: self.info.input_spec.shape.clone(),
-                actual: vec![input.len()],
+                batch: 1,
+                item: self.info.input_spec.shape.clone(),
+                got: input.len(),
             }
             .into());
         }
@@ -833,9 +829,15 @@ fn duplicate(error: &FurnaceError) -> FurnaceError {
         ModelError::InvalidFormat(m) => ModelError::InvalidFormat(m.clone()),
         ModelError::FileNotFound(path) => ModelError::FileNotFound(path.clone()),
         ModelError::InferenceFailed(m) => ModelError::InferenceFailed(m.clone()),
-        ModelError::InputValidation { expected, actual } => ModelError::InputValidation {
-            expected: expected.clone(),
-            actual: actual.clone(),
+        ModelError::InputValidation { batch, item, got } => ModelError::InputValidation {
+            batch: *batch,
+            item: item.clone(),
+            got: *got,
+        },
+        ModelError::EmptyBatch => ModelError::EmptyBatch,
+        ModelError::BatchTooLarge { size, max } => ModelError::BatchTooLarge {
+            size: *size,
+            max: *max,
         },
         ModelError::InvalidDataType(m) => ModelError::InvalidDataType(m.clone()),
         ModelError::InvalidInput(m) => ModelError::InvalidInput(m.clone()),
@@ -857,12 +859,13 @@ const SAMPLE_MODEL: &str = "sample_model";
 /// A path named `sample_model` with no files serves an MLP with random weights, with a warning
 /// (`cargo run --bin create_sample_model` writes real files there); any other missing path is
 /// an error.
-pub fn load_model(path: &Path) -> Result<Model> {
+pub fn load_model(path: impl AsRef<Path>) -> Result<Model> {
     load_model_with_backend(path, BackendKind::Cpu)
 }
 
 /// Load a file-based MLP model from `<path>.bpk` + `<path>.json`
-pub fn load_model_with_backend(path: &Path, backend: BackendKind) -> Result<Model> {
+pub fn load_model_with_backend(path: impl AsRef<Path>, backend: BackendKind) -> Result<Model> {
+    let path = path.as_ref();
     info!("Loading model from: {:?}", path);
 
     // Accept `model`, `model.bpk` or `model.json`
@@ -1199,19 +1202,28 @@ mod tests {
     #[test]
     fn test_predict_flat_rejects_bad_input() {
         let model = get_test_model();
-        // Length not a multiple of the batch
+        // Length not a multiple of the batch: the message counts values
+        let err = model.predict_flat(vec![0.5; 784 * 2 + 1], 2).unwrap_err();
         assert!(matches!(
-            model.predict_flat(vec![0.5; 784 * 2 + 1], 2),
-            Err(crate::error::FurnaceError::Model(
-                ModelError::InputValidation { .. }
-            ))
+            err,
+            crate::error::FurnaceError::Model(ModelError::InputValidation { .. })
         ));
-        assert!(model.predict_flat(vec![], 0).is_err());
-        assert!(
-            model
-                .predict_flat(vec![0.5; 784], MAX_BATCH_SIZE + 1)
-                .is_err()
+        assert_eq!(
+            err.to_string(),
+            "expected 1568 values (batch 2 × [784]), got 1569"
         );
+        let err = model.predict_flat(vec![], 0).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::FurnaceError::Model(ModelError::EmptyBatch)
+        ));
+        let err = model
+            .predict_flat(vec![0.5; 784], MAX_BATCH_SIZE + 1)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::FurnaceError::Model(ModelError::BatchTooLarge { .. })
+        ));
 
         // Non-finite values report the batch item and index
         let mut input = vec![0.5; 784 * 2];

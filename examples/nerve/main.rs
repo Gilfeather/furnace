@@ -20,7 +20,6 @@
 //! Urgent signals are commands to `alarm` with a 2 ms deadline; novel ones carry none, so the
 //! heavier (brain) pathway takes them. A webhook receiver on port 3001 prints what arrives.
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::routing::post;
@@ -53,7 +52,7 @@ fn act_on(class: usize, signal: Signal, what: &str) -> Option<Signal> {
 /// `[batch, 784] -> [batch, 3]` logits for known / novel / urgent from a frame's mean
 /// brightness: a linear layer with weights set by hand, so the demo is deterministic. Your
 /// trained model goes here.
-fn frame_classifier() -> Model {
+fn frame_classifier() -> furnace::Result<Model> {
     let device = BackendKind::Cpu.device();
     let s = 20.0f32;
     let weight: Vec<f32> = (0..784)
@@ -71,10 +70,9 @@ fn frame_classifier() -> Model {
         &[3],
         move |x: Tensor<2>| x.matmul(weight.clone()) + bias.clone(),
     )
-    .expect("a valid model")
 }
 
-fn build_fabric(journal: &std::path::Path) -> (FabricBuilder, ChannelSender) {
+fn build_fabric(journal: &std::path::Path) -> furnace::Result<(FabricBuilder, ChannelSender)> {
     let mut b = Fabric::builder();
     let habituation = Mechanisms::NONE
         .threshold(0.6)
@@ -93,7 +91,7 @@ fn build_fabric(journal: &std::path::Path) -> (FabricBuilder, ChannelSender) {
     }));
     let classifier = b.neuron(ModelNeuron::reflex(
         "frame-classifier",
-        Arc::new(frame_classifier()),
+        frame_classifier()?,
         |signal| Some(vec![signal.payload.as_tensors()?.first()?.clone()]),
         |signal, outputs| {
             let Values::F32(logits) = &outputs[0].values else {
@@ -114,12 +112,13 @@ fn build_fabric(journal: &std::path::Path) -> (FabricBuilder, ChannelSender) {
     ])
     .to_string();
     let engine = MockEngine::new("mock-brain", &[&answer]).first_delay(Duration::from_millis(100));
-    let brain = b.neuron(Llm::new("brain", Arc::new(engine)));
+    let brain = b.neuron(Llm::new("brain", engine));
 
     let hook = format!("http://127.0.0.1:{HOOK_PORT}/hook");
-    let webhook = |name: &str| Webhook::new(name, &hook).expect("an http:// URL");
-    let alarm = b.effector(Effector::new(webhook("alarm")).refractory(Duration::from_millis(50)));
-    b.effector(webhook("webhook"));
+    let alarm = b.effector(
+        Effector::new(Webhook::new("alarm", &hook)?).refractory(Duration::from_millis(50)),
+    );
+    b.effector(Webhook::new("webhook", &hook)?);
     let echo = if cfg!(windows) {
         Process::new("command", "cmd").args(&["/C", "echo"])
     } else {
@@ -136,7 +135,7 @@ fn build_fabric(journal: &std::path::Path) -> (FabricBuilder, ChannelSender) {
         b.deliberative(from, brain)
             .summation(Summation::default().max_batch(16));
     }
-    (b, frame_sender)
+    Ok((b, frame_sender))
 }
 
 /// A synthetic 28x28 frame of the given mean brightness, with a little texture
@@ -232,7 +231,7 @@ async fn summary() {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let journal = std::env::temp_dir().join("furnace-nerve-journal.log");
     let _ = std::fs::remove_file(&journal);
     // The webhook receiver standing in for the service or device the nervous system commands
@@ -243,12 +242,10 @@ async fn main() {
             axum::http::StatusCode::NO_CONTENT
         }),
     );
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", HOOK_PORT))
-        .await
-        .expect("bind the webhook receiver");
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", HOOK_PORT)).await?;
     tokio::spawn(async move { axum::serve(listener, hooks).await });
 
-    let (fabric, frames) = build_fabric(&journal);
+    let (fabric, frames) = build_fabric(&journal)?;
     let server = Server::new().host("127.0.0.1").port(PORT).nerve(fabric);
     tokio::spawn(async move {
         if let Err(e) = server.serve().await {
@@ -264,11 +261,12 @@ async fn main() {
 
     if std::env::args().any(|a| a == "--serve") {
         println!("Serving; POST text to /events, GET /nerve. Ctrl-C to stop.");
-        tokio::signal::ctrl_c().await.ok();
-        return;
+        tokio::signal::ctrl_c().await?;
+        return Ok(());
     }
     demo_stream(frames).await;
     summary().await;
     let lines = std::fs::read_to_string(&journal).map_or(0, |s| s.lines().count());
     println!("The journal ({}) has {lines} lines.", journal.display());
+    Ok(())
 }

@@ -250,15 +250,10 @@ impl BuiltInModel {
 
     /// The model to serve when neither `--model-name` nor `--model-path` is given: the only
     /// built-in model, if there is exactly one
-    pub fn default_model() -> Result<Self> {
+    pub fn default_model() -> Option<Self> {
         match MODELS {
-            [entry] => Ok(Self(entry)),
-            _ => Err(ModelError::InvalidArgument {
-                arg: "model-name".to_string(),
-                value: String::new(),
-                reason: format!("no model selected. {}", Self::describe_available()),
-            }
-            .into()),
+            [entry] => Some(Self(entry)),
+            _ => None,
         }
     }
 
@@ -270,7 +265,9 @@ impl BuiltInModel {
     /// One-sentence summary of the built-in models, for help text and errors
     pub fn describe_available() -> String {
         if MODELS.is_empty() {
-            "No built-in models in this build: place an ONNX file in models/ and rebuild"
+            "No built-in models in this build: place an ONNX file in models/ (or in the \
+             directory $FURNACE_MODELS_DIR names) and rebuild, or serve a file-based model with \
+             --model-path"
                 .to_string()
         } else {
             format!("Available models: {}", Self::available_models().join(", "))

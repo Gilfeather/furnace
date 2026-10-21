@@ -23,7 +23,7 @@ pub struct ClientRateLimit {
 
 /// Why a request is turned away
 #[derive(Debug, PartialEq)]
-pub enum Rejection {
+pub(crate) enum Rejection {
     /// API keys are required and it presented none or an unknown one
     Unauthorized,
     /// Over the rate limit; may retry after this long
@@ -31,7 +31,7 @@ pub enum Rejection {
 }
 
 /// API keys and rate limiting for one server
-pub struct Access {
+pub(crate) struct Access {
     api_keys: Vec<Vec<u8>>,
     limiter: Option<RateLimiter>,
 }
@@ -89,12 +89,12 @@ impl Access {
 }
 
 /// `a == b` in time depending only on the lengths
-pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// The API key in `Authorization: Bearer <key>` or `X-API-Key: <key>`
-pub fn presented_key<'a>(
+pub(crate) fn presented_key<'a>(
     authorization: Option<&'a str>,
     x_api_key: Option<&'a str>,
 ) -> Option<&'a str> {

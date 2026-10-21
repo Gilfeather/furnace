@@ -61,9 +61,13 @@ pub(super) async fn serve(
         #[cfg(feature = "tls")]
         Some(configs) => {
             use tokio_stream::StreamExt as _;
-            let listener = tokio::net::TcpListener::bind(addr)
-                .await
-                .map_err(|e| format!("Failed to bind gRPC to {addr}: {e}"))?;
+            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                super::bind_error(
+                    &addr.to_string(),
+                    &e,
+                    "--grpc-port / ServerConfig::grpc_port",
+                )
+            })?;
             info!("✅ gRPC (Open Inference Protocol) over TLS on {addr}");
             let connections = tokio_stream::wrappers::ReceiverStream::new(crate::tls::accept(
                 listener,

@@ -223,11 +223,12 @@ mod llm {
     }
 
     impl Llm {
-        /// A brain named `name` over `engine`, greedy, at most 256 tokens per answer
-        pub fn new(name: &str, engine: Arc<dyn LlmEngine>) -> Self {
+        /// A brain named `name` over `engine` (the engine itself, or an `Arc` shared with
+        /// [`Server::llm`](crate::Server::llm)), greedy, at most 256 tokens per answer
+        pub fn new(name: &str, engine: impl LlmEngine) -> Self {
             Self {
                 name: name.to_string(),
-                engine,
+                engine: Arc::new(engine),
                 system: SYSTEM_PROMPT.to_string(),
                 user: Arc::new(signal_text),
                 params: SamplingParams::greedy().with_max_tokens(256),
@@ -451,17 +452,18 @@ pub struct ModelNeuron {
 }
 
 impl ModelNeuron {
-    /// A reflex: small and fast, run inline on the arc
+    /// A reflex: small and fast, run inline on the arc. `model` is the [`Model`] itself, or
+    /// an `Arc` shared with other neurons.
     pub fn reflex(
         name: &str,
-        model: Arc<Model>,
+        model: impl Into<Arc<Model>>,
         input: impl Fn(&Signal) -> Option<Vec<HostTensor>> + Send + Sync + 'static,
         output: impl Fn(&Signal, Vec<HostTensor>) -> Vec<Signal> + Send + Sync + 'static,
     ) -> Self {
         Self {
             name: name.to_string(),
             kind: NeuronKind::Reflex,
-            model,
+            model: model.into(),
             input: Arc::new(input),
             output: Arc::new(output),
             counters: BrainCounters::default(),
@@ -473,7 +475,7 @@ impl ModelNeuron {
     /// window share one forward pass
     pub fn brain(
         name: &str,
-        model: Arc<Model>,
+        model: impl Into<Arc<Model>>,
         input: impl Fn(&Signal) -> Option<Vec<HostTensor>> + Send + Sync + 'static,
         output: impl Fn(&Signal, Vec<HostTensor>) -> Vec<Signal> + Send + Sync + 'static,
     ) -> Self {
@@ -645,7 +647,7 @@ mod tests {
                 r#""args": {"level": 2}}"#,
             ],
         );
-        let brain = Llm::new("brain", Arc::new(engine)).system("Effectors: {effectors}.");
+        let brain = Llm::new("brain", engine).system("Effectors: {effectors}.");
         let (fabric, r, receiver) = fabric_with_brain(brain);
         let outcome = fabric.stimulate(r, signal("something new"));
         assert_eq!(outcome.queued, 1);
