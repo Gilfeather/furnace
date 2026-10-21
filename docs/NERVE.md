@@ -2,10 +2,11 @@
 
 Inference getting faster is worth nothing if the layer that moves signals to and from the
 models is the bottleneck. Furnace is that layer: not a server that
-loads models and answers requests, but the nervous system between sensors, small fast models,
-the large slow model (the brain, an LLM) and actuators. Text, images, tensors and model outputs
-are one kind of signal. Most signals never reach the brain. The receptive side and the motor
-side are separate systems. The mechanisms are a neuron's.
+loads models and answers requests, but the nervous system between sensors, models and
+actuators. Text, images, tensors and model outputs are one kind of signal. Signals run through
+any number of junctions, and at each one they act now or pass on; a brain (an LLM, any large
+model, a remote server) is one possible end, and most signals never reach it. The receptive
+side and the motor side are separate systems. The mechanisms are a neuron's.
 
 ```toml
 [dependencies]
@@ -55,11 +56,22 @@ everything, and the body waits for the brain's reply.
 
 ## Concepts
 
-```text
-world ──▶ RECEPTORS ──▶ PATHWAYS ──▶ EFFECTORS ──▶ world
-          (afferent)    ├─ reflex: a direct call, microseconds
-                        └─ deliberative: a queue to the BRAIN (an LLM, a large model) → commands
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-dark.svg">
+  <img alt="Receptors feed a network of junctions of any depth that branches and merges; at every junction a signal acts now through an effector or passes on to the next junction; an optional brain is one possible end" src="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-light.svg" width="900">
+</picture>
+
+A fabric is any number of junctions (neurons) wired as you like: a chain, a tree or a net,
+branching and merging. Signals enter at receptors (the afferent side) and leave at effectors
+(the efferent side). At every junction, every signal is routed on its own: it acts now (a
+reflex) or passes on to the next junction (deliberation), chosen by its deadline and the
+pathways' measured latency. Nothing central decides. Depth has no limit but 32 hops per
+signal, a guard against wiring loops, not a limit on stages. A brain is one possible
+end, not a requirement, and a reflex can be a small model, a rule or a function.
+
+How this differs from a cache: only habituation, in a gate, is cache-like (a repeat is
+attenuated instead of recomputed). The rest is routing at every junction and acting on the
+world.
 
 **Signal.** One type for everything that moves (`furnace::nerve::Signal`): a `Feature` (a
 64-bit sketch plus a kind, what habituation and thresholds compare), an `Urgency` (a deadline
@@ -71,7 +83,7 @@ no copy between neurons.
 **Neuron.** Anything that takes a signal and may fire: `fn stimulate(&self, Signal, &Cx) ->
 Firing`, where `Firing` is `Quiet`, `Fire(Vec<Signal>)` or `Compute(closure)` for blocking
 work. Four kinds: receptors (world → signal), reflexes (feature → command, in process), brains
-(the slow model; its output is commands) and effectors (command → world).
+(an optional slow model; its output is commands) and effectors (command → world).
 
 **Mechanisms.** A neuron has none until you give it some with `b.gate(id, Mechanisms)`. Each
 is optional and a few words of state, run by the fabric before `stimulate`:
@@ -84,20 +96,24 @@ is optional and a few words of state, run by the fabric before `stimulate`:
 - *Refractory period*: after firing, the neuron ignores signals for a while. Of signals
   arriving together, one is admitted. Backpressure without counters.
 
-**Pathway.** A directed connection with a **measured** rolling p50/p99 latency, never
-configured. Reflex pathways are direct calls on the firing thread: `Receptor::stimulate` →
-`Reflex::stimulate` → `Effector::stimulate`, no channel between them. Deliberative pathways
-queue to a worker thread that sums the signals of a short window into one firing (temporal
-summation); the window is learned from the pathway's latency (an eighth of its p50, between
-200 µs and 20 ms). The queue and the worker are the server's batching engine (the one behind
-`--max-batch-size`), run with one worker per pathway, a bounded queue and the learned window
-in place of the configured timeout.
+**Pathway.** A directed connection out of a junction, with a **measured** rolling p50/p99
+latency, never configured. A junction can have any number of them, to other junctions or to
+effectors, and any number can lead into one. Reflex pathways are direct calls on the firing
+thread: `Receptor::stimulate` → `Reflex::stimulate` → `Effector::stimulate`, no channel between
+them. Deliberative pathways queue to a worker thread that sums the signals of a short window
+into one firing (temporal summation); the window is learned from the pathway's latency (an
+eighth of its p50, between 200 µs and 20 ms). The queue and the worker are the server's
+batching engine (the one behind `--max-batch-size`), run with one worker per pathway, a bounded
+queue and the learned window in place of the configured timeout.
 
-**Selection.** From a neuron that fired, the candidate pathways are those whose p99 fits in
-the signal's remaining deadline; among them the heaviest weight wins; with no deadline every
-pathway is eligible. Give the brain's pathway the heavier weight and the reflex arc is what
-happens when there is no time for the brain, like the fly's short-mode escape. A command
-(`Payload::Command`) names its effector and goes there.
+**Selection.** Made at every junction, for every signal it fires, with nothing central
+deciding: of the pathways leaving that junction, the candidates are those whose p99 fits in the
+signal's remaining deadline; among them the heaviest weight wins; with no deadline every
+pathway is eligible. Latencies are measured as signals flow, so when the pathway onward gets
+slow it drops out and the reflex takes over. Give the deliberative pathway the heavier weight
+(the builder does: reflex 1, deliberative 2) and the reflex is what happens when there is no
+time to pass on, like the fly's short-mode escape. A command (`Payload::Command`) names its
+effector and goes there, from any junction.
 
 **Preparation.** A signal with time to spare that takes a deliberative pathway calls
 `prepare()` on the neurons it will probably reach (the brain, and the effectors after it), at

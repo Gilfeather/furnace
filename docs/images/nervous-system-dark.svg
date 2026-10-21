@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="400" viewBox="0 0 900 400" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
+  <title id="title">The Furnace nervous system</title>
+  <desc id="desc">Receptors on the afferent side feed a network of junctions (neurons) of any depth that branches and merges. At every junction a signal either acts now through an effector (reflex) or passes on to the next junction (deliberate). An optional brain is one possible end.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#e6edf3"/>
+    </marker>
+    <marker id="arrow-act" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#f0883e"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="900" height="400" rx="12" fill="#0d1117"/>
+  <text x="450" y="30" text-anchor="middle" font-size="15" fill="#e6edf3">At every junction, each signal either acts now or passes on: the heaviest pathway</text>
+  <text x="450" y="50" text-anchor="middle" font-size="15" fill="#e6edf3">whose measured p99 latency fits the signal's remaining deadline. No central scheduler.</text>
+  <g transform="translate(0,30)">
+    <!-- afferent side -->
+    <rect x="16" y="90" width="170" height="74" rx="8" fill="#151b23" stroke="#4493f8" stroke-width="2"/>
+    <text x="101" y="115" text-anchor="middle" font-size="15" font-weight="bold" fill="#4493f8">Afferent</text>
+    <text x="101" y="134" text-anchor="middle" font-size="13" fill="#e6edf3">receptors</text>
+    <text x="101" y="152" text-anchor="middle" font-size="12.5" fill="#9198a1">threshold · habituation</text>
+    <!-- deliberate: pass on to the next junction -->
+    <g stroke="#e6edf3" stroke-width="2" fill="none" marker-end="url(#arrow)">
+      <line x1="186" y1="127" x2="240" y2="127"/>
+      <line x1="276.8" y1="116.1" x2="343.2" y2="72.9"/>
+      <line x1="276.8" y1="137.9" x2="343.2" y2="181.1"/>
+      <line x1="380" y1="62" x2="460" y2="62"/>
+      <line x1="380" y1="192" x2="460" y2="192"/>
+      <line x1="373.6" y1="76.7" x2="466.4" y2="177.3"/>
+      <line x1="497.2" y1="72.2" x2="572.8" y2="116.8"/>
+      <line x1="497.2" y1="181.8" x2="572.8" y2="137.2"/>
+      <line x1="610" y1="127" x2="648" y2="127"/>
+    </g>
+    <!-- reflex: act now -->
+    <g stroke="#f0883e" stroke-width="2" stroke-dasharray="5 4" fill="none" marker-end="url(#arrow-act)">
+      <line x1="260" y1="147" x2="260" y2="171"/>
+      <line x1="360" y1="82" x2="360" y2="104"/>
+      <line x1="480" y1="82" x2="480" y2="104"/>
+      <line x1="360" y1="212" x2="360" y2="234"/>
+      <line x1="480" y1="212" x2="480" y2="234"/>
+      <line x1="767" y1="157" x2="767" y2="179"/>
+    </g>
+    <!-- junctions -->
+    <g fill="#151b23" stroke="#e6edf3" stroke-width="2">
+      <circle cx="260" cy="127" r="20"/>
+      <circle cx="360" cy="62" r="20"/>
+      <circle cx="360" cy="192" r="20"/>
+      <circle cx="480" cy="62" r="20"/>
+      <circle cx="480" cy="192" r="20"/>
+      <circle cx="590" cy="127" r="20" stroke-dasharray="4 4"/>
+    </g>
+    <g font-size="14" font-weight="bold" text-anchor="middle" fill="#e6edf3">
+      <text x="260" y="132">1</text>
+      <text x="360" y="67">2</text>
+      <text x="360" y="197">3</text>
+      <text x="480" y="67">4</text>
+      <text x="480" y="197">5</text>
+      <text x="590" y="132">…</text>
+    </g>
+    <!-- optional brain -->
+    <rect x="650" y="97" width="234" height="60" rx="8" fill="#151b23" stroke="#e6edf3" stroke-width="2" stroke-dasharray="6 4"/>
+    <text x="767" y="121" text-anchor="middle" font-size="15" font-weight="bold" fill="#e6edf3">Brain (optional)</text>
+    <text x="767" y="142" text-anchor="middle" font-size="12.5" fill="#9198a1">an LLM, a large model, a remote server</text>
+    <!-- efferent side -->
+    <g fill="#151b23" stroke="#f0883e" stroke-width="1.5">
+      <rect x="240" y="173" width="40" height="20" rx="10"/>
+      <rect x="340" y="106" width="40" height="20" rx="10"/>
+      <rect x="460" y="106" width="40" height="20" rx="10"/>
+      <rect x="340" y="236" width="40" height="20" rx="10"/>
+      <rect x="460" y="236" width="40" height="20" rx="10"/>
+      <rect x="747" y="181" width="40" height="20" rx="10"/>
+    </g>
+    <g font-size="12" text-anchor="middle" fill="#f0883e">
+      <text x="260" y="187">act</text>
+      <text x="360" y="120">act</text>
+      <text x="480" y="120">act</text>
+      <text x="360" y="250">act</text>
+      <text x="480" y="250">act</text>
+      <text x="767" y="195">act</text>
+    </g>
+    <text x="530" y="230" font-size="15" font-weight="bold" fill="#f0883e">Efferent</text>
+    <text x="530" y="249" font-size="12.5" fill="#9198a1">effectors: webhook, command, file, response</text>
+    <text x="530" y="266" font-size="12.5" fill="#9198a1">own runtime: retry · circuit breaker · rate limit</text>
+    <!-- legend -->
+    <line x1="16" y1="290" x2="884" y2="290" stroke="#3d444d" stroke-width="1"/>
+    <line x1="24" y1="314" x2="64" y2="314" stroke="#e6edf3" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="74" y="319" font-size="13" fill="#e6edf3">deliberate: pass on to the next junction</text>
+    <line x1="400" y1="314" x2="440" y2="314" stroke="#f0883e" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arrow-act)"/>
+    <text x="450" y="319" font-size="13" fill="#e6edf3">reflex: act now (a direct call, microseconds)</text>
+    <circle cx="44" cy="344" r="10" fill="#151b23" stroke="#e6edf3" stroke-width="2"/>
+    <text x="74" y="349" font-size="13" fill="#e6edf3">junction (neuron): any number, any depth; branches and merges</text>
+  </g>
+</svg>
