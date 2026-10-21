@@ -362,11 +362,13 @@ async fn test_dynamic_batching_matches_unbatched() {
         ..ServerConfig::default()
     })
     .await;
+    // One worker: while it runs the first request's forward pass the others queue, so they are
+    // merged however slowly they arrive (a coverage build spreads them out)
     let batched = spawn_server(ServerConfig {
         batching: BatchConfig {
             max_batch_size: 8,
             batch_timeout: Duration::from_millis(5),
-            ..BatchConfig::default()
+            workers: 1,
         },
         ..ServerConfig::default()
     })
