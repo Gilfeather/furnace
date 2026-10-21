@@ -1299,7 +1299,6 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
- "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -2904,7 +2903,6 @@ dependencies = [
  "burn-onnx",
  "burn-store",
  "bytes",
- "chrono",
  "furnace-server",
  "memmap2",
  "onnx-ir",
@@ -2935,20 +2933,13 @@ version = "0.11.0"
 dependencies = [
  "axum",
  "bytes",
- "chrono",
- "clap",
  "fast-float2",
  "futures-util",
- "num_cpus",
  "rayon",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
  "tokio",
- "toml",
  "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -6715,35 +6706,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-serde"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
-dependencies = [
- "serde",
- "tracing-core",
-]
-
-[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
- "chrono",
  "matchers",
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
- "serde",
- "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
- "tracing-serde",
 ]
 
 [[package]]

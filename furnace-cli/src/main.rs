@@ -1,3 +1,6 @@
+mod config;
+mod threads;
+
 use clap::{Arg, ArgGroup, Command};
 use std::ffi::OsString;
 use std::net::IpAddr;
@@ -8,7 +11,7 @@ use std::time::Duration;
 use tracing::{Level, info, warn};
 use uuid::Uuid;
 
-use furnace::{Server, api, config, model};
+use furnace::{Server, api, model};
 use furnace_burn::BackendKind;
 use furnace_burn::models::BuiltInModel;
 
@@ -16,21 +19,30 @@ use furnace_burn::models::BuiltInModel;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// A command-line option, or the config file, that cannot be used
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 enum CliError {
-    #[error("Invalid argument '{arg}': {value} - {reason}")]
     Argument {
         arg: String,
         value: String,
         reason: String,
     },
-
-    #[error("Invalid port number: {0}")]
     Port(String),
-
-    #[error("Invalid host address: {0}")]
     Host(String),
 }
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Argument { arg, value, reason } => {
+                write!(f, "Invalid argument '{arg}': {value} - {reason}")
+            }
+            Self::Port(port) => write!(f, "Invalid port number: {port}"),
+            Self::Host(host) => write!(f, "Invalid host address: {host}"),
+        }
+    }
+}
+
+impl std::error::Error for CliError {}
 
 /// Loads a model again for `POST /admin/models/{model}/reload`, from the given weight file or,
 /// with `None`, as configured. Blocking.
@@ -69,7 +81,7 @@ fn build_cli() -> Command {
     let backends = BackendKind::available_names();
     Command::new("furnace")
         // A later occurrence of an option wins, so the command line overrides the config file,
-        // whose options are placed first (see `furnace::config`)
+        // whose options are placed first (see `config`)
         .args_override_self(true)
         .about("🔥 High-performance Rust ML inference server powered by Burn framework")
         .version(env!("CARGO_PKG_VERSION"))
@@ -92,7 +104,7 @@ fn build_cli() -> Command {
                 .help(format!(
                     "Read options from a TOML file (see furnace.example.toml); options given on \
                     the command line override it. Also read from ${}",
-                    furnace::config::CONFIG_ENV
+                    config::CONFIG_ENV
                 )),
         )
         .arg(
@@ -642,7 +654,7 @@ async fn run() -> Result<()> {
         version = env!("CARGO_PKG_VERSION"),
         "🔥 Starting furnace inference server"
     );
-    let threads = furnace::threads::init(args.threads);
+    let threads = threads::init(args.threads);
     info!("🧵 {threads} inference threads");
     for flag in deprecated {
         warn!(

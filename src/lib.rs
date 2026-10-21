@@ -161,14 +161,13 @@
 //!   testing and benchmarking the server itself.
 
 pub mod access;
-// The `furnace` command's own parts: its allocator, its TOML file and its thread pool. Public
-// for the binary (crate furnace-cli) only; not part of the library's API.
+// The `furnace` command's allocator. Public for the binary (crate furnace-cli) and
+// benches/compare only; not part of the library's API. It has no dependencies, so it stays here,
+// where a harness can use it too.
 #[doc(hidden)]
 pub mod allocator;
 pub mod api;
 pub mod batching;
-#[doc(hidden)]
-pub mod config;
 pub mod error;
 mod json_fast;
 #[cfg(feature = "llm")]
@@ -179,8 +178,9 @@ pub mod nerve;
 pub mod preprocess;
 pub mod telemetry;
 pub mod tensor;
+// RFC 3339 timestamps; public for furnace-burn's model metadata
 #[doc(hidden)]
-pub mod threads;
+pub mod time;
 #[cfg(feature = "tls")]
 pub mod tls;
 

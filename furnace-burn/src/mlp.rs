@@ -84,7 +84,7 @@ impl BurnModelContainer {
             hidden_size: config.hidden_size,
             output_size: config.output_size,
             model_type: "mlp".to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: furnace::time::rfc3339_now(),
         };
 
         Self {
