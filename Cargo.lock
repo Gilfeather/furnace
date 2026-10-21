@@ -3162,12 +3162,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fast-float2"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6e8948ce679d00a02a94739ea185595dca7118ed04feb991127e443bd3d761f"
-
-[[package]]
 name = "fastbloom"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3376,7 +3370,6 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "ed25519-dalek",
- "fast-float2",
  "futures-util",
  "getrandom 0.4.3",
  "hmac 0.13.0",
@@ -3389,7 +3382,6 @@ dependencies = [
  "prost",
  "protox",
  "rand 0.10.3",
- "rayon",
  "reqwest",
  "rustls",
  "serde",

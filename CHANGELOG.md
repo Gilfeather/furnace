@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `furnace-server` depends on fewer crates: 45 instead of 63 with no features, 204 instead of
+  211 with `grpc`, `tls`, `llm` and `image` (counted with `cargo tree` on Windows; 46 and 205
+  instead of 64 and 212 on Linux).
+  - The JSON fast path parses numbers with the standard library instead of `fast-float2`, and
+    splits large bodies over scoped threads, one per CPU, instead of rayon's pool.
+  - tokio is built with the features the server uses instead of `full`; axum without `form`,
+    `query` and `tower-log`; tracing without its attribute macros. Programs that use these
+    parts of tokio or axum enable them in their own `Cargo.toml`, as they would anyway.
+  - Without axum's `tower-log`, tracing no longer forwards events to the `log` crate when no
+    tracing subscriber is installed. A program that logs through `log` alone enables tracing's
+    `log` feature to see furnace's logs.
+
 ## [0.12.0] - 2026-10-21
 
 Burn moves out of the server into its own crate: `furnace-server` runs no model and depends on
