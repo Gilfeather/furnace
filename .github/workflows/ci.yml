@@ -3,20 +3,32 @@ name: CI
 # Pull requests run the few jobs that catch almost everything: tests and lints on Linux, and
 # every feature combination type-checked in one job. The rest (other platforms, toolchains,
 # the GPU and Metal backends, the vendored kernels, the bench harnesses, furnace-candle,
-# coverage) runs on main after a merge and weekly. Changes to docs alone run nothing.
+# coverage) runs on main after a merge and weekly. Changes to docs alone run nothing, except to
+# the Markdown files whose Rust examples compile as doc-tests (src/lib.rs, furnace-candle's
+# src/lib.rs); later patterns override earlier ones.
 on:
   push:
     branches: [ main ]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'LICENSE*'
+    paths:
+      - '**'
+      - '!**.md'
+      - '!docs/**'
+      - '!LICENSE*'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'examples/README.md'
+      - 'docs/*.md'
   pull_request:
     branches: [ main ]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'LICENSE*'
+    paths:
+      - '**'
+      - '!**.md'
+      - '!docs/**'
+      - '!LICENSE*'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'examples/README.md'
+      - 'docs/*.md'
   schedule:
     # Mondays, 03:17 UTC
     - cron: '17 3 * * 1'
@@ -85,8 +97,9 @@ jobs:
     - name: Run tests
       run: cargo test --profile ci --lib --bins --tests --features "image grpc tls llm"
 
-    # The examples in the API docs (the crate's front page among them) compile against the
-    # current API; once, they don't depend on the platform
+    # The examples in the API docs (the crate's front page among them) and in the Markdown
+    # documents compile against the current API; once, they don't depend on the platform.
+    # docs/LLM.md's compile with furnace-candle, in its job below.
     - name: Run doc-tests
       if: matrix.os == 'ubuntu-latest'
       run: cargo test --profile ci --doc --features "image grpc tls llm"

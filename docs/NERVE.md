@@ -115,7 +115,7 @@ Server-Sent-Events push.
 `use furnace::nerve::prelude::*` brings what building a fabric takes. The smallest fabric
 that does something, a reflex arc (receive, decide in process, act):
 
-```rust
+```rust,no_run
 use furnace::Server;
 use furnace::nerve::prelude::*;
 use serde_json::json;
@@ -142,7 +142,7 @@ whatever listens on port 9000 (retrying, then giving up, when nothing does).
 The other common shape sends what comes in to the brain, which decides what to do (feature
 `llm`):
 
-```rust
+```rust,no_run
 use furnace::Server;
 use furnace::llm::mock::MockEngine;
 use furnace::nerve::prelude::*;
@@ -185,7 +185,7 @@ What the builder does for you:
 Both together, with habituation at the receptor and a deadline that keeps alerts off the
 brain's pathway:
 
-```rust
+```rust,no_run
 use std::time::Duration;
 
 use furnace::Server;

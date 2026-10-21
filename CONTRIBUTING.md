@@ -140,7 +140,7 @@ We welcome feature suggestions! Please:
 
 ### Code Organization
 
-```
+```text
 src/
 ├── main.rs          # CLI entry point
 ├── lib.rs           # Library exports
@@ -198,7 +198,7 @@ cargo test -- --nocapture
 
 ### Test Structure
 
-```rust
+```text
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,7 +299,7 @@ Releases are managed by maintainers:
 
 We use [Conventional Commits](https://www.conventionalcommits.org/):
 
-```
+```text
 type(scope): description
 
 [optional body]
@@ -317,7 +317,7 @@ Types:
 - `chore`: Maintenance tasks
 
 Examples:
-```
+```text
 feat(api): add batch prediction endpoint
 fix(model): handle invalid input shapes correctly
 docs: update API documentation

@@ -46,7 +46,7 @@ The [`furnace-candle`](../furnace-candle) crate serves quantized GGUF files of t
 CPU, through [candle](https://github.com/huggingface/candle). The tokenizer and the chat
 template come from the GGUF file.
 
-```rust
+```rust,no_run
 use furnace::Server;
 use furnace_candle::Gguf;
 
@@ -82,23 +82,36 @@ fancy-regex) plus a pending upstream fix that moves to zip 9 for security adviso
 
 A model that can prefill a prompt and decode one token at a time implements `StepModel`:
 
-```rust
+```rust,no_run
 use furnace::Server;
 use furnace::llm::{BoxError, Logits, Scheduled, StepModel, TextPipeline};
 
+#[derive(Debug)]
+struct MyLlm;                           // the weights, shared by every request
+
+struct MyCache;                         // KV cache and position of one request
+
+impl MyLlm {
+    fn load() -> Result<Self, BoxError> { todo!() }
+}
+
 impl StepModel for MyLlm {
-    type Sequence = MyCache;            // KV cache and position of one request
+    type Sequence = MyCache;
 
     fn name(&self) -> &str { "my-llm" }
     fn max_context(&self) -> usize { 2048 }
     fn max_sequences(&self) -> usize { 8 }     // what the KV memory allows
 
-    fn prefill(&self, prompt: &[u32]) -> Result<(MyCache, Logits), BoxError> { ... }
-    fn decode(&self, cache: &mut MyCache, token: u32) -> Result<Logits, BoxError> { ... }
+    fn prefill(&self, prompt: &[u32]) -> Result<(MyCache, Logits), BoxError> { todo!() }
+    fn decode(&self, cache: &mut MyCache, token: u32) -> Result<Logits, BoxError> { todo!() }
 }
 
-let pipeline = TextPipeline::from_files("tokenizer.json", Some("tokenizer_config.json".as_ref()))?;
-Server::new().llm(Scheduled::new(MyLlm::load()?, pipeline)).serve().await?;
+#[tokio::main]
+async fn main() -> Result<(), BoxError> {
+    let pipeline = TextPipeline::from_files("tokenizer.json", Some("tokenizer_config.json".as_ref()))?;
+    Server::new().llm(Scheduled::new(MyLlm::load()?, pipeline)).serve().await?;
+    Ok(())
+}
 ```
 
 `Logits` is the next-token logits over the vocabulary, on the host (`Logits(Vec<f32>)`);

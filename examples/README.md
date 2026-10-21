@@ -34,11 +34,15 @@ The comment at the top of [`serve_burn_model/main.rs`](serve_burn_model/main.rs)
 requests to send, and how to load trained weights (`--digits-weights digits.bpk`). Save
 weights from your training code with `burn-store`:
 
-```rust
+```rust,no_run
+use burn::module::Module;
 use burn_store::{BurnpackStore, ModuleSnapshot};
 
-let mut store = BurnpackStore::from_file("my_model.bpk");
-model.save_into(&mut store)?;
+fn save(model: &impl Module) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = BurnpackStore::from_file("my_model.bpk");
+    model.save_into(&mut store)?;
+    Ok(())
+}
 ```
 
 ## 3. Inside your axum app
