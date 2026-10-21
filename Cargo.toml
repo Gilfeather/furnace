@@ -73,30 +73,27 @@ test-models = []
 [dependencies]
 bytes = "1.9"
 
-# Web Framework
-axum = "0.8"
-tokio = { version = "1.53", features = ["full"] }
+# Web Framework. axum without `form` and `query` (furnace extracts neither) and without
+# `tower-log` (logs go through tracing only); tokio with the parts the server uses.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "matched-path", "original-uri", "tokio", "tracing"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "net", "sync", "time", "macros", "signal", "process", "io-util"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
 
-# Logging
-tracing = "0.1"
+# Logging, without the `#[instrument]` attribute macro furnace does not use
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 # Image input (`image` feature)
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 
-# Parses the numbers of JSON request bodies straight to f32 (see src/json_fast.rs)
-fast-float2 = "0.2"
 # gRPC transport for the Open Inference Protocol (feature `grpc`)
 prost = { version = "0.14", optional = true }
 tonic = { version = "0.14", optional = true }
 tonic-prost = { version = "0.14", optional = true }
 # gRPC over TLS: the accepted connections as the stream tonic serves (feature `grpc`)
 tokio-stream = { version = "0.1", optional = true }
-# Parses large JSON bodies on several threads (see src/json_fast.rs)
-rayon = "1"
 # TLS (feature `tls`): rustls without its C-based providers, and RustCrypto primitives
 rustls = { version = "0.23.46", default-features = false, features = ["std", "logging"], optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging"], optional = true }

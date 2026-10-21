@@ -2,13 +2,11 @@
 //! `{"input": [numbers]}` and `{"inputs": [[numbers], ...]}`.
 //!
 //! A ResNet-18 image is 150,528 numbers. serde_json parses each through its general machinery
-//! into an `f64`; here the numbers are found with a byte scan, parsed straight to `f32` by
-//! `fast-float2`, and, for large arrays, in parallel chunks. Anything else (other keys, other
+//! into an `f64`; here the numbers are found with a byte scan, parsed straight to `f32` by the
+//! standard library, and, for large arrays, in parallel chunks on scoped threads. Anything else (other keys, other
 //! value types, whitespace or number forms this scanner does not take, numbers past `f32`'s
 //! range) returns `None`, and the caller falls back to serde_json, which then also produces the
 //! error messages.
-
-use rayon::prelude::*;
 
 /// The numbers of a `{"input": [...]}` or `{"inputs": [[...], ...]}` body
 #[derive(Debug, PartialEq)]
@@ -52,14 +50,14 @@ pub fn parse(body: &[u8]) -> Option<FastInput> {
             }
         }
         s.expect(b']')?;
-        let arrays: Option<Vec<Vec<f32>>> = arrays
-            .par_iter()
-            .map(|&(start, end)| numbers(&body[start..end]))
+        let spans: Vec<&[u8]> = arrays
+            .iter()
+            .map(|&(start, end)| &body[start..end])
             .collect();
-        FastInput::Batch(arrays?)
+        FastInput::Batch(numbers(&spans)?)
     } else {
         let (start, end) = s.array_span()?;
-        FastInput::Single(numbers(&body[start..end])?)
+        FastInput::Single(numbers(&[&body[start..end]])?.pop()?)
     };
     s.ws();
     s.expect(b'}')?;
@@ -118,34 +116,85 @@ impl Scanner<'_> {
     }
 }
 
-/// The comma-separated numbers between an array's brackets
-fn numbers(span: &[u8]) -> Option<Vec<f32>> {
-    if span.len() < PARALLEL_MIN_BYTES {
-        let mut out = Vec::with_capacity(span.len() / 8);
-        return parse_list(span, &mut out, true).then_some(out);
+/// The comma-separated numbers between the brackets of each array span. Many bytes in all are
+/// cut into about one run per CPU and parsed on scoped threads.
+fn numbers(spans: &[&[u8]]) -> Option<Vec<Vec<f32>>> {
+    let total: usize = spans.iter().map(|span| span.len()).sum();
+    if total < PARALLEL_MIN_BYTES {
+        return spans.iter().map(|span| piece(span, true)).collect();
     }
-    // Cut at commas into one chunk per thread or so, parse them in parallel, then join
-    let threads = rayon::current_num_threads().max(1);
-    let target = span.len().div_ceil(threads * 2).max(PARALLEL_MIN_BYTES / 4);
-    let mut cuts = vec![0];
-    let mut at = target;
-    while at < span.len() {
-        let comma = at + span[at..].iter().position(|&c| c == b',')?;
-        cuts.push(comma + 1);
-        at = comma + 1 + target;
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let target = total.div_ceil(threads).max(PARALLEL_MIN_BYTES / 4);
+
+    // Arrays longer than `target` are cut after commas into pieces of about `target` bytes
+    let mut pieces: Vec<(usize, &[u8], bool)> = Vec::new();
+    for (array, span) in spans.iter().enumerate() {
+        if span.len() <= target {
+            pieces.push((array, span, true));
+            continue;
+        }
+        let mut start = 0;
+        let mut at = target;
+        while at < span.len() {
+            let comma = at + span[at..].iter().position(|&c| c == b',')?;
+            pieces.push((array, &span[start..comma], false));
+            start = comma + 1;
+            at = start + target;
+        }
+        pieces.push((array, &span[start..], false));
     }
-    cuts.push(span.len() + 1);
-    let chunks: Option<Vec<Vec<f32>>> = cuts
-        .windows(2)
-        .collect::<Vec<_>>()
-        .into_par_iter()
-        .map(|w| {
-            let (start, end) = (w[0], (w[1] - 1).min(span.len()));
-            let mut out = Vec::with_capacity((end - start) / 8);
-            parse_list(&span[start..end], &mut out, false).then_some(out)
-        })
-        .collect();
-    Some(chunks?.concat())
+
+    // Consecutive pieces of about `target` bytes in all make one thread's run
+    let mut runs: Vec<&[(usize, &[u8], bool)]> = Vec::new();
+    let (mut first, mut bytes) = (0, 0);
+    for (i, &(_, text, _)) in pieces.iter().enumerate() {
+        bytes += text.len();
+        if bytes >= target {
+            runs.push(&pieces[first..=i]);
+            (first, bytes) = (i + 1, 0);
+        }
+    }
+    if first < pieces.len() {
+        runs.push(&pieces[first..]);
+    }
+    let run = |run: &[(usize, &[u8], bool)]| -> Option<Vec<Vec<f32>>> {
+        run.iter()
+            .map(|&(_, text, whole)| piece(text, whole))
+            .collect()
+    };
+    let (mine, others) = runs.split_first()?;
+    let parsed = std::thread::scope(|scope| {
+        let others: Vec<_> = others
+            .iter()
+            .map(|&other| scope.spawn(move || run(other)))
+            .collect();
+        let mut parsed = run(mine)?;
+        for other in others {
+            parsed.extend(
+                other
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?,
+            );
+        }
+        Some(parsed)
+    })?;
+
+    // Join each array's pieces back together, in order
+    let mut arrays = vec![Vec::new(); spans.len()];
+    for (&(array, _, _), numbers) in pieces.iter().zip(parsed) {
+        if arrays[array].is_empty() {
+            arrays[array] = numbers;
+        } else {
+            arrays[array].extend(numbers);
+        }
+    }
+    Some(arrays)
+}
+
+/// The numbers of a whole array, which may be empty, or of a piece cut after a comma
+fn piece(text: &[u8], whole: bool) -> Option<Vec<f32>> {
+    let mut out = Vec::with_capacity(text.len() / 8);
+    parse_list(text, &mut out, whole).then_some(out)
 }
 
 /// Parse `number (, number)*` (or nothing, when `empty_ok`) into `out`
@@ -166,8 +215,10 @@ fn parse_list(text: &[u8], out: &mut Vec<f32>, empty_ok: bool) -> bool {
         };
         // A number past f32's range comes back infinite: leave it to serde_json and the model's
         // checks, so this path never accepts what the fallback would answer otherwise
-        match fast_float2::parse::<f32, _>(&text[i..i + len]) {
-            Ok(value) if value.is_finite() => out.push(value),
+        // `json_number_len` took ASCII digits, signs, `.` and `e` only, so this is valid UTF-8
+        let number = std::str::from_utf8(&text[i..i + len]).ok();
+        match number.map(str::parse::<f32>) {
+            Some(Ok(value)) if value.is_finite() => out.push(value),
             _ => return false,
         }
         i += len;
@@ -333,5 +384,15 @@ mod tests {
         );
         assert!(parse(batch.as_bytes()).is_some());
         agree(&batch);
+        // Many short arrays, an empty one among them, past the parallel threshold in all
+        let mut rows: Vec<String> = values[..100_000]
+            .chunks(50)
+            .map(|row| format!("[{}]", row.join(",")))
+            .collect();
+        rows.insert(7, "[ ]".to_string());
+        let rows = format!("{{\"inputs\": [{}]}}", rows.join(", "));
+        assert!(rows.len() > 4 * PARALLEL_MIN_BYTES);
+        assert!(matches!(parse(rows.as_bytes()), Some(FastInput::Batch(b)) if b.len() == 2001));
+        agree(&rows);
     }
 }
