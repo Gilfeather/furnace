@@ -4,7 +4,7 @@ description: Furnace, an inference server for Burn models (KServe / Triton proto
 type: application
 # The chart's own version; appVersion is the Furnace image it deploys by default
 version: 0.2.0
-appVersion: "0.10.0"
+appVersion: "0.11.0"
 home: https://github.com/Gilfeather/furnace
 sources:
   - https://github.com/Gilfeather/furnace

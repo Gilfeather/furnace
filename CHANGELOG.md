@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-21
+
 The server runs on the nervous system: every model is a neuron, every route a receptor.
 
 ### Migrating from 0.10
