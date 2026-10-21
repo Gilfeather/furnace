@@ -458,7 +458,7 @@ impl Default for Server {
 }
 
 impl Server {
-    /// A server with [`ServerConfig::default`]: `127.0.0.1:3000`, batching on
+    /// A server with [`ServerConfig::default`]: `127.0.0.1:3000`, batching off (see [`max_batch_size`](Self::max_batch_size))
     pub fn new() -> Self {
         Self::with_config(ServerConfig::default())
     }
