@@ -7,14 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-21
+
 Burn moves out of the server into its own crate: `furnace-server` runs no model and depends on
 no ML framework, `furnace-burn` serves Burn models, `furnace-cli` is the `furnace` command.
 
 ### Migrating from 0.11
-- Serving a Burn model needs `furnace-burn` next to `furnace-server`. Until it is on crates.io,
-  take both from the repository so they are the same `furnace-server`:
-  `furnace-server = { git = "https://github.com/Gilfeather/furnace" }` and
-  `furnace-burn = { git = "https://github.com/Gilfeather/furnace" }`.
+- Serving a Burn model needs `furnace-burn = "0.12"` next to `furnace-server = "0.12"`.
 - Burn's parts move from `furnace` to `furnace_burn`, old -> new:
   - `Model::from_fn(..)` -> `furnace_burn::from_fn(..)`, same arguments.
   - `Model::custom(m)` for a `BurnModel` -> `furnace_burn::custom(m)`.
@@ -36,8 +35,8 @@ no ML framework, `furnace-burn` serves Burn models, `furnace-cli` is the `furnac
   the engine holds) and is served with `Model::custom`, which reports `model_type` `custom`.
   `Model::new` takes a `Box<dyn TensorModel>`.
 - The `furnace` command is the `furnace-cli` crate: `cargo binstall furnace-server` and
-  `cargo install furnace-server` no longer install it (furnace-cli is not on crates.io yet; the
-  release binaries, Homebrew and Docker are unchanged). The built-in ONNX models go in
+  `cargo install furnace-server` no longer install it: `cargo binstall furnace-cli` and
+  `cargo install furnace-cli` do (the release binaries, Homebrew and Docker are unchanged). The built-in ONNX models go in
   `furnace-burn/models/` instead of `models/` (or `$FURNACE_MODELS_DIR`, as before), and
   their weights are in `target/*/build/furnace-burn-*/out/models/`.
 - In this repository, the Burn examples (`serve_burn_model`, `nerve`, `basic_mnist_create`), the

@@ -3,7 +3,7 @@
 //!
 //! ```bash
 //! furnace-burn-bench cold-start binary ./target/release/furnace --model-name resnet18
-//! furnace-burn-bench cold-start docker ghcr.io/gilfeather/furnace:0.11.0
+//! furnace-burn-bench cold-start docker ghcr.io/gilfeather/furnace:0.12.0
 //! ```
 //!
 //! For each run it starts the server, polls `GET /readyz` every millisecond, then sends one

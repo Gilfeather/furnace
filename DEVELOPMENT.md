@@ -141,3 +141,22 @@ cargo bench -p furnace-burn --features onnx
 4. Create PR to main
 5. After merge, create GitHub release
 6. GitHub Actions will build and publish binaries
+
+The release workflow publishes furnace-server, furnace-burn and furnace-cli to crates.io in that
+order, through crates.io's Trusted Publishing (no token stored in the repository); furnace-burn
+and furnace-cli only when the repository variable `PUBLISH_BURN_CRATES` is `true`.
+
+### Publishing a new crate for the first time
+
+Trusted Publishing works only for a crate that is already on crates.io, so a new crate's first
+version is published by hand, by an owner, with an API token (crates.io → Account Settings → API
+Tokens, scope `publish-new`):
+
+1. Wait until the release workflow has published furnace-server of the new version.
+2. `cargo login` with the token, then, from a checkout of the release tag:
+   `cargo publish -p furnace-burn`, and once it is on crates.io, `cargo publish -p furnace-cli`.
+3. On crates.io, for each of the two crates: Settings → Trusted Publishing → Add → GitHub, with
+   repository owner `Gilfeather`, repository name `furnace`, workflow filename `release.yml` and
+   no environment.
+4. `gh variable set PUBLISH_BURN_CRATES --body true`, so the next releases publish them too.
+5. Revoke the API token (`cargo logout`, and delete it on crates.io).

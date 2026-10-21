@@ -230,31 +230,46 @@ jobs:
       with:
         toolchain: stable
 
-    - name: Authenticate with crates.io
-      id: auth
+    # In the order they depend on each other: furnace-burn needs furnace-server of the same
+    # version on crates.io, furnace-cli needs both. `cargo publish` waits until the crate it
+    # uploaded is in the index before it returns, so the next one finds it. Each crate gets its
+    # own token: a Trusted Publishing token expires after 30 minutes, and verifying furnace-burn
+    # and furnace-cli (a build of Burn each) can take longer than that.
+    - name: Authenticate with crates.io (furnace-server)
+      id: auth-server
       uses: rust-lang/crates-io-auth-action@v1
 
     - name: Publish furnace-server
       env:
-        CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        CARGO_REGISTRY_TOKEN: ${{ steps.auth-server.outputs.token }}
       run: cargo publish --locked -p furnace-server
 
-    # furnace-burn and furnace-cli are not on crates.io yet. Their first release is published by
-    # hand (`cargo publish -p furnace-burn`, then `-p furnace-cli`, once furnace-server of the
-    # same version is up), which also lets crates.io's Trusted Publishing be set up for them;
-    # from then on, the repository variable PUBLISH_BURN_CRATES=true has these steps publish
-    # them with every release. furnace-cli is published without models: `cargo install` users
-    # compile their own in with FURNACE_MODELS_DIR.
+    # Trusted Publishing works only for a crate that is already on crates.io: the first release
+    # of furnace-burn and furnace-cli is published by hand with an API token, after which their
+    # Trusted Publishing is set up on crates.io and the repository variable
+    # PUBLISH_BURN_CRATES=true has these steps publish them with every release (see
+    # DEVELOPMENT.md). furnace-cli is published without models: `cargo install` users compile
+    # their own in with FURNACE_MODELS_DIR.
+    - name: Authenticate with crates.io (furnace-burn)
+      if: vars.PUBLISH_BURN_CRATES == 'true'
+      id: auth-burn
+      uses: rust-lang/crates-io-auth-action@v1
+
     - name: Publish furnace-burn
       if: vars.PUBLISH_BURN_CRATES == 'true'
       env:
-        CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        CARGO_REGISTRY_TOKEN: ${{ steps.auth-burn.outputs.token }}
       run: cargo publish --locked -p furnace-burn
+
+    - name: Authenticate with crates.io (furnace-cli)
+      if: vars.PUBLISH_BURN_CRATES == 'true'
+      id: auth-cli
+      uses: rust-lang/crates-io-auth-action@v1
 
     - name: Publish furnace-cli
       if: vars.PUBLISH_BURN_CRATES == 'true'
       env:
-        CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        CARGO_REGISTRY_TOKEN: ${{ steps.auth-cli.outputs.token }}
       run: cargo publish --locked -p furnace-cli
 
   # Container image on GitHub Container Registry: ghcr.io/<owner>/furnace:<version> and :latest,

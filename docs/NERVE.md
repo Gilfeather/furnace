@@ -10,14 +10,14 @@ side are separate systems. The mechanisms are a neuron's.
 ```toml
 [dependencies]
 # `llm` for an LLM brain (`nerve::Llm`); the rest of the nervous system needs no feature
-furnace-server = { version = "0.11", default-features = false, features = ["llm"] }
+furnace-server = { version = "0.12", features = ["llm"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde_json = "1"
 tracing-subscriber = "0.3"
 ```
 
-This page follows `main`, which is released as 0.11; until 0.11 is on crates.io, use
-`furnace-server = { git = "https://github.com/Gilfeather/furnace", default-features = false, features = ["llm"] }`.
+This page follows `main`, which is released as 0.12; until 0.12 is on crates.io, use
+`furnace-server = { git = "https://github.com/Gilfeather/furnace", features = ["llm"] }`.
 
 The nervous system is always built: the server's own routes run on it. Everything is pure Rust
 and adds no dependency: it uses what the crate already has, plus a small HTTP/1.1 client over
