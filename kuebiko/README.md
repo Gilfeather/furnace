@@ -15,6 +15,11 @@ dependencies.
   samples appended to a `String`, for a `GET /metrics` handler to return as is. No registry.
 - Feature `serde`: `Serialize` and `Deserialize` for `Percentiles`.
 
+```toml
+[dependencies]
+kuebiko = "0.13"
+```
+
 ```rust
 use kuebiko::{Histogram, render_value};
 use std::time::Duration;

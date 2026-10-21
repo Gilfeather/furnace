@@ -66,15 +66,15 @@ impl Net {
 
 ```toml
 [dependencies]
-furnace-server = "0.12"
-furnace-burn = "0.12"
+furnace-server = "0.13"
+furnace-burn = "0.13"
 burn = "0.22"
 axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 tracing-subscriber = "0.3"
 ```
 
-The snippets in this README follow `main`, which is released as 0.12. Until 0.12 is on
+The snippets in this README follow `main`, which is released as 0.13. Until 0.13 is on
 crates.io, take both crates from the repository, so they are the same `furnace-server`:
 `furnace-server = { git = "https://github.com/Gilfeather/furnace" }` and
 `furnace-burn = { git = "https://github.com/Gilfeather/furnace" }`.
@@ -171,13 +171,13 @@ scaling to zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
 ## Your own Burn models
 
 Add furnace-server and furnace-burn next to Burn; furnace-burn's ONNX import (feature `onnx`)
-is not needed for this (until 0.12 is on crates.io, use the `git` lines
+is not needed for this (until 0.13 is on crates.io, use the `git` lines
 [above](#embed-it-in-your-axum-app)):
 
 ```toml
 [dependencies]
-furnace-server = "0.12"
-furnace-burn = "0.12"
+furnace-server = "0.13"
+furnace-burn = "0.13"
 burn = "0.22"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = "0.3"
@@ -301,7 +301,7 @@ async fn main() -> furnace::Result<()> {
 
 ```toml
 [dependencies]
-furnace-server = { version = "0.12", features = ["llm"] }
+furnace-server = { version = "0.13", features = ["llm"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde_json = "1"
 tracing-subscriber = "0.3"
