@@ -142,29 +142,42 @@ cargo bench -p furnace-burn --features onnx
 5. After merge, create GitHub release
 6. GitHub Actions will build and publish binaries
 
-The release workflow publishes amate, kuebiko, kamui, furnace-server,
+The release workflow (on a `v*` tag) publishes amate, kuebiko, kamui, furnace-server,
 furnace-burn and furnace-cli to crates.io in that order, through crates.io's Trusted Publishing
-(no token stored in the repository); the first three only when the repository variable
+(no token stored in the repository): amate, kuebiko and kamui only when the repository variable
 `PUBLISH_PART_CRATES` is `true`, furnace-burn and furnace-cli only when `PUBLISH_BURN_CRATES` is.
-furnace-server depends on amate and kuebiko, so it can be published only once
-they are on crates.io.
+A crate whose version is on crates.io already is skipped (`.github/publish-crate.sh`), so a
+version published by hand before the tag does not fail the release. furnace-server depends on
+amate and kuebiko, furnace-cli on kamui: their versions must be on crates.io before the
+workflow reaches those crates, published by the workflow itself or by hand.
 
 ### Publishing a new crate for the first time
 
 Trusted Publishing works only for a crate that is already on crates.io, so a new crate's first
 version is published by hand, by an owner, with an API token (crates.io → Account Settings → API
-Tokens, scope `publish-new`):
+Tokens, scope `publish-new`). Whether that comes before or after the tag depends on where the
+new crate sits:
 
-1. Wait until the release workflow has published the crates the new one depends on (for
-   furnace-burn, furnace-server of the new version). amate, kuebiko and
-   kamui depend on nothing of furnace's, so they come first, before the release.
-2. `cargo login` with the token, then, from a checkout of the release tag:
-   `cargo publish -p <crate>`, one at a time in the order above (furnace-burn before
-   furnace-cli).
-3. On crates.io, for each new crate: Settings → Trusted Publishing → Add → GitHub, with
-   repository owner `Gilfeather`, repository name `furnace`, workflow filename `release.yml` and
-   no environment.
-4. `gh variable set PUBLISH_PART_CRATES --body true` (amate, kuebiko,
-   kamui) or `gh variable set PUBLISH_BURN_CRATES --body true` (furnace-burn,
-   furnace-cli), so the next releases publish them too.
-5. Revoke the API token (`cargo logout`, and delete it on crates.io).
+- **A crate that furnace-server or furnace-cli depends on** (amate, kuebiko and kamui in
+  0.13.0): by hand *before* the tag, or the workflow fails at furnace-server.
+  1. Merge the release PR (versions bumped).
+  2. `cargo login` with the token, then, from an up-to-date `main`:
+     `cargo publish --locked -p amate`, `cargo publish --locked -p kuebiko`,
+     `cargo publish --locked -p kamui`.
+  3. Trusted Publishing for each (below), then
+     `gh variable set PUBLISH_PART_CRATES --body true`.
+  4. Revoke the API token (`cargo logout`, and delete it on crates.io).
+  5. Push the `v<version>` tag on that `main` commit. The workflow skips the three versions
+     already on crates.io and publishes furnace-server, furnace-burn and furnace-cli.
+- **A crate that depends on furnace-server** (furnace-burn and furnace-cli in 0.12.0): by hand
+  *after* the tag.
+  1. Wait until the release workflow has published furnace-server of the new version.
+  2. `cargo login` with the token, then, from a checkout of the release tag:
+     `cargo publish -p furnace-burn`, and once it is on crates.io, `cargo publish -p furnace-cli`.
+  3. Trusted Publishing for each (below), then
+     `gh variable set PUBLISH_BURN_CRATES --body true`.
+  4. Revoke the API token.
+
+Trusted Publishing on crates.io, for each new crate: Settings → Trusted Publishing → Add →
+GitHub, with repository owner `Gilfeather`, repository name `furnace`, workflow filename
+`release.yml` and no environment.
