@@ -14,7 +14,7 @@ license = "MIT"
 publish = false
 
 [dependencies]
-furnace = { package = "furnace-server", path = "..", version = "0.10.0", default-features = false, features = ["llm"] }
+furnace = { package = "furnace-server", path = "..", version = "0.11.0", default-features = false, features = ["llm"] }
 # candle at a fixed revision, CPU only: no cuda, cudnn, mkl, accelerate or metal
 candle-core = { git = "https://github.com/Goldziher/candle", rev = "70f72e9cfdbfc570846ca363ead2135394af3e9a" }
 candle-nn = { git = "https://github.com/Goldziher/candle", rev = "70f72e9cfdbfc570846ca363ead2135394af3e9a" }
