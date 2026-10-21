@@ -458,7 +458,8 @@ impl Default for Server {
 }
 
 impl Server {
-    /// A server with [`ServerConfig::default`]: `127.0.0.1:3000`, batching off (see [`max_batch_size`](Self::max_batch_size))
+    /// A server with [`ServerConfig::default`]: `127.0.0.1:3000`, batching off (see
+    /// [`max_batch_size`](Self::max_batch_size))
     pub fn new() -> Self {
         Self::with_config(ServerConfig::default())
     }
@@ -519,9 +520,8 @@ impl Server {
 
     /// Add neurons of your own to the server's nervous system; a fabric that cannot be built
     /// makes [`serve`](Self::serve) and [`router`](Self::router) return
-    /// [`FurnaceError::Nerve`](crate::FurnaceError::Nerve). The server wires its models
-    /// into the same fabric (an entrance `in:{model}`, a neuron `model:{model}` and the
-    /// `serve:respond` effector), so your pathways and its requests share one system. The HTTP
+    /// [`FurnaceError::Nerve`]. The server wires its models into the same fabric (an entrance
+    /// `in:{model}`, a neuron `model:{model}` and the `serve:respond` effector), so your pathways and its requests share one system. The HTTP
     /// receptors become routes, the receptors start with the server, `GET /nerve` describes
     /// every neuron, pathway and measured latency, `GET /nerve/effectors/{name}/events`
     /// streams an SSE effector's commands, and `/metrics` carries it all. A server may serve
