@@ -243,3 +243,31 @@ pub use backend::BackendKind;
 pub use error::{ApiError, FurnaceError, ModelError, Result};
 pub use model::{BurnModel, Model, ModelInfo, load_built_in_model, load_model};
 pub use tensor::{DataType, HostTensor, IoSpec, TensorSpec, Values};
+
+// The Rust examples in the Markdown documents compile as doc-tests, so an API change that breaks
+// one fails CI. README.md and docs/NERVE.md use the `llm` mock engine; docs/LLM.md uses
+// furnace-candle and compiles there.
+#[cfg(all(doctest, feature = "llm"))]
+#[doc = include_str!("../README.md")]
+mod readme {}
+#[cfg(all(doctest, feature = "llm"))]
+#[doc = include_str!("../docs/NERVE.md")]
+mod nerve_md {}
+#[cfg(doctest)]
+#[doc = include_str!("../docs/API.md")]
+mod api_md {}
+#[cfg(doctest)]
+#[doc = include_str!("../docs/MODELS.md")]
+mod models_md {}
+#[cfg(doctest)]
+#[doc = include_str!("../docs/PERFORMANCE.md")]
+mod performance_md {}
+#[cfg(doctest)]
+#[doc = include_str!("../docs/SERVERLESS.md")]
+mod serverless_md {}
+#[cfg(doctest)]
+#[doc = include_str!("../examples/README.md")]
+mod examples_readme {}
+#[cfg(doctest)]
+#[doc = include_str!("../CONTRIBUTING.md")]
+mod contributing {}

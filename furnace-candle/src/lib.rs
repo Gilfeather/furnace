@@ -214,3 +214,8 @@ impl StepModel for GgufModel {
         Ok(Logits(self.weights.forward(cache, &[token])?))
     }
 }
+
+// The Rust examples in docs/LLM.md compile as doc-tests here, where `furnace_candle` exists
+#[cfg(doctest)]
+#[doc = include_str!("../../docs/LLM.md")]
+mod llm_md {}

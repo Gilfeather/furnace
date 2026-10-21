@@ -460,7 +460,7 @@ ASCII characters, e.g. a trace ID from your gateway) and it comes back unchanged
 server generates a UUID. The server's log lines for a request run inside a `request` span with
 that ID, its method and its path:
 
-```
+```text
 INFO request{id=trace-42 method=POST path=/predict}: Prediction completed in 8.10ms, batch size: 1
 ```
 

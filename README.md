@@ -14,9 +14,11 @@ Your app keeps its own routes for pre- and post-processing, the database and the
 API. Furnace adds the inference endpoints, with backpressure, metrics, optional dynamic
 batching and the KServe / Triton protocol:
 
-```rust
+```rust,no_run
 use axum::{Json, Router, routing::get};
-use burn::tensor::Tensor;
+use burn::module::Module;
+use burn::nn::{Linear, LinearConfig};
+use burn::tensor::{Device, Tensor};
 use furnace::{BackendKind, Model, Server};
 
 // One of your own routes: the class names for the 10 logits /predict returns
@@ -29,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init(); // Furnace logs through `tracing`; without this it prints nothing
     let device = BackendKind::Cpu.device();
     let mut net = Net::new(&device); // your Burn Module
-    furnace::weights::load_burnpack(&mut net, "net.bpk".as_ref())?;
+    furnace::weights::load_burnpack(&mut net, "net.bpk")?;
     let model = Model::from_fn("digits", BackendKind::Cpu, &[784], &[10],
         move |images: Tensor<2>| net.forward(images))?;
 
@@ -40,6 +42,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+// Your Burn Module
+#[derive(Module, Debug)]
+struct Net {
+    linear: Linear,
+}
+
+impl Net {
+    fn new(device: &Device) -> Self {
+        Self { linear: LinearConfig::new(784, 10).init(device) }
+    }
+
+    fn forward(&self, images: Tensor<2>) -> Tensor<2> {
+        self.linear.forward(images)
+    }
 }
 ```
 
@@ -143,8 +161,10 @@ tracing-subscriber = "0.3"
 
 A model that takes one float tensor and returns one is served by its `forward` as it is:
 
-```rust
-use burn::tensor::Tensor;
+```rust,no_run
+use burn::module::Module;
+use burn::nn::{Linear, LinearConfig};
+use burn::tensor::{Device, Tensor};
 use furnace::{BackendKind, Model, Server};
 
 #[tokio::main]
@@ -152,11 +172,27 @@ async fn main() -> furnace::Result<()> {
     tracing_subscriber::fmt::init(); // Furnace's startup and request logs
     let device = BackendKind::Cpu.device();
     let mut net = DigitNet::new(&device); // your Burn Module
-    furnace::weights::load_burnpack(&mut net, "digits.bpk".as_ref())?;
+    furnace::weights::load_burnpack(&mut net, "digits.bpk")?;
 
     let model = Model::from_fn("digits", BackendKind::Cpu, &[1, 28, 28], &[10],
         move |images: Tensor<4>| net.forward(images))?;
     Server::new().port(3000).model(model).serve().await
+}
+
+// Your Burn Module: [batch, 1, 28, 28] images in, [batch, 10] logits out
+#[derive(Module, Debug)]
+struct DigitNet {
+    linear: Linear,
+}
+
+impl DigitNet {
+    fn new(device: &Device) -> Self {
+        Self { linear: LinearConfig::new(28 * 28, 10).init(device) }
+    }
+
+    fn forward(&self, images: Tensor<4>) -> Tensor<2> {
+        self.linear.forward(images.flatten(1, 3))
+    }
 }
 ```
 
@@ -186,7 +222,7 @@ new and not urgent; the brain's output is commands, carried out by effectors (we
 local commands, files, the response) with their own retry, circuit-breaker and rate-limit
 loops. Measured against a hand-written server doing the same work: 146 ns per hop, 0.8 µs from stimulus to effector call on a reflex arc, a brain fraction of 0.45 on a stream with half repeats, 47 µs added to a webhook; at 16 clients the fabric server serves 11% fewer requests per second than the bare handler (the server layer around it, not the fabric).
 
-```rust
+```rust,no_run
 use std::time::Duration;
 
 use furnace::Server;
