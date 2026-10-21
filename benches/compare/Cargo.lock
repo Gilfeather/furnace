@@ -114,6 +114,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c880a97d28a3681c0267bd29cff89621202715b065127cd445fa0f0fe0aa2880"
 
 [[package]]
+name = "amate"
+version = "0.12.0"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2879,14 +2883,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
-name = "furnace-alloc"
-version = "0.12.0"
-
-[[package]]
-name = "furnace-batch"
-version = "0.12.0"
-
-[[package]]
 name = "furnace-bench-common"
 version = "0.1.0"
 dependencies = [
@@ -2915,11 +2911,11 @@ dependencies = [
 name = "furnace-compare"
 version = "0.1.0"
 dependencies = [
- "furnace-alloc",
  "furnace-bench-common",
  "furnace-burn",
  "furnace-server",
  "image",
+ "kamui",
  "ort",
  "serde",
  "serde_json",
@@ -2929,21 +2925,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "furnace-metrics"
-version = "0.12.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "furnace-server"
 version = "0.12.0"
 dependencies = [
+ "amate",
  "axum",
  "bytes",
- "furnace-batch",
- "furnace-metrics",
  "futures-util",
+ "kuebiko",
  "serde",
  "serde_json",
  "tokio",
@@ -3880,6 +3869,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kamui"
+version = "0.12.0"
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3895,6 +3888,13 @@ name = "khronos_api"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
+
+[[package]]
+name = "kuebiko"
+version = "0.12.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "lazy_static"

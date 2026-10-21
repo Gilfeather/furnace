@@ -35,9 +35,9 @@ exclude = [
     "/furnace-burn/",
     "/furnace-cli/",
     "/furnace-candle/",
-    "/furnace-batch/",
-    "/furnace-metrics/",
-    "/furnace-alloc/",
+    "/amate/",
+    "/kuebiko/",
+    "/kamui/",
 ]
 
 [package.metadata.docs.rs]
@@ -45,11 +45,11 @@ exclude = [
 features = ["grpc", "tls", "image", "llm"]
 
 [workspace]
-members = [".", "furnace-batch", "furnace-metrics", "furnace-alloc", "furnace-burn", "furnace-cli", "furnace-candle"]
+members = [".", "amate", "kuebiko", "kamui", "furnace-burn", "furnace-cli", "furnace-candle"]
 # `cargo build`, `cargo test` and `cargo clippy` at the root cover the server and its parts, the
 # Burn adapter and the `furnace` command; furnace-candle (candle from git) only with
 # `-p furnace-candle`
-default-members = [".", "furnace-batch", "furnace-metrics", "furnace-alloc", "furnace-burn", "furnace-cli"]
+default-members = [".", "amate", "kuebiko", "kamui", "furnace-burn", "furnace-cli"]
 # Benchmarks with their own workspaces, lockfiles and targets, and the helpers they share
 exclude = ["benches/burn", "benches/common", "benches/compare", "benches/llm", "benches/nerve"]
 
@@ -76,8 +76,8 @@ test-models = []
 
 [dependencies]
 # furnace's own parts, crates of their own with no dependencies
-furnace-batch = { path = "furnace-batch", version = "0.12.0" }
-furnace-metrics = { path = "furnace-metrics", version = "0.12.0", features = ["serde"] }
+amate = { path = "amate", version = "0.12.0" }
+kuebiko = { path = "kuebiko", version = "0.12.0", features = ["serde"] }
 
 bytes = "1.9"
 

@@ -136,17 +136,17 @@ cargo bench -p furnace-burn --features onnx
 ## Release Process
 
 1. Create release branch: `git checkout -b release/v1.0.0`
-2. Update the version in `Cargo.toml`, `furnace-batch/Cargo.toml`, `furnace-metrics/Cargo.toml`, `furnace-alloc/Cargo.toml`, `furnace-burn/Cargo.toml` and `furnace-cli/Cargo.toml` (and their dependencies on each other)
+2. Update the version in `Cargo.toml`, `amate/Cargo.toml`, `kuebiko/Cargo.toml`, `kamui/Cargo.toml`, `furnace-burn/Cargo.toml` and `furnace-cli/Cargo.toml` (and their dependencies on each other)
 3. Update `CHANGELOG.md`
 4. Create PR to main
 5. After merge, create GitHub release
 6. GitHub Actions will build and publish binaries
 
-The release workflow publishes furnace-batch, furnace-metrics, furnace-alloc, furnace-server,
+The release workflow publishes amate, kuebiko, kamui, furnace-server,
 furnace-burn and furnace-cli to crates.io in that order, through crates.io's Trusted Publishing
 (no token stored in the repository); the first three only when the repository variable
 `PUBLISH_PART_CRATES` is `true`, furnace-burn and furnace-cli only when `PUBLISH_BURN_CRATES` is.
-furnace-server depends on furnace-batch and furnace-metrics, so it can be published only once
+furnace-server depends on amate and kuebiko, so it can be published only once
 they are on crates.io.
 
 ### Publishing a new crate for the first time
@@ -156,15 +156,15 @@ version is published by hand, by an owner, with an API token (crates.io → Acco
 Tokens, scope `publish-new`):
 
 1. Wait until the release workflow has published the crates the new one depends on (for
-   furnace-burn, furnace-server of the new version). furnace-batch, furnace-metrics and
-   furnace-alloc depend on nothing of furnace's, so they come first, before the release.
+   furnace-burn, furnace-server of the new version). amate, kuebiko and
+   kamui depend on nothing of furnace's, so they come first, before the release.
 2. `cargo login` with the token, then, from a checkout of the release tag:
    `cargo publish -p <crate>`, one at a time in the order above (furnace-burn before
    furnace-cli).
 3. On crates.io, for each new crate: Settings → Trusted Publishing → Add → GitHub, with
    repository owner `Gilfeather`, repository name `furnace`, workflow filename `release.yml` and
    no environment.
-4. `gh variable set PUBLISH_PART_CRATES --body true` (furnace-batch, furnace-metrics,
-   furnace-alloc) or `gh variable set PUBLISH_BURN_CRATES --body true` (furnace-burn,
+4. `gh variable set PUBLISH_PART_CRATES --body true` (amate, kuebiko,
+   kamui) or `gh variable set PUBLISH_BURN_CRATES --body true` (furnace-burn,
    furnace-cli), so the next releases publish them too.
 5. Revoke the API token (`cargo logout`, and delete it on crates.io).

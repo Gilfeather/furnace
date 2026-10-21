@@ -1,5 +1,8 @@
 //! Latency histograms and the Prometheus text format, with no dependencies.
 //!
+//! Named after Kuebiko, the scarecrow god of Japanese myth who cannot walk yet knows everything
+//! under heaven, as a metric stands in one place and sees every request.
+//!
 //! The histograms are lock-free (one atomic counter per bucket), cheap enough to update on
 //! every request, and give both the Prometheus `_bucket`/`_sum`/`_count` series and estimated
 //! percentiles. The `render_*` functions append counters, gauges and labelled samples to a
@@ -8,7 +11,7 @@
 //!
 //! ```
 //! use std::time::Duration;
-//! use furnace_metrics::{Histogram, label, render_family, render_labelled, render_value};
+//! use kuebiko::{Histogram, label, render_family, render_labelled, render_value};
 //!
 //! let latency = Histogram::new();
 //! latency.observe(Duration::from_millis(8));

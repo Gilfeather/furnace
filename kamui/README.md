@@ -1,4 +1,9 @@
-# furnace-alloc
+# kamui
+
+Named after Kamui (神威), the power to put things away in another space and bring them back, as
+kamui keeps freed memory and hands it out again.
+Built for and maintained in [Furnace](https://github.com/Gilfeather/furnace), the pure-Rust
+inference server.
 
 A global allocator that keeps freed large blocks for reuse, with no dependencies.
 
@@ -11,8 +16,8 @@ forward pass makes in the same order. Smaller allocations go straight to the sys
 
 ```rust
 #[global_allocator]
-static ALLOCATOR: furnace_alloc::BlockCache = furnace_alloc::BlockCache::new();
+static ALLOCATOR: kamui::BlockCache = kamui::BlockCache::new();
 ```
 
 The `furnace` command of [Furnace](https://github.com/Gilfeather/furnace) runs on it. The API
-documentation is on [docs.rs](https://docs.rs/furnace-alloc). MIT licensed.
+documentation is on [docs.rs](https://docs.rs/kamui). MIT licensed.

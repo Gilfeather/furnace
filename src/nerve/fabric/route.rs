@@ -291,5 +291,5 @@ impl Fabric {
 /// A signal announced on a deliberative pathway, see [`Fabric::announce`]
 pub(crate) struct Announced<'a> {
     pathway: PathwayId,
-    arrival: furnace_batch::Arrival<'a, Signal>,
+    arrival: amate::Arrival<'a, Signal>,
 }

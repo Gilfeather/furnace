@@ -1,11 +1,11 @@
 [package]
-name = "furnace-batch"
+name = "amate"
 version = "0.12.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Furnace Contributors"]
 description = "Dynamic batching on worker threads, with no dependencies: items run alone while a worker is idle and are merged into batches once every worker is busy"
-documentation = "https://docs.rs/furnace-batch"
+documentation = "https://docs.rs/amate"
 homepage = "https://github.com/Gilfeather/furnace"
 repository = "https://github.com/Gilfeather/furnace"
 license = "MIT"
