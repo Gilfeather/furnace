@@ -1,6 +1,10 @@
 //! The nervous system: the layer between sensors, small fast models, the
 //! large slow model (the brain, an LLM) and actuators.
 //!
+//! ![Receptors feed junctions of any depth that branch and merge; at every junction a signal
+//! acts now or passes on; an optional brain is one possible
+//! end](https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-light.svg)
+//!
 //! Not a server that loads models and answers requests, but what moves signals between
 //! them: overwhelmingly light, so that the models are the only cost. Most signals must
 //! never reach the brain. The mechanisms are a neuron's:

@@ -239,15 +239,21 @@ slower, so leave it off there. [docs/API.md](docs/API.md#dynamic-batching) has t
 
 ## The nervous system
 
-Inference getting faster is worth nothing if the layer that moves signals to and from the
-models is the bottleneck. Furnace is that layer: the nervous system
-between sensors, small fast models, the large slow model (an LLM, the brain) and actuators.
-Receptors extract a small feature from each input and habituate to repeats, so a repeated
-stimulus dies before it reaches anything; reflex pathways are direct calls, microseconds from
-stimulus to effector; a signal's deadline selects its pathway, so the brain only sees what is
-new and not urgent; the brain's output is commands, carried out by effectors (webhooks,
-local commands, files, the response) with their own retry, circuit-breaker and rate-limit
-loops.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-dark.svg">
+  <img alt="Receptors feed a network of junctions of any depth that branches and merges; at every junction a signal acts now through an effector or passes on to the next junction; an optional brain is one possible end" src="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-light.svg" width="900">
+</picture>
+
+Furnace moves signals between sensors, models and actuators. Receptors gate each input
+(threshold, habituation to repeats, refractory period); then it runs through any number of
+junctions, chained, branching and merging as you wire them. At every junction a signal takes
+the heaviest pathway whose measured p99 latency fits its remaining deadline: a reflex that acts
+now (a direct call, microseconds) or a pass on to the next junction (a queue that sums signals
+into one firing). Latencies are measured as signals flow, so when the road ahead gets slow the
+reflex wins, with no central scheduler. Effectors act on their own runtime with retry, a
+circuit breaker and a rate limit. The brain (an LLM, any large model, a remote server) is
+optional. Depth has no limit but 32 hops per signal, a guard against wiring loops. Not a
+cache: only habituation is cache-like; the rest is routing at every junction and acting.
 
 <!-- bench:nerve:start -->
 
