@@ -40,7 +40,7 @@ const ACCEPT_QUEUE: usize = 256;
 /// Handshakes in flight at once, per listener. Past it the listener stops accepting until one
 /// ends, and further connections wait in the operating system's backlog, so clients that open
 /// connections and never send a ClientHello cannot hold more than this many tasks and sockets
-/// (each for up to [`HANDSHAKE_TIMEOUT`]). `--max-concurrent-requests` bounds requests, which
+/// (each for up to 10 seconds, the handshake timeout). `--max-concurrent-requests` bounds requests, which
 /// come after the handshake.
 pub const MAX_HANDSHAKES: usize = 1024;
 
