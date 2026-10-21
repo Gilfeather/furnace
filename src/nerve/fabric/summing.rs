@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use super::{Fabric, Inner};
 use crate::nerve::neuron::{Cx, Firing, NeuronKind};
 use crate::nerve::signal::{PathwayId, ReplyHandle, Signal};
-use furnace_batch::{Batching, Queued};
+use amate::{Batching, Queued};
 
 impl Fabric {
     /// Fire `to` with a batch a worker summed, and propagate the results

@@ -23,7 +23,7 @@ use super::{
     BoxError, EngineError, Event, FinishReason, GenerateRequest, LlmEngine, Sampler, StopStrings,
     TextPipeline,
 };
-use furnace_metrics::Histogram;
+use kuebiko::Histogram;
 
 /// Next-token logits over the vocabulary, on the host
 #[derive(Debug, Clone, PartialEq)]

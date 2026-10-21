@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use super::{Event, FinishReason, LlmEngine};
-use furnace_metrics::{Histogram, Percentiles, label};
+use kuebiko::{Histogram, Percentiles, label};
 
 /// The counters and histograms of one engine
 #[derive(Default)]

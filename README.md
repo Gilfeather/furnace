@@ -511,9 +511,9 @@ cargo test             # needs furnace-burn/models/resnet18.onnx and mnist.onnx
 The workspace has `furnace-server` (the server, the nervous system and the LLM layer, at the
 root, no ML framework), [`furnace-burn`](furnace-burn) (Burn models, the ONNX import),
 `furnace-cli` (the `furnace` command), and three parts with no dependencies that anyone can use
-on their own: [`furnace-batch`](furnace-batch) (dynamic batching),
-[`furnace-metrics`](furnace-metrics) (latency histograms, Prometheus text) and
-[`furnace-alloc`](furnace-alloc) (the allocator that reuses large blocks).
+on their own: [`amate`](amate) (dynamic batching),
+[`kuebiko`](kuebiko) (latency histograms, Prometheus text) and
+[`kamui`](kamui) (the allocator that reuses large blocks).
 [`furnace-candle`](furnace-candle) is built only with `-p furnace-candle`. Debug builds optimize the dependencies, so `cargo test` needs no
 `--release` and rebuilds in seconds after a change. Generated model code is in
 `target/*/build/furnace-burn-*/out/models/`. Furnace ships a patched copy of Burn's CPU backend

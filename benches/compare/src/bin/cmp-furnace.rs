@@ -7,7 +7,7 @@ use furnace_compare::{Args, bench_in_process, furnace_version};
 
 // The same allocator as the furnace server binary
 #[global_allocator]
-static ALLOCATOR: furnace_alloc::BlockCache = furnace_alloc::BlockCache::new();
+static ALLOCATOR: kamui::BlockCache = kamui::BlockCache::new();
 
 fn main() {
     let args = Args::parse("backend");

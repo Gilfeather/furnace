@@ -1,4 +1,9 @@
-# furnace-batch
+# amate
+
+Named after Amaterasu, the sun goddess of Japanese myth, who gathers scattered light and sends
+it out at once, as amate gathers waiting requests into one batch.
+Built for and maintained in [Furnace](https://github.com/Gilfeather/furnace), the pure-Rust
+inference server.
 
 Dynamic batching on worker threads, with no dependencies.
 
@@ -15,7 +20,7 @@ It is the batching behind [Furnace](https://github.com/Gilfeather/furnace)'s mod
 nervous system.
 
 ```rust
-use furnace_batch::{Batching, Config, Engine, Queued};
+use amate::{Batching, Config, Engine, Queued};
 use std::time::Duration;
 
 struct Forward; // your model
@@ -36,4 +41,4 @@ let input = vec![0.0; 784];      // ... while its body is decoded
 engine.submit(Some(arrival), input).unwrap();
 ```
 
-The API documentation is on [docs.rs](https://docs.rs/furnace-batch). MIT licensed.
+The API documentation is on [docs.rs](https://docs.rs/amate). MIT licensed.

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::nerve::latency::LatencyEstimate;
 use crate::nerve::signal::{NeuronId, PathwayId, Signal};
-use furnace_batch::Engine;
+use amate::Engine;
 
 /// How signals move between two neurons
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
