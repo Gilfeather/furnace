@@ -2778,12 +2778,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "furnace-burn"
+version = "0.11.0"
+dependencies = [
+ "burn",
+ "burn-store",
+ "bytes",
+ "chrono",
+ "furnace-server",
+ "memmap2",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "furnace-burn-bench"
 version = "0.1.0"
 dependencies = [
  "axum",
  "burn",
  "furnace-bench-common",
+ "furnace-burn",
  "furnace-server",
  "reqwest",
  "serde",
@@ -2798,14 +2814,11 @@ name = "furnace-server"
 version = "0.11.0"
 dependencies = [
  "axum",
- "burn",
- "burn-store",
  "bytes",
  "chrono",
  "clap",
  "fast-float2",
  "futures-util",
- "memmap2",
  "num_cpus",
  "rayon",
  "serde",

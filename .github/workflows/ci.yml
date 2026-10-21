@@ -4,8 +4,12 @@ name: CI
 # every feature combination type-checked in one job. The rest (other platforms, toolchains,
 # the GPU and Metal backends, the vendored kernels, the bench harnesses, furnace-candle,
 # coverage) runs on main after a merge and weekly. Changes to docs alone run nothing, except to
-# the Markdown files whose Rust examples compile as doc-tests (src/lib.rs, furnace-candle's
-# src/lib.rs); later patterns override earlier ones.
+# the Markdown files whose Rust examples compile as doc-tests (src/lib.rs, furnace-burn's and
+# furnace-candle's src/lib.rs); later patterns override earlier ones.
+#
+# The workspace's default members are furnace-server (the root), furnace-burn and furnace-cli:
+# `cargo test`, `cargo clippy` and `cargo check` without `-p` cover those three. The built-in
+# ONNX models go in furnace-burn/models/.
 on:
   push:
     branches: [ main ]
@@ -74,15 +78,15 @@ jobs:
     - name: Cache ONNX models
       uses: actions/cache@v5
       with:
-        path: models
+        path: furnace-burn/models
         key: onnx-models-resnet18-v1-7-mnist-8
 
     - name: Download ONNX models
       shell: bash
       run: |
-        mkdir -p models
-        [ -f models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o models/resnet18.onnx
-        [ -f models/mnist.onnx ] || curl -fsSL "$MNIST_URL" -o models/mnist.onnx
+        mkdir -p furnace-burn/models
+        [ -f furnace-burn/models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o furnace-burn/models/resnet18.onnx
+        [ -f furnace-burn/models/mnist.onnx ] || curl -fsSL "$MNIST_URL" -o furnace-burn/models/mnist.onnx
 
     - name: Check formatting
       run: cargo fmt --all -- --check
@@ -97,9 +101,10 @@ jobs:
     - name: Run tests
       run: cargo test --profile ci --lib --bins --tests --features "image grpc tls llm"
 
-    # The examples in the API docs (the crate's front page among them) and in the Markdown
+    # The examples in the API docs (the crates' front pages among them) and in the Markdown
     # documents compile against the current API; once, they don't depend on the platform.
-    # docs/LLM.md's compile with furnace-candle, in its job below.
+    # README.md's and examples/README.md's compile with furnace-burn, docs/LLM.md's with
+    # furnace-candle, in its job below.
     - name: Run doc-tests
       if: matrix.os == 'ubuntu-latest'
       run: cargo test --profile ci --doc --features "image grpc tls llm"
@@ -127,31 +132,36 @@ jobs:
     # to compile
     - name: Download the MNIST model
       run: |
-        mkdir -p models
-        curl -fsSL "$MNIST_URL" -o models/mnist.onnx
+        mkdir -p furnace-burn/models
+        curl -fsSL "$MNIST_URL" -o furnace-burn/models/mnist.onnx
 
+    # The server alone (no feature is on by default), then the Burn adapter and the command
     - name: Clippy per feature
       shell: bash
       run: |
         set -euo pipefail
-        for features in "--no-default-features" \
-                        "--no-default-features --features tls" \
-                        "--no-default-features --features grpc" \
-                        "--no-default-features --features llm" \
-                        "--no-default-features --features image" \
-                        "--features embed-weights"; do
-          echo "::group::clippy $features"
-          cargo clippy --all-targets $features -- -D warnings
+        for args in "-p furnace-server" \
+                    "-p furnace-server --features tls" \
+                    "-p furnace-server --features grpc" \
+                    "-p furnace-server --features llm" \
+                    "-p furnace-server --features image" \
+                    "-p furnace-burn" \
+                    "-p furnace-burn --features onnx" \
+                    "-p furnace-burn --features embed-weights" \
+                    "-p furnace-cli --no-default-features" \
+                    "-p furnace-cli --features embed-weights"; do
+          echo "::group::clippy $args"
+          cargo clippy --all-targets $args -- -D warnings
           echo "::endgroup::"
         done
-        echo "::group::clippy --no-default-features --features wgpu"
-        cargo clippy --no-default-features --features wgpu -- -D warnings
+        echo "::group::clippy -p furnace-burn --features wgpu"
+        cargo clippy -p furnace-burn --features wgpu -- -D warnings
         echo "::endgroup::"
 
-    # No C or C++: none of these crates may be built for furnace with `llm`, with the release
-    # features (`grpc tls`, whose crypto is RustCrypto and must not pull ring back in) or with
-    # `image`, or for furnace-candle, on any of the release targets. Dev-dependencies don't ship
-    # and are not checked.
+    # No C or C++: none of these crates may be built for furnace-server with `llm`, with the
+    # release features (`grpc tls`, whose crypto is RustCrypto and must not pull ring back in) or
+    # with `image`, for furnace-burn, for the `furnace` command, or for furnace-candle, on any of
+    # the release targets. Dev-dependencies don't ship and are not checked.
     - name: No C or C++ crates
       shell: bash
       run: |
@@ -163,8 +173,9 @@ jobs:
         # libraries or bindings to them, or GPU kernels compiled by nvcc
         banned='^(cc|cmake|bindgen|pkg-config|ring|aws-lc-rs|aws-lc-sys|openssl|openssl-sys|onig|onig_sys|cudarc|intel-mkl-src|accelerate-src|candle-kernels|candle-flash-attn|candle-metal-kernels|zstd-sys|libz-sys|bzip2-sys|lzma-sys)$'
         failed=0
-        for package in "-p furnace-server --features llm" "-p furnace-server --no-default-features --features llm" \
-                       "-p furnace-server --features grpc,tls" "-p furnace-server --features image" "-p furnace-candle"; do
+        for package in "-p furnace-server --features llm" "-p furnace-server --features grpc,tls" \
+                       "-p furnace-server --features image" "-p furnace-burn --features onnx" \
+                       "-p furnace-cli --features grpc,tls" "-p furnace-candle"; do
           crates=$(cargo tree $package -e normal,build "${targets[@]}" --prefix none -f '{p}' | awk '{print $1}' | sort -u)
           found=$(grep -E "$banned" <<<"$crates" || true)
           if [ -n "$found" ]; then
@@ -207,8 +218,8 @@ jobs:
 
     - name: Download the MNIST model
       run: |
-        mkdir -p models
-        curl -fsSL "$MNIST_URL" -o models/mnist.onnx
+        mkdir -p furnace-burn/models
+        curl -fsSL "$MNIST_URL" -o furnace-burn/models/mnist.onnx
 
     - name: Type check
       run: cargo check --all-targets --features "image grpc tls llm"
@@ -233,11 +244,11 @@ jobs:
 
     - name: Download the MNIST model
       run: |
-        mkdir -p models
-        curl -fsSL "$MNIST_URL" -o models/mnist.onnx
+        mkdir -p furnace-burn/models
+        curl -fsSL "$MNIST_URL" -o furnace-burn/models/mnist.onnx
 
     - name: Clippy
-      run: cargo clippy --all-targets --no-default-features --features metal -- -D warnings
+      run: cargo clippy -p furnace-burn -p furnace-cli --all-targets --features metal -- -D warnings
 
   # The benchmark harnesses have their own workspaces, so `cargo fmt --all` and clippy above
   # never see them. benches/compare links ONNX Runtime and is only type-checked. The helpers
@@ -374,19 +385,19 @@ jobs:
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2
       with:
-        workspaces: vendor/burn-flex
+        workspaces: furnace-burn/vendor/burn-flex
 
     - name: Clippy
-      run: cargo clippy --manifest-path vendor/burn-flex/Cargo.toml --release --all-targets -- -D warnings
+      run: cargo clippy --manifest-path furnace-burn/vendor/burn-flex/Cargo.toml --release --all-targets -- -D warnings
 
     - name: Run tests
-      run: cargo test --manifest-path vendor/burn-flex/Cargo.toml --release --lib
+      run: cargo test --manifest-path furnace-burn/vendor/burn-flex/Cargo.toml --release --lib
 
     # Rough single-threaded numbers for this runner's CPU, for the log only
     - name: Kernel throughput
       env:
         RAYON_NUM_THREADS: "1"
-      run: cargo test --manifest-path vendor/burn-flex/Cargo.toml --release --lib throughput -- --ignored --nocapture --test-threads 1
+      run: cargo test --manifest-path furnace-burn/vendor/burn-flex/Cargo.toml --release --lib throughput -- --ignored --nocapture --test-threads 1
 
   coverage:
     name: Code Coverage
@@ -412,14 +423,14 @@ jobs:
     - name: Cache ONNX models
       uses: actions/cache@v5
       with:
-        path: models
+        path: furnace-burn/models
         key: onnx-models-resnet18-v1-7-mnist-8
 
     - name: Download ONNX models
       run: |
-        mkdir -p models
-        [ -f models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o models/resnet18.onnx
-        [ -f models/mnist.onnx ] || curl -fsSL "$MNIST_URL" -o models/mnist.onnx
+        mkdir -p furnace-burn/models
+        [ -f furnace-burn/models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o furnace-burn/models/resnet18.onnx
+        [ -f furnace-burn/models/mnist.onnx ] || curl -fsSL "$MNIST_URL" -o furnace-burn/models/mnist.onnx
 
     - name: Generate code coverage
       run: cargo llvm-cov --profile ci --workspace --features "image grpc tls llm" --lcov --output-path lcov.info
@@ -451,14 +462,14 @@ jobs:
     - name: Cache ONNX models
       uses: actions/cache@v5
       with:
-        path: models
+        path: furnace-burn/models
         key: onnx-models-resnet18-v1-7-mnist-8
 
     - name: Download ONNX models
       run: |
-        mkdir -p models
-        [ -f models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o models/resnet18.onnx
-        [ -f models/mnist.onnx ] || curl -fsSL "$MNIST_URL" -o models/mnist.onnx
+        mkdir -p furnace-burn/models
+        [ -f furnace-burn/models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o furnace-burn/models/resnet18.onnx
+        [ -f furnace-burn/models/mnist.onnx ] || curl -fsSL "$MNIST_URL" -o furnace-burn/models/mnist.onnx
 
     - name: Run benchmarks
-      run: cargo bench --bench inference_benchmark --features test-models --no-run
+      run: cargo bench -p furnace-burn --bench inference_benchmark --features onnx --no-run

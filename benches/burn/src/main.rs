@@ -14,7 +14,7 @@
 //!
 //! 1. *Direct*: in this process, host data -> tensor -> `forward` -> host data, batch 1 and 4.
 //!    That is the work any server has to do, with nothing around it.
-//! 2. *furnace*: the model served with furnace's library API (`Model::from_fn`, or a
+//! 2. *furnace*: the model served with furnace-burn (`furnace_burn::from_fn`, or a
 //!    `BurnModel` for the two-input text model), default settings, in its own process; requests
 //!    use the KServe / Triton v2 protocol with binary tensors over HTTP.
 //! 3. *hand-written*: the same model behind a minimal axum server in its own process: one route,
@@ -42,11 +42,12 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::routing::{get, post};
 use burn::tensor::{Device, Int, Tensor, TensorData};
-use furnace::{BackendKind, BurnModel, DataType, HostTensor, IoSpec, Model, Server};
+use furnace::{DataType, HostTensor, IoSpec, Model, Server};
 use furnace_bench_common::{
     fail, free_port, furnace_version, median, memory, percentile, python, stop, wait_until_healthy,
     write_json,
 };
+use furnace_burn::{BackendKind, BurnModel, HostTensorExt};
 use models::{DigitNet, ResNet18, TextEncoder};
 use serde::Serialize;
 
@@ -229,7 +230,7 @@ fn tokens(batch: usize, values: Vec<i64>, device: &Device) -> Tensor<2, Int> {
 }
 
 /// The text model for furnace: two named INT64 inputs, so a `BurnModel` rather than `from_fn`;
-/// `Sentiment` in `examples/serve_burn_model/models.rs` is the same `BurnModel` around a smaller net
+/// `Sentiment` in `furnace-burn/examples/serve_burn_model/models.rs` is the same `BurnModel` around a smaller net
 #[derive(Debug)]
 struct TextModel {
     net: TextEncoder,
@@ -274,22 +275,22 @@ impl BurnModel for TextModel {
 fn furnace_model(which: Which, backend: BackendKind) -> Model {
     let device = backend.device();
     let model = match Net::new(which, &device) {
-        Net::Digits(net) => Model::from_fn(
+        Net::Digits(net) => furnace_burn::from_fn(
             "digits",
             backend,
             &[1, 28, 28],
             &[10],
             move |x: Tensor<4>| net.forward(x),
         ),
-        Net::Resnet18(net) => Model::from_fn(
+        Net::Resnet18(net) => furnace_burn::from_fn(
             "resnet18",
             backend,
             &[3, 224, 224],
             &[1000],
             move |x: Tensor<4>| net.forward(x),
         ),
-        Net::Echo => Model::from_fn("echo", backend, &[1, 1, 10], &[10], echo),
-        Net::Encoder(net) => Ok(Model::custom(TextModel {
+        Net::Echo => furnace_burn::from_fn("echo", backend, &[1, 1, 10], &[10], echo),
+        Net::Encoder(net) => Ok(furnace_burn::custom(TextModel {
             net,
             backend,
             device,

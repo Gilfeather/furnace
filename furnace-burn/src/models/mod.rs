@@ -10,10 +10,11 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::backend::BackendKind;
-use crate::error::{FurnaceError, ModelError, Result};
+use furnace::error::{FurnaceError, ModelError, Result};
+use furnace::{DataType, IoSpec};
+
+use crate::BackendKind;
 use crate::model::BurnModel;
-use crate::tensor::{DataType, IoSpec};
 
 /// Loads a built-in model on a backend, from a weight file or embedded weights
 type LoadFn = fn(BackendKind, Option<&Path>) -> Result<Box<dyn BurnModel>>;
@@ -75,10 +76,11 @@ macro_rules! built_in_models {
             use burn::tensor::Device;
             use std::path::Path;
 
-            use crate::backend::BackendKind;
-            use crate::error::Result;
+            use furnace::error::Result;
+            use furnace::{HostTensor, IoSpec};
+
+            use crate::BackendKind;
             use crate::model::BurnModel;
-            use crate::tensor::{HostTensor, IoSpec};
 
             pub const ENTRY: super::ModelEntry = super::ModelEntry {
                 name: $name,
@@ -112,7 +114,7 @@ macro_rules! built_in_models {
                         None => Model::from_embedded(&device),
                         #[cfg(not(feature = "embed-weights"))]
                         None => {
-                            return Err(crate::error::ModelError::InvalidArgument {
+                            return Err(furnace::error::ModelError::InvalidArgument {
                                 arg: "weights".to_string(),
                                 value: $name.to_string(),
                                 reason: "no weight file given and weights are not embedded"
@@ -265,8 +267,8 @@ impl BuiltInModel {
     /// One-sentence summary of the built-in models, for help text and errors
     pub fn describe_available() -> String {
         if MODELS.is_empty() {
-            "No built-in models in this build: place an ONNX file in models/ (or in the \
-             directory $FURNACE_MODELS_DIR names) and rebuild, or serve a file-based model with \
+            "No built-in models in this build: place an ONNX file in furnace-burn/models/ (or in \
+             the directory $FURNACE_MODELS_DIR names) and rebuild, or serve a file-based model with \
              --model-path"
                 .to_string()
         } else {

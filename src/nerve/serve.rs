@@ -434,8 +434,7 @@ impl Serving {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::BackendKind;
-    use crate::model::BurnModel;
+    use crate::model::TensorModel;
     use crate::tensor::{IoSpec, Values};
     use futures_util::FutureExt;
     use std::sync::Condvar;
@@ -483,12 +482,12 @@ mod tests {
         }
     }
 
-    impl BurnModel for Doubler {
+    impl TensorModel for Doubler {
         fn name(&self) -> &str {
             "doubler"
         }
-        fn backend(&self) -> BackendKind {
-            BackendKind::Cpu
+        fn backend(&self) -> &str {
+            "cpu"
         }
         fn inputs(&self) -> Vec<IoSpec> {
             vec![IoSpec::fp32("input", &[WIDTH])]

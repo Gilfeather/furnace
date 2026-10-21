@@ -1,0 +1,71 @@
+[package]
+name = "furnace-burn"
+version = "0.11.0"
+edition = "2024"
+rust-version = "1.95"
+authors = ["Furnace Contributors"]
+description = "Serve Burn models with furnace: a forward function, a model of named tensors, Burnpack weights and ONNX models compiled to Burn"
+documentation = "https://docs.rs/furnace-burn"
+homepage = "https://github.com/Gilfeather/furnace"
+repository = "https://github.com/Gilfeather/furnace"
+license = "MIT"
+keywords = ["machine-learning", "inference", "onnx", "server", "burn"]
+categories = ["web-programming::http-server", "science"]
+readme = "README.md"
+exclude = [
+    "/models/",
+    # crates.io builds use upstream burn-flex; [patch.crates-io] only applies in this repo
+    "/vendor/",
+]
+
+[package.metadata.docs.rs]
+features = ["onnx"]
+
+[features]
+default = []
+# Generate built-in models from the ONNX files in models/ (or $FURNACE_MODELS_DIR) at build time
+onnx = ["dep:burn-onnx", "dep:onnx-ir"]
+# Compile built-in model weights into the binary (single-file deploys).
+# Default: weights stay in a separate <name>.bpk file loaded at startup.
+embed-weights = ["onnx"]
+# Burn's GPU backends, chosen with `BackendKind`
+wgpu = ["burn/wgpu"]
+metal = ["burn/metal"]
+cuda = ["burn/cuda"]
+
+[dependencies]
+furnace = { package = "furnace-server", path = "..", version = "0.11.0", default-features = false }
+# `rayon` and `simd` are burn-flex defaults that `default-features = false` would drop:
+# without them the CPU backend runs single-threaded on scalar kernels
+burn = { version = "0.22", default-features = false, features = ["std", "flex", "store", "rayon", "simd"] }
+burn-store = { version = "0.22", default-features = false, features = ["std", "memmap"] }
+# Zero-copy weight loading: .bpk files are memory-mapped and shared with tensors
+bytes = "1.9"
+memmap2 = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+chrono = "0.4"
+
+[build-dependencies]
+burn-onnx = { version = "0.22", optional = true }
+# Reads model input/output shapes for the built-in model registry (already a burn-onnx dependency)
+onnx-ir = { version = "0.22", optional = true }
+
+[dev-dependencies]
+# The examples and doc-tests use the LLM mock engine; the benches the server's constant models
+furnace = { package = "furnace-server", path = "..", features = ["llm", "test-models"] }
+tempfile = "3.12"
+tokio = { version = "1.53", features = ["full"] }
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The tests only call http://127.0.0.1: no TLS stack (its default pulls in aws-lc-sys, C)
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# Builds ONNX graphs for the build/optimize.rs tests (already a build dependency)
+onnx-ir = "0.22"
+
+[[bench]]
+name = "inference_benchmark"
+harness = false

@@ -3307,6 +3307,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
+name = "furnace-burn"
+version = "0.11.0"
+dependencies = [
+ "axum",
+ "burn",
+ "burn-onnx",
+ "burn-store",
+ "bytes",
+ "chrono",
+ "criterion",
+ "furnace-server",
+ "memmap2",
+ "onnx-ir",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "furnace-candle"
 version = "0.1.0"
 dependencies = [
@@ -3323,19 +3347,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "furnace-cli"
+version = "0.11.0"
+dependencies = [
+ "axum",
+ "burn",
+ "clap",
+ "furnace-burn",
+ "furnace-server",
+ "image",
+ "reqwest",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "furnace-server"
 version = "0.11.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "axum",
- "burn",
- "burn-onnx",
- "burn-store",
  "bytes",
  "chacha20poly1305",
  "chrono",
  "clap",
- "criterion",
  "ed25519-dalek",
  "fast-float2",
  "futures-util",
@@ -3343,11 +3382,9 @@ dependencies = [
  "hmac 0.13.0",
  "hyper-util",
  "image",
- "memmap2",
  "minijinja",
  "minijinja-contrib",
  "num_cpus",
- "onnx-ir",
  "p256",
  "p384",
  "prost",

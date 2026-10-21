@@ -1,32 +1,23 @@
 //! Models as the server runs them.
 //!
-//! [`BurnModel`] is the one trait every model implements, however it was defined
-//! ([`Model::from_fn`], [`Model::custom`], a built-in ONNX model). [`Model`] wraps one with its
+//! [`TensorModel`] is the one trait every model implements, whatever engine runs it (Burn
+//! through furnace-burn, or your own). [`Model`] wraps one with its
 //! metadata and statistics and runs requests through a single pipeline: check each request's
 //! tensors against the model's inputs, join the valid ones along the batch dimension, run them
 //! (in chunks of a fixed batch size if the graph has one), check the outputs and split them
 //! back. The flat `Vec<f32>` methods (`predict*`) are thin adapters over that pipeline.
 
-use burn::tensor::Tensor;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
-use tracing::{info, warn};
 
-use crate::backend::BackendKind;
-use crate::burn_model::{BurnModelContainer, create_sample_model};
 use crate::error::{FurnaceError, ModelError, Result};
-use crate::models::{BuiltInModel, resolve_weights};
 use crate::tensor::{DataType, HostTensor, IoSpec, TensorInfo, TensorSpec, Values};
 
-mod kinds;
 #[cfg(any(test, feature = "test-models"))]
 mod testing;
 
-use kinds::FnModel;
-pub use kinds::MlpModel;
 #[cfg(any(test, feature = "test-models"))]
 pub use testing::{DummyModel, DummyTensorsModel};
 
@@ -47,7 +38,7 @@ pub struct ModelInfo {
     pub inputs: Vec<TensorInfo>,
     /// Every output, in the order the model returns them
     pub outputs: Vec<TensorInfo>,
-    /// How the model was defined: `burn`, `onnx`, `mlp`, ...
+    /// How the model was defined: `custom`, `burn`, `onnx`, `mlp`, ...
     pub model_type: String,
     /// The backend it runs on, e.g. `cpu`
     pub backend: String,
@@ -140,45 +131,51 @@ pub struct FlatInput {
 
 /// A model the server can run: what it takes, what it returns, and how to run it.
 ///
-/// Implement this for your own Burn model to serve it with every feature of the server (named
-/// tensors over the v2 protocol, metrics, reloads, ...). A model that takes one float tensor and
-/// returns one needs none of this: see [`Model::from_fn`].
+/// The one trait between the server and the engine that runs a model. furnace-burn implements
+/// it for Burn models (`furnace_burn::custom`, `furnace_burn::from_fn`); implement it yourself
+/// to serve a model from any other engine, with every feature of the server (named tensors over
+/// the v2 protocol, batching, metrics, reloads, ...), through [`Model::custom`].
 ///
-/// ```ignore
+/// ```
+/// use furnace::{DataType, HostTensor, IoSpec, Model, TensorModel, Values};
+///
+/// /// Doubles every value
 /// #[derive(Debug)]
-/// struct Classifier { net: MyNet, device: Device }
+/// struct Doubler;
 ///
-/// impl BurnModel for Classifier {
-///     fn name(&self) -> &str { "classifier" }
-///     fn backend(&self) -> BackendKind { BackendKind::Cpu }
-///     fn inputs(&self) -> Vec<IoSpec> {
-///         vec![IoSpec::new("input_ids", DataType::Int64, &[Some(128)]),
-///              IoSpec::new("attention_mask", DataType::Int64, &[Some(128)])]
-///     }
-///     fn outputs(&self) -> Vec<IoSpec> { vec![IoSpec::fp32("logits", &[2])] }
-///     fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
-///         let [ids, mask] = <[HostTensor; 2]>::try_from(inputs).unwrap();
-///         let logits = self.net.forward(ids.into_int::<2>(&self.device)?,
-///                                       mask.into_int::<2>(&self.device)?);
-///         Ok(vec![HostTensor::from_float(logits)?])
+/// impl TensorModel for Doubler {
+///     fn name(&self) -> &str { "doubler" }
+///     fn backend(&self) -> &str { "cpu" }
+///     fn inputs(&self) -> Vec<IoSpec> { vec![IoSpec::fp32("input", &[4])] }
+///     fn outputs(&self) -> Vec<IoSpec> { vec![IoSpec::fp32("output", &[4])] }
+///     fn run(&self, inputs: Vec<HostTensor>) -> furnace::Result<Vec<HostTensor>> {
+///         // Checked already: one FP32 tensor of [batch, 4]
+///         let HostTensor { shape, values: Values::F32(values) } = &inputs[0] else {
+///             unreachable!("checked against inputs()")
+///         };
+///         let doubled = values.iter().map(|v| v * 2.0).collect();
+///         Ok(vec![HostTensor { shape: shape.clone(), values: Values::F32(doubled) }])
 ///     }
 /// }
+///
+/// let model = Model::custom(Doubler);
+/// assert_eq!(model.predict(vec![1.0, 2.0, 3.0, 4.0]).unwrap(), [2.0, 4.0, 6.0, 8.0]);
 /// ```
-pub trait BurnModel: Send + Sync + std::fmt::Debug {
+pub trait TensorModel: Send + Sync + std::fmt::Debug {
     /// The name clients use: `/v2/models/{name}`, `/models/{name}/predict`
     fn name(&self) -> &str;
 
-    /// The backend the model runs on, as reported by `/model/info`
-    fn backend(&self) -> BackendKind;
+    /// The backend the model runs on, as reported by `/model/info`: `cpu`, `wgpu`, ...
+    fn backend(&self) -> &str;
 
-    /// The inputs, in the order [`BurnModel::run`] takes them
+    /// The inputs, in the order [`TensorModel::run`] takes them
     fn inputs(&self) -> Vec<IoSpec>;
 
-    /// The outputs, in the order [`BurnModel::run`] returns them
+    /// The outputs, in the order [`TensorModel::run`] returns them
     fn outputs(&self) -> Vec<IoSpec>;
 
     /// Run one batch. The server has already checked the inputs against
-    /// [`BurnModel::inputs`]: one tensor each, in that order, with the batch as the first
+    /// [`TensorModel::inputs`]: one tensor each, in that order, with the batch as the first
     /// dimension, every fixed dimension as declared, and the same batch size throughout.
     /// Blocking; the server calls it off the async runtime.
     fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>>;
@@ -188,24 +185,30 @@ pub trait BurnModel: Send + Sync + std::fmt::Debug {
     fn fixed_batch(&self) -> Option<usize> {
         None
     }
+
+    /// The integers the engine can hold. Integer inputs outside this range are refused before
+    /// [`TensorModel::run`] sees them.
+    fn int_range(&self) -> (i64, i64) {
+        (i64::MIN, i64::MAX)
+    }
 }
 
 /// A loaded model plus its metadata and runtime statistics: what the server serves.
 ///
-/// Build one with [`Model::from_fn`], [`Model::custom`] or the `load_*` functions. Requests
+/// Build one with [`Model::custom`], or with furnace-burn for a Burn model. Requests
 /// run through [`Model::infer`] / [`Model::infer_many`] (named tensors), or the flat
 /// [`Model::predict`] family for a model of one `f32` tensor in and one out. All of them block;
 /// call them off the async runtime.
 #[derive(Debug)]
 pub struct Model {
-    inner: Box<dyn BurnModel>,
+    inner: Box<dyn TensorModel>,
     info: ModelInfo,
     model_type: &'static str,
     inputs: Vec<IoSpec>,
     outputs: Vec<IoSpec>,
     /// One `f32` tensor in and one out, both with fixed per-item shapes
     simple: bool,
-    /// The range of the backend's integers, for integer inputs
+    /// The range of the engine's integers, for integer inputs
     int_range: (i64, i64),
     /// Shared with the model this one replaced on a reload, so requests still running on the
     /// old one are counted too
@@ -238,61 +241,20 @@ fn tensor_spec(spec: Option<&IoSpec>) -> TensorSpec {
 }
 
 impl Model {
-    /// Serve your own model (see [`BurnModel`])
-    pub fn custom(model: impl BurnModel + 'static) -> Self {
-        Self::new(Box::new(model), "burn", 0)
-    }
-
-    /// Serve a Burn forward function that takes one float tensor of rank `DI` (batch first) and
-    /// returns one of rank `DO`, e.g. a `Module`'s `forward`. `input_shape` and `output_shape` are
-    /// the per-item shapes, without the batch dimension. Such a model also serves `/predict`
-    /// and batches concurrent requests together.
-    ///
-    /// ```ignore
-    /// let device = BackendKind::Cpu.device();
-    /// let net = MyNet::new(&device); // load weights with furnace::weights::load_burnpack
-    /// let model = Model::from_fn("digits", BackendKind::Cpu, &[1, 28, 28], &[10],
-    ///     move |x: Tensor<4>| net.forward(x))?;
-    /// ```
-    pub fn from_fn<const DI: usize, const DO: usize, F>(
-        name: &str,
-        backend: BackendKind,
-        input_shape: &[usize],
-        output_shape: &[usize],
-        forward: F,
-    ) -> Result<Self>
-    where
-        F: Fn(Tensor<DI>) -> Tensor<DO> + Send + Sync + 'static,
-    {
-        for (what, shape, rank) in [("input", input_shape, DI), ("output", output_shape, DO)] {
-            if shape.len() + 1 != rank {
-                return Err(ModelError::InvalidArgument {
-                    arg: format!("{what}_shape"),
-                    value: format!("{shape:?}"),
-                    reason: format!(
-                        "the forward function's {what} has rank {rank}, so the per-item shape \
-                         needs {} dimensions (the batch comes first)",
-                        rank.saturating_sub(1)
-                    ),
-                }
-                .into());
-            }
-        }
-        Ok(Self::custom(FnModel {
-            name: name.to_string(),
-            backend,
-            device: backend.device(),
-            input: IoSpec::fp32("input", input_shape),
-            output: IoSpec::fp32("output", output_shape),
-            forward,
-        }))
+    /// Serve your own model (see [`TensorModel`])
+    pub fn custom(model: impl TensorModel + 'static) -> Self {
+        Self::new(Box::new(model), "custom", 0)
     }
 
     /// Wrap a model; `model_type` and `model_size_bytes` are reported by `/model/info`
-    pub fn new(inner: Box<dyn BurnModel>, model_type: &'static str, model_size_bytes: u64) -> Self {
+    pub fn new(
+        inner: Box<dyn TensorModel>,
+        model_type: &'static str,
+        model_size_bytes: u64,
+    ) -> Self {
         let inputs = inner.inputs();
         let outputs = inner.outputs();
-        let int_range = crate::tensor::int_range(&inner.backend().device());
+        let int_range = inner.int_range();
         let simple = match (inputs.as_slice(), outputs.as_slice()) {
             ([input], [output]) => [input, output].iter().all(|spec| {
                 spec.dtype == DataType::Fp32
@@ -850,94 +812,6 @@ fn duplicate(error: &FurnaceError) -> FurnaceError {
     .into()
 }
 
-/// The file name `load_model` replaces with a sample MLP with random weights when no such
-/// file exists
-const SAMPLE_MODEL: &str = "sample_model";
-
-/// Load a file-based MLP model from `<path>.bpk` + `<path>.json` on the CPU backend.
-///
-/// A path named `sample_model` with no files serves an MLP with random weights, with a warning
-/// (`cargo run --bin create_sample_model` writes real files there); any other missing path is
-/// an error.
-pub fn load_model(path: impl AsRef<Path>) -> Result<Model> {
-    load_model_with_backend(path, BackendKind::Cpu)
-}
-
-/// Load a file-based MLP model from `<path>.bpk` + `<path>.json`
-pub fn load_model_with_backend(path: impl AsRef<Path>, backend: BackendKind) -> Result<Model> {
-    let path = path.as_ref();
-    info!("Loading model from: {:?}", path);
-
-    // Accept `model`, `model.bpk` or `model.json`
-    let base: PathBuf = match path.extension().and_then(|e| e.to_str()) {
-        Some("bpk") | Some("json") => path.with_extension(""),
-        _ => path.to_path_buf(),
-    };
-    let weights_path = base.with_extension("bpk");
-
-    // `sample_model` (what `create_sample_model` writes) without files on disk yields a freshly
-    // initialized MLP with random weights; any other missing path is an error
-    if !weights_path.exists() {
-        if base.file_name().and_then(|s| s.to_str()) == Some(SAMPLE_MODEL) {
-            warn!(
-                "{} not found: serving a sample MLP with random weights",
-                weights_path.display()
-            );
-            let container = create_sample_model()?;
-            return Ok(Model::new(Box::new(MlpModel::new(container)), "mlp", 0));
-        }
-        return Err(ModelError::FileNotFound(weights_path).into());
-    }
-
-    let model_size_bytes = std::fs::metadata(&weights_path)
-        .map_err(|e| ModelError::LoadFailed {
-            path: weights_path.clone(),
-            source: Box::new(e),
-        })?
-        .len();
-
-    let container = BurnModelContainer::load(&base, backend)?;
-    Ok(Model::new(
-        Box::new(MlpModel::new(container)),
-        "mlp",
-        model_size_bytes,
-    ))
-}
-
-/// Load a built-in (compiled-in) model by name on the CPU backend, with default weight lookup
-pub fn load_built_in_model(model_name: &str) -> Result<Model> {
-    load_built_in_model_with_backend(model_name, BackendKind::Cpu, None)
-}
-
-/// Load a built-in model by name on the given backend.
-///
-/// `weights` overrides where the `.bpk` weight file is read from; see
-/// [`crate::models::resolve_weights`] for the default lookup.
-pub fn load_built_in_model_with_backend(
-    model_name: &str,
-    backend: BackendKind,
-    weights: Option<&Path>,
-) -> Result<Model> {
-    let built_in = BuiltInModel::from_name(model_name)?;
-    let weights = resolve_weights(built_in.name(), weights)?;
-    match &weights {
-        Some(path) => info!(
-            "Loading built-in model {} ({} backend) with weights from {:?}",
-            model_name, backend, path
-        ),
-        None => info!(
-            "Loading built-in model {} ({} backend) with embedded weights",
-            model_name, backend
-        ),
-    }
-    let model_size_bytes = weights
-        .as_deref()
-        .and_then(|p| std::fs::metadata(p).ok())
-        .map_or(0, |m| m.len());
-    let inner = built_in.create_model(backend, weights.as_deref())?;
-    Ok(Model::new(inner, "onnx", model_size_bytes))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1076,11 +950,11 @@ mod tests {
     #[derive(Debug)]
     struct PairsOnly(DummyModel);
 
-    impl BurnModel for PairsOnly {
+    impl TensorModel for PairsOnly {
         fn name(&self) -> &str {
             self.0.name()
         }
-        fn backend(&self) -> BackendKind {
+        fn backend(&self) -> &str {
             self.0.backend()
         }
         fn inputs(&self) -> Vec<IoSpec> {
@@ -1162,17 +1036,6 @@ mod tests {
         assert_eq!(info.input_spec.shape, vec![784]);
         assert_eq!(info.output_spec.shape, vec![10]);
         assert_eq!(info.input_spec.dtype, "float32");
-    }
-
-    #[test]
-    fn test_model_loading_invalid_path() {
-        let result = load_model(Path::new("nonexistent_model"));
-        assert!(matches!(
-            result,
-            Err(crate::error::FurnaceError::Model(ModelError::FileNotFound(
-                _
-            )))
-        ));
     }
 
     #[test]
@@ -1287,87 +1150,5 @@ mod tests {
         assert_eq!(stats.error_count, 1);
         assert!(stats.last_inference_time.is_some());
         assert!(stats.min_inference_time_ms.is_some());
-    }
-
-    #[test]
-    fn test_real_mlp_inference_is_not_constant() {
-        let model = load_model(Path::new("sample_model")).unwrap();
-        let out = model.predict(vec![0.3; 784]).unwrap();
-        assert_eq!(out.len(), 10);
-        assert!(out.iter().any(|&v| v != out[0]));
-    }
-
-    #[test]
-    fn only_sample_model_itself_falls_back_to_random_weights() {
-        for missing in ["my_sample_model", "samples/net", "sample"] {
-            let result = load_model(Path::new(missing));
-            assert!(
-                matches!(
-                    result,
-                    Err(FurnaceError::Model(ModelError::FileNotFound(_)))
-                ),
-                "{missing}: {result:?}"
-            );
-        }
-    }
-
-    #[cfg(model_resnet18)]
-    #[test]
-    fn test_built_in_model_missing_weights_file() {
-        let result = load_built_in_model_with_backend(
-            "resnet18",
-            BackendKind::Cpu,
-            Some(Path::new("does/not/exist.bpk")),
-        );
-        assert!(matches!(
-            result,
-            Err(crate::error::FurnaceError::Model(ModelError::FileNotFound(
-                _
-            )))
-        ));
-    }
-
-    #[cfg(model_resnet18)]
-    #[test]
-    fn test_resnet18_weights_from_explicit_path() {
-        // Copy the generated weights elsewhere to prove the path override is honored
-        let dir = tempfile::tempdir().unwrap();
-        let src = Path::new(env!("OUT_DIR")).join("models/resnet18.bpk");
-        if !src.exists() {
-            return; // built with embed-weights: no separate file
-        }
-        let dst = dir.path().join("custom.bpk");
-        std::fs::copy(&src, &dst).unwrap();
-
-        let model =
-            load_built_in_model_with_backend("resnet18", BackendKind::Cpu, Some(&dst)).unwrap();
-        assert_eq!(
-            model.get_info().model_size_bytes,
-            std::fs::metadata(&dst).unwrap().len()
-        );
-        assert_eq!(model.predict(vec![0.5; 3 * 224 * 224]).unwrap().len(), 1000);
-    }
-
-    #[cfg(model_resnet18)]
-    #[test]
-    fn test_resnet18_inference() {
-        let model = load_built_in_model("resnet18").unwrap();
-        assert_eq!(model.get_info().input_spec.shape, vec![3, 224, 224]);
-        let out = model.predict(vec![0.5; 3 * 224 * 224]).unwrap();
-        assert_eq!(out.len(), 1000);
-        assert!(out.iter().all(|v| v.is_finite()));
-    }
-
-    #[cfg(model_mnist)]
-    #[test]
-    fn test_mnist_inference() {
-        let model = load_built_in_model("mnist").unwrap();
-        assert_eq!(model.get_info().input_spec.shape, vec![1, 28, 28]);
-        assert_eq!(model.get_info().output_spec.shape, vec![10]);
-        let outputs = model
-            .predict_batch(vec![vec![0.0; 28 * 28], vec![255.0; 28 * 28]])
-            .unwrap();
-        assert!(outputs.iter().all(|o| o.len() == 10));
-        assert_ne!(outputs[0], outputs[1]);
     }
 }

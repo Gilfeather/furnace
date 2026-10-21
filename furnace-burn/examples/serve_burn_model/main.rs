@@ -9,7 +9,7 @@
 //! Two models, both with randomly initialized weights unless you pass a `.bpk` file:
 //!
 //! - `digits`, a small CNN for 28x28 grayscale images: one float tensor in, one out, so
-//!   `Model::from_fn` serves its `forward` as it is, with `/predict` and dynamic batching.
+//!   `furnace_burn::from_fn` serves its `forward` as it is, with `/predict` and dynamic batching.
 //! - `sentiment`, a text classifier taking token ids and an attention mask (`INT64`): it
 //!   implements `BurnModel` to name its tensors, and is served on `/v2/models/sentiment/infer`.
 //!
@@ -27,7 +27,8 @@ mod models;
 use std::path::PathBuf;
 
 use burn::tensor::Tensor;
-use furnace::{BackendKind, Model, Server};
+use furnace::Server;
+use furnace_burn::BackendKind;
 use models::{DigitNet, Sentiment, SentimentNet};
 
 fn weights_arg(flag: &str) -> Option<PathBuf> {
@@ -46,23 +47,23 @@ async fn main() -> furnace::Result<()> {
 
     let mut digits = DigitNet::new(&device);
     if let Some(path) = weights_arg("--digits-weights") {
-        furnace::weights::load_burnpack(&mut digits, path)?;
+        furnace_burn::weights::load_burnpack(&mut digits, path)?;
     }
     let mut sentiment = SentimentNet::new(&device);
     if let Some(path) = weights_arg("--sentiment-weights") {
-        furnace::weights::load_burnpack(&mut sentiment, path)?;
+        furnace_burn::weights::load_burnpack(&mut sentiment, path)?;
     }
 
     Server::new()
         .port(3000)
-        .model(Model::from_fn(
+        .model(furnace_burn::from_fn(
             "digits",
             backend,
             &[1, 28, 28],
             &[10],
             move |images: Tensor<4>| digits.forward(images),
         )?)
-        .model(Model::custom(Sentiment {
+        .model(furnace_burn::custom(Sentiment {
             net: sentiment,
             backend,
             device,

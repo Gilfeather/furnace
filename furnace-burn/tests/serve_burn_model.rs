@@ -1,5 +1,5 @@
 //! Serving models written in Burn through the public library API (`furnace::Server`,
-//! `Model::from_fn`, `BurnModel`): the server's answers must match calling `forward` directly.
+//! `furnace_burn::from_fn`, `BurnModel`): the server's answers must match calling `forward` directly.
 
 #[path = "../examples/serve_burn_model/models.rs"]
 mod models;
@@ -7,7 +7,8 @@ mod models;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use burn::tensor::{Int, Tensor, TensorData};
-use furnace::{BackendKind, Model, Server};
+use furnace::Server;
+use furnace_burn::BackendKind;
 use models::{DigitNet, Sentiment, SentimentNet};
 use tower::ServiceExt;
 
@@ -57,7 +58,7 @@ fn app() -> (axum::Router, DigitNet, SentimentNet) {
     let served_digits = digits.clone();
     let router = Server::new()
         .model(
-            Model::from_fn(
+            furnace_burn::from_fn(
                 "digits",
                 backend,
                 &[1, 28, 28],
@@ -66,7 +67,7 @@ fn app() -> (axum::Router, DigitNet, SentimentNet) {
             )
             .unwrap(),
         )
-        .model(Model::custom(Sentiment {
+        .model(furnace_burn::custom(Sentiment {
             net: sentiment.clone(),
             backend,
             device,
@@ -192,7 +193,7 @@ async fn a_burn_model_with_named_integer_tensors() {
 
 #[test]
 fn from_fn_checks_the_shapes_against_the_ranks() {
-    let err = Model::from_fn(
+    let err = furnace_burn::from_fn(
         "digits",
         BackendKind::Cpu,
         &[28, 28],

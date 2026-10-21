@@ -11,84 +11,58 @@
 //! - [`StepModel`]: a plain model that can prefill a prompt and decode one token at a time over
 //!   an opaque per-sequence state. [`Scheduled`] turns one into an [`LlmEngine`], with a
 //!   [`TextPipeline`] for the chat template, the tokenizer, sampling, incremental detokenization
-//!   and stop strings. This is the way in for your own Burn LLM, and for the candle adapter
-//!   (the `furnace-candle` crate).
+//!   and stop strings. This is the way in for your own LLM (furnace-burn's documentation
+//!   shows one written in Burn), and for the candle adapter (the `furnace-candle` crate).
 //!
 //! [`Server::llm`](crate::Server::llm) serves an engine on `POST /v1/chat/completions`,
 //! `POST /v1/completions` and `GET /v1/models`, behind the server's API keys, rate limit,
 //! concurrency limit and TLS.
 //!
-//! # Your own Burn LLM
+//! # Your own LLM
 //!
-//! A toy: a Burn model that maps tokens to next-token logits, served with step-wise decoding.
-//! It keeps no KV cache, so each step runs the whole sequence again; a real model keeps its
-//! cache in the [`StepModel::Sequence`], and furnace drops it when the request ends or the
-//! client disconnects.
+//! A toy: a model whose next token is always the one after the last, served with step-wise
+//! decoding. A real model runs its network in `prefill` and `decode` and keeps its KV cache in
+//! the [`StepModel::Sequence`], and furnace drops it when the request ends or the client
+//! disconnects.
 //!
 //! ```no_run
-//! use burn::module::Module;
-//! use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
-//! use burn::tensor::{Device, Int, Tensor, TensorData};
+//! use furnace::Server;
 //! use furnace::llm::{BoxError, Logits, Scheduled, StepModel, TextPipeline};
-//! use furnace::{BackendKind, Server};
-//!
-//! #[derive(Module, Debug)]
-//! struct TinyLm {
-//!     embedding: Embedding,
-//!     head: Linear,
-//! }
-//!
-//! impl TinyLm {
-//!     fn new(vocab: usize, device: &Device) -> Self {
-//!         Self {
-//!             embedding: EmbeddingConfig::new(vocab, 64).init(device),
-//!             head: LinearConfig::new(64, vocab).init(device),
-//!         }
-//!     }
-//!
-//!     /// `[1, seq]` token ids -> `[1, seq, vocab]` logits
-//!     fn forward(&self, ids: Tensor<2, Int>) -> Tensor<3> {
-//!         self.head.forward(self.embedding.forward(ids))
-//!     }
-//! }
 //!
 //! #[derive(Debug)]
-//! struct BurnLm {
-//!     net: TinyLm,
-//!     device: Device,
+//! struct Counter {
+//!     vocab: usize,
 //! }
 //!
-//! impl BurnLm {
-//!     /// The logits after the last of `tokens`
-//!     fn next_logits(&self, tokens: &[u32]) -> Result<Logits, BoxError> {
-//!         let ids: Vec<i64> = tokens.iter().map(|&t| i64::from(t)).collect();
-//!         let ids = Tensor::from_data(TensorData::new(ids, [1, tokens.len()]), &self.device);
-//!         let logits = self.net.forward(ids); // [1, seq, vocab]
-//!         let [_, seq, vocab] = logits.dims();
-//!         let last = logits.slice([0..1, seq - 1..seq, 0..vocab]).flatten::<1>(0, 2);
-//!         Ok(Logits(last.into_data().try_into_vec::<f32>()?))
+//! impl Counter {
+//!     /// The logits after `token`: all on the next token
+//!     fn next_logits(&self, token: u32) -> Logits {
+//!         let mut logits = vec![0.0; self.vocab];
+//!         logits[(token as usize + 1) % self.vocab] = 10.0;
+//!         Logits(logits)
 //!     }
 //! }
 //!
-//! impl StepModel for BurnLm {
-//!     /// The tokens so far; a real model keeps its KV cache and position here
-//!     type Sequence = Vec<u32>;
+//! impl StepModel for Counter {
+//!     /// Tokens so far; a real model keeps its KV cache and position here
+//!     type Sequence = usize;
 //!
 //!     fn name(&self) -> &str {
-//!         "tiny-lm"
+//!         "counter"
 //!     }
 //!
 //!     fn max_context(&self) -> usize {
 //!         512
 //!     }
 //!
-//!     fn prefill(&self, prompt: &[u32]) -> Result<(Vec<u32>, Logits), BoxError> {
-//!         Ok((prompt.to_vec(), self.next_logits(prompt)?))
+//!     fn prefill(&self, prompt: &[u32]) -> Result<(usize, Logits), BoxError> {
+//!         let last = prompt.last().copied().unwrap_or(0);
+//!         Ok((prompt.len(), self.next_logits(last)))
 //!     }
 //!
-//!     fn decode(&self, tokens: &mut Vec<u32>, token: u32) -> Result<Logits, BoxError> {
-//!         tokens.push(token);
-//!         self.next_logits(tokens)
+//!     fn decode(&self, len: &mut usize, token: u32) -> Result<Logits, BoxError> {
+//!         *len += 1;
+//!         Ok(self.next_logits(token))
 //!     }
 //! }
 //!
@@ -96,11 +70,8 @@
 //! async fn main() -> Result<(), BoxError> {
 //!     // The tokenizer and chat template your model was trained with
 //!     let pipeline = TextPipeline::from_files("tokenizer.json", Some("tokenizer_config.json".as_ref()))?;
-//!     let device = BackendKind::Cpu.device();
-//!     let mut net = TinyLm::new(pipeline.tokenizer().get_vocab_size(true), &device);
-//!     furnace::weights::load_burnpack(&mut net, "tiny-lm.bpk")?;
-//!
-//!     let engine = Scheduled::new(BurnLm { net, device }, pipeline);
+//!     let vocab = pipeline.tokenizer().get_vocab_size(true);
+//!     let engine = Scheduled::new(Counter { vocab }, pipeline);
 //!     Server::new().port(8080).llm(engine).serve().await?;
 //!     Ok(())
 //! }

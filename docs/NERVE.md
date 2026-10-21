@@ -350,10 +350,11 @@ brain adds, and an effector's latency, are in the JSON only.
 ## The demo
 
 ```bash
-cargo run --release --features llm --example nerve
+cargo run --release --example nerve
 ```
 
-[`examples/nerve`](../examples/nerve/main.rs) runs, in one process, a tiny webhook receiver
+[`furnace-burn/examples/nerve`](../furnace-burn/examples/nerve/main.rs) runs, in one process, a
+tiny webhook receiver
 that prints the commands it gets, the server with the fabric above (plus an in-process channel
 of 28×28 frames through a small Burn classifier whose verdict is the frame's brightness), and
 a demo stream: 200 text events and 200 frames, half of them repeats, 5% urgent. Repeated

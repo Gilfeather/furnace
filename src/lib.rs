@@ -1,36 +1,40 @@
-//! An inference server for [Burn](https://burn.dev) models.
+//! An inference server and nervous system in pure Rust, on axum and tokio.
 //!
-//! Furnace serves the models you write in Burn, with what a production inference server needs:
-//! the KServe / Triton Open Inference Protocol over HTTP and gRPC (so Triton and KServe clients
-//! work unchanged), dynamic batching, several models per process with reloads that don't drop
-//! a request, Prometheus metrics, readiness after a warm-up, API keys, rate limits and TLS, all
-//! in pure Rust. It also ships as the `furnace` command, which serves ONNX models compiled to
-//! Burn at build time; see the [README](https://github.com/Gilfeather/furnace#readme).
+//! Furnace serves models with what a production inference server needs: the KServe / Triton
+//! Open Inference Protocol over HTTP and gRPC (so Triton and KServe clients work unchanged),
+//! dynamic batching, several models per process with reloads that don't drop a request,
+//! Prometheus metrics, readiness after a warm-up, API keys, rate limits and TLS. It serves LLMs
+//! with the OpenAI API (the `llm` module), and connects sensors, models, the LLM and actuators
+//! through its [`nerve`] module. See the [README](https://github.com/Gilfeather/furnace#readme).
 //!
-//! # Serving a Burn model
+//! This crate runs no model itself: an engine implements [`TensorModel`]. Burn is the engine
+//! furnace is built around: the `furnace-burn` crate serves a Burn model's `forward`, a Burn
+//! model of named tensors, weights from Burnpack files and ONNX models compiled to Burn, and
+//! the `furnace` command (crate `furnace-cli`) serves ONNX models from the command line.
 //!
-//! A model that takes one float tensor and returns one is served by its `forward`, through
-//! [`Model::from_fn`]. It answers `POST /predict` and `POST /v2/models/{name}/infer`, and
-//! concurrent requests are batched together.
+//! # Serving a model
+//!
+//! Implement [`TensorModel`] for a model and serve it with [`Server`]. It answers
+//! `POST /predict` and `POST /v2/models/{name}/infer`, and concurrent requests are batched
+//! together. With Burn, `furnace_burn::from_fn` does this for a `forward` function.
 //!
 //! ```no_run
-//! use burn::module::Module;
-//! use burn::nn::{Linear, LinearConfig};
-//! use burn::tensor::{Device, Tensor};
-//! use furnace::{BackendKind, Model, Server};
+//! use furnace::{HostTensor, IoSpec, Model, Server, TensorModel, Values};
 //!
-//! #[derive(Module, Debug)]
-//! struct Net {
-//!     linear: Linear,
-//! }
+//! /// Sums each row of four values
+//! #[derive(Debug)]
+//! struct RowSum;
 //!
-//! impl Net {
-//!     fn new(device: &Device) -> Self {
-//!         Self { linear: LinearConfig::new(784, 10).init(device) }
-//!     }
-//!
-//!     fn forward(&self, images: Tensor<2>) -> Tensor<2> {
-//!         self.linear.forward(images)
+//! impl TensorModel for RowSum {
+//!     fn name(&self) -> &str { "rowsum" }
+//!     fn backend(&self) -> &str { "cpu" }
+//!     fn inputs(&self) -> Vec<IoSpec> { vec![IoSpec::fp32("input", &[4])] }
+//!     fn outputs(&self) -> Vec<IoSpec> { vec![IoSpec::fp32("output", &[1])] }
+//!     fn run(&self, inputs: Vec<HostTensor>) -> furnace::Result<Vec<HostTensor>> {
+//!         // Checked already: one FP32 tensor of [batch, 4]
+//!         let Values::F32(values) = &inputs[0].values else { unreachable!() };
+//!         let sums: Vec<f32> = values.chunks(4).map(|row| row.iter().sum()).collect();
+//!         Ok(vec![HostTensor { shape: vec![sums.len(), 1], values: Values::F32(sums) }])
 //!     }
 //! }
 //!
@@ -38,15 +42,7 @@
 //! async fn main() -> furnace::Result<()> {
 //!     // Logs to stderr: where the server listens, what it serves, why it stopped
 //!     tracing_subscriber::fmt::init();
-//!     let device = BackendKind::Cpu.device();
-//!     let mut net = Net::new(&device);
-//!     // The weights saved after training, as a Burnpack file (burn-store)
-//!     furnace::weights::load_burnpack(&mut net, "net.bpk")?;
-//!
-//!     // Per-item shapes, without the batch: [batch, 784] in, [batch, 10] out
-//!     let model = Model::from_fn("digits", BackendKind::Cpu, &[784], &[10],
-//!         move |images: Tensor<2>| net.forward(images))?;
-//!     Server::new().port(3000).model(model).serve().await
+//!     Server::new().port(3000).model(Model::custom(RowSum)).serve().await
 //! }
 //! ```
 //!
@@ -58,17 +54,20 @@
 //!
 //! ```no_run
 //! use axum::{Json, Router, routing::get};
-//! use burn::tensor::Tensor;
-//! use furnace::{BackendKind, Model, Server};
+//! use furnace::{Model, Server};
 //!
-//! # use burn::module::Module;
-//! # use burn::nn::{Linear, LinearConfig};
-//! # use burn::tensor::Device;
-//! # #[derive(Module, Debug)]
-//! # struct Net { linear: Linear }
-//! # impl Net {
-//! #     fn new(device: &Device) -> Self { Self { linear: LinearConfig::new(784, 10).init(device) } }
-//! #     fn forward(&self, images: Tensor<2>) -> Tensor<2> { self.linear.forward(images) }
+//! # use furnace::{HostTensor, IoSpec, TensorModel, Values};
+//! # #[derive(Debug)]
+//! # struct Digits;
+//! # impl TensorModel for Digits {
+//! #     fn name(&self) -> &str { "digits" }
+//! #     fn backend(&self) -> &str { "cpu" }
+//! #     fn inputs(&self) -> Vec<IoSpec> { vec![IoSpec::fp32("input", &[784])] }
+//! #     fn outputs(&self) -> Vec<IoSpec> { vec![IoSpec::fp32("output", &[10])] }
+//! #     fn run(&self, inputs: Vec<HostTensor>) -> furnace::Result<Vec<HostTensor>> {
+//! #         let batch = inputs[0].batch();
+//! #         Ok(vec![HostTensor { shape: vec![batch, 10], values: Values::F32(vec![0.0; batch * 10]) }])
+//! #     }
 //! # }
 //! // One of your own routes: the class names for the 10 logits /predict returns
 //! async fn labels() -> Json<Vec<String>> {
@@ -78,15 +77,9 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     tracing_subscriber::fmt::init();
-//!     let device = BackendKind::Cpu.device();
-//!     let mut net = Net::new(&device);
-//!     furnace::weights::load_burnpack(&mut net, "net.bpk")?;
-//!     let model = Model::from_fn("digits", BackendKind::Cpu, &[784], &[10],
-//!         move |images: Tensor<2>| net.forward(images))?;
-//!
 //!     let app = Router::new()
 //!         .route("/labels", get(labels))
-//!         .merge(Server::new().model(model).router()?);
+//!         .merge(Server::new().model(Model::custom(Digits)).router()?);
 //!
 //!     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
 //!     axum::serve(listener, app).await?;
@@ -96,61 +89,21 @@
 //!
 //! # Several inputs or outputs, integer tensors
 //!
-//! Implement [`BurnModel`] to name a model's tensors: a text classifier taking token ids and a
-//! mask, a detector returning boxes and scores. The server checks every request against
-//! [`BurnModel::inputs`] before [`BurnModel::run`] sees it, and serves the model on
-//! `/v2/models/{name}/infer`, batching requests when every input has a fixed shape.
+//! A model names its tensors in [`TensorModel::inputs`] and [`TensorModel::outputs`]: a text
+//! classifier taking token ids and a mask, a detector returning boxes and scores. The server
+//! checks every request against them before [`TensorModel::run`] sees it, and serves the model
+//! on `/v2/models/{name}/infer`, batching requests when every input has a fixed shape.
 //!
-//! ```no_run
-//! use burn::tensor::{Device, Int, Tensor};
-//! use furnace::{BackendKind, BurnModel, DataType, HostTensor, IoSpec, Model, Server};
+//! ```
+//! use furnace::{DataType, IoSpec};
 //!
-//! # #[derive(Debug)] struct TextNet;
-//! # impl TextNet {
-//! #     fn forward(&self, ids: Tensor<2, Int>, mask: Tensor<2, Int>) -> Tensor<2> { mask.float() }
-//! # }
-//! #[derive(Debug)]
-//! struct Classifier {
-//!     net: TextNet, // your Burn Module
-//!     device: Device,
-//! }
-//!
-//! impl BurnModel for Classifier {
-//!     fn name(&self) -> &str {
-//!         "classifier"
-//!     }
-//!
-//!     fn backend(&self) -> BackendKind {
-//!         BackendKind::Cpu
-//!     }
-//!
-//!     fn inputs(&self) -> Vec<IoSpec> {
-//!         vec![
-//!             IoSpec::new("input_ids", DataType::Int64, &[Some(128)]),
-//!             IoSpec::new("attention_mask", DataType::Int64, &[Some(128)]),
-//!         ]
-//!     }
-//!
-//!     fn outputs(&self) -> Vec<IoSpec> {
-//!         vec![IoSpec::fp32("logits", &[2])]
-//!     }
-//!
-//!     fn run(&self, inputs: Vec<HostTensor>) -> furnace::Result<Vec<HostTensor>> {
-//!         // Checked already: two tensors, in the order of inputs(), [batch, 128] each
-//!         let mut inputs = inputs.into_iter();
-//!         let ids = inputs.next().unwrap().into_int::<2>(&self.device)?;
-//!         let mask = inputs.next().unwrap().into_int::<2>(&self.device)?;
-//!         Ok(vec![HostTensor::from_float(self.net.forward(ids, mask))?])
-//!     }
-//! }
-//!
-//! #[tokio::main]
-//! async fn main() -> furnace::Result<()> {
-//!     tracing_subscriber::fmt::init();
-//!     let device = BackendKind::Cpu.device();
-//!     let model = Model::custom(Classifier { net: TextNet, device });
-//!     Server::new().model(model).serve().await
-//! }
+//! let inputs = vec![
+//!     IoSpec::new("input_ids", DataType::Int64, &[Some(128)]),
+//!     IoSpec::new("attention_mask", DataType::Int64, &[Some(128)]),
+//! ];
+//! let outputs = vec![IoSpec::fp32("logits", &[2])];
+//! # assert_eq!(inputs[0].v2_shape(), [-1, 128]);
+//! # assert_eq!(outputs[0].v2_shape(), [-1, 2]);
 //! ```
 //!
 //! # The nervous system
@@ -191,33 +144,29 @@
 //! The common settings have their own methods: [`Server::host`], [`Server::port`],
 //! [`Server::max_batch_size`], [`Server::request_timeout`]. [`Server::configure`] reaches
 //! every [`ServerConfig`] setting: limits, timeouts, batching, gRPC (feature `grpc`), TLS
-//! (feature `tls`), API keys, rate limits, the admin token for [`Server::reloadable_model`]. [`Server::router`] returns the HTTP API as an axum `Router`
-//! to mount in your own application. The HTTP API is described in
+//! (feature `tls`), API keys, rate limits, the admin token for [`Server::reloadable_model`].
+//! [`Server::router`] returns the HTTP API as an axum `Router` to mount in your own application. The HTTP API is described in
 //! [docs/API.md](https://github.com/Gilfeather/furnace/blob/main/docs/API.md).
 //!
 //! # Features
 //!
-//! - `onnx` (default): compile the ONNX files in `models/` (or `$FURNACE_MODELS_DIR`) into
-//!   built-in models. Not needed to serve your own Burn models.
+//! None are on by default.
+//!
 //! - `grpc`: the Open Inference Protocol over gRPC as well.
 //! - `tls`: HTTPS and mutual TLS, with a pure-Rust crypto provider.
 //! - `image`: JPEG / PNG input on `/predict`, with ImageNet preprocessing.
 //! - `llm`: serve LLMs with the OpenAI chat and completions API, streaming included, next to
 //!   the other models; see the `llm` module.
-//! - `wgpu`, `metal`, `cuda`: Burn's GPU backends, chosen with [`BackendKind`].
-//! - `embed-weights`: compile built-in models' weights into the binary.
 //! - `test-models`: `model::DummyModel` and `model::DummyTensorsModel`, constant models for
 //!   testing and benchmarking the server itself.
 
 pub mod access;
-// The `furnace` command's own parts: its allocator, its TOML file, its thread pool and its
-// built-in models. Public for the binary and the benches only; not part of the library's API.
+// The `furnace` command's own parts: its allocator, its TOML file and its thread pool. Public
+// for the binary (crate furnace-cli) only; not part of the library's API.
 #[doc(hidden)]
 pub mod allocator;
 pub mod api;
-pub mod backend;
 pub mod batching;
-pub mod burn_model;
 #[doc(hidden)]
 pub mod config;
 pub mod error;
@@ -225,8 +174,6 @@ mod json_fast;
 #[cfg(feature = "llm")]
 pub mod llm;
 pub mod model;
-#[doc(hidden)]
-pub mod models;
 pub mod nerve;
 #[cfg(feature = "image")]
 pub mod preprocess;
@@ -236,20 +183,15 @@ pub mod tensor;
 pub mod threads;
 #[cfg(feature = "tls")]
 pub mod tls;
-pub mod weights;
 
 pub use api::{Server, ServerConfig};
-pub use backend::BackendKind;
 pub use error::{ApiError, FurnaceError, ModelError, Result};
-pub use model::{BurnModel, Model, ModelInfo, load_built_in_model, load_model};
+pub use model::{Model, ModelInfo, TensorModel};
 pub use tensor::{DataType, HostTensor, IoSpec, TensorSpec, Values};
 
 // The Rust examples in the Markdown documents compile as doc-tests, so an API change that breaks
-// one fails CI. README.md and docs/NERVE.md use the `llm` mock engine; docs/LLM.md uses
-// furnace-candle and compiles there.
-#[cfg(all(doctest, feature = "llm"))]
-#[doc = include_str!("../README.md")]
-mod readme {}
+// one fails CI. docs/NERVE.md uses the `llm` mock engine; README.md and examples/README.md use
+// Burn and compile in furnace-burn, docs/LLM.md uses furnace-candle and compiles there.
 #[cfg(all(doctest, feature = "llm"))]
 #[doc = include_str!("../docs/NERVE.md")]
 mod nerve_md {}
@@ -265,9 +207,6 @@ mod performance_md {}
 #[cfg(doctest)]
 #[doc = include_str!("../docs/SERVERLESS.md")]
 mod serverless_md {}
-#[cfg(doctest)]
-#[doc = include_str!("../examples/README.md")]
-mod examples_readme {}
 #[cfg(doctest)]
 #[doc = include_str!("../CONTRIBUTING.md")]
 mod contributing {}

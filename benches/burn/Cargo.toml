@@ -1,7 +1,7 @@
 # Serving Burn models through furnace's library API, against calling `forward` directly and
 # against a hand-written axum server. Its own workspace (own Cargo.lock and target/) so its
 # dependencies never enter furnace's, and so it builds against *stock* burn-flex, as a crate
-# that depends on furnace-server from crates.io does. To measure the patched CPU backend this
+# that depends on furnace-burn from crates.io does. To measure the patched CPU backend this
 # repository ships in its binaries, see README.md.
 [package]
 name = "furnace-burn-bench"
@@ -16,10 +16,11 @@ license = "MIT"
 
 [features]
 default = []
-wgpu = ["furnace/wgpu", "burn/wgpu"]
+wgpu = ["furnace-burn/wgpu", "burn/wgpu"]
 
 [dependencies]
-furnace = { package = "furnace-server", path = "../..", default-features = false }
+furnace = { package = "furnace-server", path = "../.." }
+furnace-burn = { path = "../../furnace-burn" }
 furnace-bench-common = { path = "../common", features = ["load"] }
 burn = { version = "0.22", default-features = false, features = ["std", "flex", "rayon", "simd"] }
 axum = "0.8"

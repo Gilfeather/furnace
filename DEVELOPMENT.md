@@ -129,14 +129,14 @@ cargo test --release
 # Integration tests
 cargo test --release --test integration_tests
 
-# Benchmarks (the criterion bench uses the constant models of `test-models`)
-cargo bench --features test-models
+# Benchmarks (furnace-burn's criterion bench; `onnx` builds in furnace-burn/models/*.onnx)
+cargo bench -p furnace-burn --features onnx
 ```
 
 ## Release Process
 
 1. Create release branch: `git checkout -b release/v1.0.0`
-2. Update version in `Cargo.toml`
+2. Update the version in `Cargo.toml`, `furnace-burn/Cargo.toml` and `furnace-cli/Cargo.toml` (and their dependencies on each other)
 3. Update `CHANGELOG.md`
 4. Create PR to main
 5. After merge, create GitHub release

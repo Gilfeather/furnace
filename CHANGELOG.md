@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Burn moves out of the server into its own crate: `furnace-server` runs no model and depends on
+no ML framework, `furnace-burn` serves Burn models, `furnace-cli` is the `furnace` command.
+
+### Migrating from 0.11
+- Serving a Burn model needs `furnace-burn` next to `furnace-server`. Until it is on crates.io,
+  take both from the repository so they are the same `furnace-server`:
+  `furnace-server = { git = "https://github.com/Gilfeather/furnace" }` and
+  `furnace-burn = { git = "https://github.com/Gilfeather/furnace" }`.
+- Burn's parts move from `furnace` to `furnace_burn`, old -> new:
+  - `Model::from_fn(..)` -> `furnace_burn::from_fn(..)`, same arguments.
+  - `Model::custom(m)` for a `BurnModel` -> `furnace_burn::custom(m)`.
+  - `furnace::BurnModel` -> `furnace_burn::BurnModel`, unchanged (`backend()` still returns
+    `BackendKind`).
+  - `furnace::BackendKind` -> `furnace_burn::BackendKind`.
+  - `furnace::weights::load_burnpack` -> `furnace_burn::weights::load_burnpack`.
+  - `HostTensor::into_float`, `into_int`, `from_float`, `from_int` -> the same calls with
+    `use furnace_burn::HostTensorExt;` in scope.
+  - `furnace::load_model`, `load_built_in_model` and their `_with_backend` forms ->
+    `furnace_burn::load_model`, ... .
+  - `furnace::burn_model::{BurnModelContainer, MlpConfig, ..}` -> `furnace_burn::mlp::..`;
+    `furnace::model::MlpModel` -> `furnace_burn::MlpModel`.
+- `furnace-server` has no default features any more, and no `onnx`, `embed-weights`, `wgpu`,
+  `metal` or `cuda`: they are furnace-burn's (and furnace-cli's). `default-features = false`
+  on `furnace-server` can go.
+- A model from another engine implements the new `furnace::TensorModel` (what `BurnModel` was,
+  with `backend()` returning the backend's name as `&str`, and `int_range()` for the integers
+  the engine holds) and is served with `Model::custom`, which reports `model_type` `custom`.
+  `Model::new` takes a `Box<dyn TensorModel>`.
+- The `furnace` command is the `furnace-cli` crate: `cargo binstall furnace-server` and
+  `cargo install furnace-server` no longer install it (furnace-cli is not on crates.io yet; the
+  release binaries, Homebrew and Docker are unchanged). The built-in ONNX models go in
+  `furnace-burn/models/` instead of `models/` (or `$FURNACE_MODELS_DIR`, as before), and
+  their weights are in `target/*/build/furnace-burn-*/out/models/`.
+- In this repository, the Burn examples (`serve_burn_model`, `nerve`, `basic_mnist_create`), the
+  criterion bench and the patched burn-flex (`furnace-burn/vendor/`) are furnace-burn's. Plain
+  `cargo build`, `cargo test` and `cargo run --example ..` at the root still cover all three
+  crates; `cargo run --example nerve` needs no `--features llm` now.
+
 ## [0.11.0] - 2026-10-21
 
 The server runs on the nervous system: every model is a neuron, every route a receptor.

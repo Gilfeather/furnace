@@ -6,7 +6,8 @@ use burn::nn::conv::{Conv2d, Conv2dConfig};
 use burn::nn::pool::{AdaptiveAvgPool2d, AdaptiveAvgPool2dConfig};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, Relu};
 use burn::tensor::{Device, Int, Tensor};
-use furnace::{BackendKind, BurnModel, DataType, HostTensor, IoSpec};
+use furnace::{DataType, HostTensor, IoSpec};
+use furnace_burn::{BackendKind, BurnModel, HostTensorExt};
 
 /// A small CNN: `[batch, 1, 28, 28]` -> `[batch, 10]` logits. `benches/burn/src/models.rs` has
 /// a copy, since the bench is its own crate: change both together.

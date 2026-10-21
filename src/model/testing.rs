@@ -1,13 +1,13 @@
 //! Models for tests and benchmarks of the server itself, behind the `test-models` feature:
 //! they answer without computing anything worth serving.
 
-use burn::tensor::{Device, Tensor, TensorData};
-
-use super::BurnModel;
-use super::kinds::single_f32_run;
-use crate::backend::BackendKind;
+use super::TensorModel;
 use crate::error::{ModelError, Result};
 use crate::tensor::{DataType, HostTensor, IoSpec, Values};
+
+/// The integers of Burn's CPU backend (`i32`), which these models report as theirs, so the
+/// server's range check runs as it does for a real CPU model
+const CPU_INT_RANGE: (i64, i64) = (i32::MIN as i64, i32::MAX as i64);
 
 /// Constant-output model for tests and benchmarking server overhead.
 ///
@@ -17,7 +17,6 @@ pub struct DummyModel {
     name: String,
     input_shape: Vec<usize>,
     output_shape: Vec<usize>,
-    device: Device,
 }
 
 impl DummyModel {
@@ -27,18 +26,21 @@ impl DummyModel {
             name,
             input_shape,
             output_shape,
-            device: BackendKind::Cpu.device(),
         }
     }
 }
 
-impl BurnModel for DummyModel {
+impl TensorModel for DummyModel {
     fn name(&self) -> &str {
         &self.name
     }
 
-    fn backend(&self) -> BackendKind {
-        BackendKind::Cpu
+    fn backend(&self) -> &str {
+        "cpu"
+    }
+
+    fn int_range(&self) -> (i64, i64) {
+        CPU_INT_RANGE
     }
 
     fn inputs(&self) -> Vec<IoSpec> {
@@ -50,22 +52,23 @@ impl BurnModel for DummyModel {
     }
 
     fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
-        let output_size = self.output_shape.iter().product::<usize>();
-        single_f32_run(
-            inputs,
-            &self.device,
-            |input| {
-                let [batch_size, _] = input.dims();
-                Ok(Tensor::from_data(
-                    TensorData::new(
-                        vec![0.5f32; batch_size * output_size],
-                        [batch_size, output_size],
-                    ),
-                    &self.device,
+        let batch = match inputs.as_slice() {
+            [input] => input.batch(),
+            _ => {
+                return Err(ModelError::InvalidInput(format!(
+                    "expected 1 input(s), got {}",
+                    inputs.len()
                 ))
-            },
-            &self.output_shape,
-        )
+                .into());
+            }
+        };
+        let mut shape = vec![batch];
+        shape.extend_from_slice(&self.output_shape);
+        let len = shape.iter().product();
+        Ok(vec![HostTensor {
+            shape,
+            values: Values::F32(vec![0.5; len]),
+        }])
     }
 }
 
@@ -93,13 +96,17 @@ impl DummyTensorsModel {
     }
 }
 
-impl BurnModel for DummyTensorsModel {
+impl TensorModel for DummyTensorsModel {
     fn name(&self) -> &str {
         "tensors"
     }
 
-    fn backend(&self) -> BackendKind {
-        BackendKind::Cpu
+    fn backend(&self) -> &str {
+        "cpu"
+    }
+
+    fn int_range(&self) -> (i64, i64) {
+        CPU_INT_RANGE
     }
 
     fn inputs(&self) -> Vec<IoSpec> {

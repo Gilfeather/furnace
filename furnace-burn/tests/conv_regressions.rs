@@ -1,4 +1,4 @@
-//! Regression tests for the patched CPU backend in vendor/burn-flex.
+//! Regression tests for the patched CPU backend in furnace-burn/vendor/burn-flex.
 
 use burn::tensor::{Device, Tensor, TensorData, module, ops::ConvOptions};
 

@@ -27,9 +27,10 @@ logging and packaging. It should need to know almost nothing about what a model 
 
 How fast the model itself runs (convolution and matrix kernels, SIMD, GPU backends) is
 [Burn](https://github.com/tracel-ai/burn)'s job. Speed-ups there belong upstream in Burn, where
-every Burn user gets them and Furnace picks them up by updating. `vendor/burn-flex` holds CPU
-kernel changes only until a Burn release includes them (see
-[vendor/README.md](vendor/README.md)); please don't add new compute kernels to Furnace.
+every Burn user gets them and Furnace picks them up by updating. `furnace-burn/vendor/burn-flex`
+holds CPU kernel changes only until a Burn release includes them (see
+[furnace-burn/vendor/README.md](furnace-burn/vendor/README.md)); please don't add new compute
+kernels to Furnace.
 
 ## Getting Started
 
@@ -56,10 +57,10 @@ git clone https://github.com/YOUR_USERNAME/furnace.git
 cd furnace
 
 # Download the ResNet-18 ONNX model (compiled in at build time)
-mkdir -p models
-curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o models/resnet18.onnx
+mkdir -p furnace-burn/models
+curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o furnace-burn/models/resnet18.onnx
 # Second built-in model used by the end-to-end tests
-curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx" -o models/mnist.onnx
+curl -L "https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx" -o furnace-burn/models/mnist.onnx
 
 # Build the project
 cargo build --release
@@ -141,16 +142,22 @@ We welcome feature suggestions! Please:
 ### Code Organization
 
 ```text
-src/
-├── main.rs          # CLI entry point
-├── lib.rs           # Library exports
-├── api.rs           # HTTP API handlers, limits, backpressure
-├── model.rs         # Model wrapper: validation, batching, stats
-├── backend.rs       # Runtime backend selection (Burn Device)
-├── burn_model.rs    # File-based MLP (Burnpack weights)
-├── models/mod.rs    # Built-in models generated from ONNX
-├── types.rs         # Shared types
-└── error.rs         # Error types
+src/                     # furnace-server: the server, no ML framework
+├── lib.rs               # Library exports
+├── api.rs               # HTTP API handlers, limits, backpressure
+├── model.rs             # TensorModel, and the Model wrapper: validation, batching, stats
+├── tensor.rs            # Host tensors and their specs
+├── nerve/               # The nervous system
+├── llm/                 # The LLM layer (feature `llm`)
+└── error.rs             # Error types
+furnace-burn/src/        # Burn models
+├── model.rs             # BurnModel, from_fn, custom, the load functions
+├── tensor.rs            # Host tensors to Burn tensors and back
+├── backend.rs           # Runtime backend selection (Burn Device)
+├── weights.rs           # Burnpack weights, memory-mapped
+├── mlp.rs               # File-based MLP
+└── models/mod.rs        # Built-in models generated from ONNX (feature `onnx`)
+furnace-cli/src/main.rs  # The `furnace` command
 ```
 
 ### Error Handling

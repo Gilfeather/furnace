@@ -2,8 +2,7 @@
 //!
 //! `--backend cpu` (default, burn-flex) or `--backend wgpu` (needs `--features wgpu`).
 
-use furnace::BackendKind;
-use furnace::model::load_built_in_model_with_backend;
+use furnace_burn::{BackendKind, load_built_in_model_with_backend};
 use furnace_compare::{Args, bench_in_process, furnace_version};
 
 // The same allocator as the furnace server binary
