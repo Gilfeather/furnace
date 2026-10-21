@@ -16,14 +16,12 @@ use crate::nerve::receptor::{Receptor, Stop};
 use crate::nerve::signal::{NeuronId, PathwayId};
 
 /// Why a part of the nervous system cannot be built
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum BuildError {
     /// Two neurons have the same name; effectors are addressed by name
-    #[error("two neurons are named '{0}'")]
     DuplicateName(String),
     /// A pathway names a neuron that was not added to this builder
-    #[error("pathway {from} -> {to} names a neuron that was not added")]
     UnknownNeuron {
         /// The pathway's source
         from: NeuronId,
@@ -32,7 +30,6 @@ pub enum BuildError {
     },
     /// A URL the nervous system's HTTP client cannot call: not `http://host[:port]/path`
     /// (HTTPS among them)
-    #[error("{name}: {reason}")]
     Url {
         /// The effector or receptor
         name: String,
@@ -40,8 +37,32 @@ pub enum BuildError {
         reason: String,
     },
     /// A runtime of the fabric could not be started
-    #[error("the {0} runtime: {1}")]
-    Runtime(&'static str, #[source] std::io::Error),
+    Runtime(&'static str, std::io::Error),
+}
+
+impl std::fmt::Display for BuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateName(name) => write!(f, "two neurons are named '{name}'"),
+            Self::UnknownNeuron { from, to } => {
+                write!(
+                    f,
+                    "pathway {from} -> {to} names a neuron that was not added"
+                )
+            }
+            Self::Url { name, reason } => write!(f, "{name}: {reason}"),
+            Self::Runtime(which, e) => write!(f, "the {which} runtime: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for BuildError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Runtime(_, e) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 /// Builds a [`Fabric`]: add neurons, connect them, build

@@ -15,7 +15,6 @@ use axum::{
     response::{IntoResponse, Json, Response},
     routing::{MethodRouter, get, post},
 };
-use chrono::Utc;
 use serde::de::{self, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -998,14 +997,34 @@ async fn edge(request: Request, next: Next) -> Response {
 /// A new request ID in UUID v4 format: a random per-process value plus a counter, so IDs are
 /// unique without asking the OS for randomness on every request
 fn new_request_id() -> HeaderValue {
-    static SEED: std::sync::LazyLock<u128> =
-        std::sync::LazyLock::new(|| uuid::Uuid::new_v4().as_u128());
+    static SEED: std::sync::LazyLock<u128> = std::sync::LazyLock::new(|| {
+        (u128::from(process_random(0)) << 64) | u128::from(process_random(1))
+    });
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let bits = *SEED ^ u128::from(NEXT.fetch_add(1, Ordering::Relaxed));
-    let id = uuid::Builder::from_random_bytes(bits.to_be_bytes()).into_uuid();
-    let mut buffer = uuid::Uuid::encode_buffer();
-    HeaderValue::from_str(id.hyphenated().encode_lower(&mut buffer))
-        .expect("a UUID is a valid header value")
+    let mut bytes = bits.to_be_bytes();
+    // RFC 9562: version 4 (random) and the variant `10`
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let id = format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    );
+    HeaderValue::from_str(&id).expect("a UUID is a valid header value")
+}
+
+/// 64 random bits for the IDs this process hands out, different in every process: `stream`
+/// hashed with SipHash keys the standard library draws from the OS's randomness. Not for
+/// secrets; IDs only need not to collide.
+pub(crate) fn process_random(stream: u64) -> u64 {
+    use std::hash::{BuildHasher, RandomState};
+    static KEYS: std::sync::LazyLock<RandomState> = std::sync::LazyLock::new(RandomState::new);
+    KEYS.hash_one(stream)
 }
 
 async fn serve(config: ServerConfig, contents: Contents) -> Result<()> {
@@ -1218,7 +1237,7 @@ async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
             |slot| slot.get().model.get_backend_info(),
         ),
         uptime_seconds: state.uptime_seconds(),
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: crate::time::rfc3339_now(),
     })
 }
 
@@ -1235,7 +1254,7 @@ async fn readiness(State(state): State<AppState>) -> Response {
         status,
         Json(ReadinessResponse {
             status: if ready { "ready" } else { "warming_up" }.to_string(),
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: crate::time::rfc3339_now(),
         }),
     )
         .into_response()
@@ -1388,7 +1407,7 @@ async fn predict_with(state: &AppState, slot: &ModelSlot, request: Request) -> R
         }),
         status: "success",
         inference_time_ms,
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: crate::time::rfc3339_now(),
         batch_size,
     })
     .into_response()
@@ -1995,7 +2014,7 @@ fn json_metrics(state: &ServerState) -> MetricsResponse {
         average_batch_size: average_batch_size(&stats),
         max_batch_size: state.max_batch_size,
         average_inference_time_ms: stats.average_inference_time_ms,
-        last_inference_at: stats.last_inference_time.map(|t| t.to_rfc3339()),
+        last_inference_at: stats.last_inference_time.map(crate::time::rfc3339_utc),
         request_latency_ms: state.request_latency.percentiles_ms(),
         inference_latency_ms: state.inference_latency.percentiles_ms(),
         ready: state.ready(),
@@ -2007,7 +2026,7 @@ fn json_metrics(state: &ServerState) -> MetricsResponse {
             .map(|llm| llm.json_metrics())
             .unwrap_or_default(),
         nerve: Some(state.serving.fabric().metrics()),
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: crate::time::rfc3339_now(),
     }
 }
 
@@ -2024,7 +2043,7 @@ fn model_info_response(slot: &ModelSlot) -> ModelInfoResponse {
     ModelInfoResponse {
         model_info: loaded.model.get_info().clone(),
         stats: loaded.model.get_stats(),
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: crate::time::rfc3339_now(),
     }
 }
 
@@ -2188,7 +2207,7 @@ async fn reload_model(
                 weights: request.weights.map(|p| p.display().to_string()),
                 reload_ms,
                 warm_up_ms,
-                timestamp: Utc::now().to_rfc3339(),
+                timestamp: crate::time::rfc3339_now(),
             })
             .into_response()
         }
@@ -3132,8 +3151,17 @@ pub(crate) mod tests {
         for request in [plain, with_id(&"x".repeat(129)), with_id("a b")] {
             let response = test_app().oneshot(request).await.unwrap();
             let id = response.headers()[REQUEST_ID_HEADER].to_str().unwrap();
-            let uuid = uuid::Uuid::parse_str(id).unwrap_or_else(|_| panic!("{id}"));
-            assert_eq!(uuid.get_version(), Some(uuid::Version::Random), "{id}");
+            // 8-4-4-4-12 lowercase hex digits, version 4, variant `10`
+            let groups: Vec<&str> = id.split('-').collect();
+            let lengths: Vec<usize> = groups.iter().map(|g| g.len()).collect();
+            assert_eq!(lengths, [8, 4, 4, 4, 12], "{id}");
+            assert!(
+                id.chars()
+                    .all(|c| c == '-' || c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                "{id}"
+            );
+            assert!(groups[2].starts_with('4'), "{id}");
+            assert!(groups[3].starts_with(['8', '9', 'a', 'b']), "{id}");
         }
 
         // Generated IDs do not repeat

@@ -47,57 +47,78 @@ pub const MAX_HANDSHAKES: usize = 1024;
 /// Why the certificate, key or client CA cannot be used. The underlying error is the
 /// [`source`](std::error::Error::source), boxed so that furnace's API does not depend on the
 /// TLS library's error types.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
     /// A certificate file (`--tls-cert` or `--tls-client-ca`) cannot be read as PEM
-    #[error("{}: {source}", path.display())]
     Certificate {
         /// The file
         path: PathBuf,
         /// What went wrong
-        #[source]
         source: BoxError,
     },
     /// A certificate file holds no certificate
-    #[error("{}: no PEM certificate", path.display())]
     NoCertificate {
         /// The file
         path: PathBuf,
     },
     /// `--tls-key` holds no PEM private key
-    #[error("{}: no PEM private key ({source})", path.display())]
     PrivateKey {
         /// The file
         path: PathBuf,
         /// What went wrong
-        #[source]
         source: BoxError,
     },
     /// A client CA certificate cannot be used to verify clients
-    #[error("{}: {source}", path.display())]
     ClientCa {
         /// The `--tls-client-ca` file
         path: PathBuf,
         /// What went wrong
-        #[source]
         source: BoxError,
     },
     /// The certificate and key do not make a server configuration: the key is not one the
     /// server takes (RSA, an unsupported curve) or does not match the certificate
-    #[error("{} and {}: {source}", cert.display(), key.display())]
     CertificateAndKey {
         /// `--tls-cert`
         cert: PathBuf,
         /// `--tls-key`
         key: PathBuf,
         /// What went wrong
-        #[source]
         source: BoxError,
     },
     /// The TLS library refused the protocol versions; a bug rather than a configuration error
-    #[error("TLS setup: {0}")]
-    Setup(#[source] BoxError),
+    Setup(BoxError),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Certificate { path, source } | Self::ClientCa { path, source } => {
+                write!(f, "{}: {source}", path.display())
+            }
+            Self::NoCertificate { path } => write!(f, "{}: no PEM certificate", path.display()),
+            Self::PrivateKey { path, source } => {
+                write!(f, "{}: no PEM private key ({source})", path.display())
+            }
+            Self::CertificateAndKey { cert, key, source } => {
+                write!(f, "{} and {}: {source}", cert.display(), key.display())
+            }
+            Self::Setup(source) => write!(f, "TLS setup: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Certificate { source, .. }
+            | Self::PrivateKey { source, .. }
+            | Self::ClientCa { source, .. }
+            | Self::CertificateAndKey { source, .. }
+            | Self::Setup(source) => Some(&**source),
+            Self::NoCertificate { .. } => None,
+        }
+    }
 }
 
 /// The error inside an [`Error`]

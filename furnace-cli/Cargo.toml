@@ -60,9 +60,17 @@ burn = { version = "0.22", default-features = false, features = ["std"] }
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1.53", features = ["full"] }
 tracing = "0.1"
+# Log lines with RFC 3339 timestamps, in UTC (JSON) or the local time zone
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "chrono"] }
+# The process's session ID in the logs
 uuid = { version = "1.0", features = ["v4"] }
-thiserror = "2.0"
+# `--config furnace.toml`
+toml = "1"
+serde = { version = "1.0", features = ["derive"] }
+# `--threads`: the default is one thread per physical core, which the standard library does not
+# report (`available_parallelism` counts logical CPUs)
+num_cpus = "1"
+rayon = "1"
 
 [dev-dependencies]
 axum = "0.8"

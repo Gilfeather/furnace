@@ -44,6 +44,18 @@ no ML framework, `furnace-burn` serves Burn models, `furnace-cli` is the `furnac
   criterion bench and the patched burn-flex (`furnace-burn/vendor/`) are furnace-burn's. Plain
   `cargo build`, `cargo test` and `cargo run --example ..` at the root still cover all three
   crates; `cargo run --example nerve` needs no `--features llm` now.
+- `ModelStats::last_inference_time` is an `Option<std::time::SystemTime>` (was chrono's
+  `DateTime<Utc>`); its JSON is the same RFC 3339 string.
+- `furnace::config` and `furnace::threads` (the command's TOML file and thread pool, hidden
+  from the docs) are furnace-cli's own now.
+- Programs that log through furnace add `tracing-subscriber` themselves, as the examples
+  always showed: furnace-server no longer brings it.
+
+### Changed
+- furnace-server depends on less: clap, toml, tracing-subscriber and num_cpus are furnace-cli's
+  only; chrono comes only with `llm` (for the chat templates' `strftime_now`); uuid and
+  thiserror are gone, replaced by a few lines on the standard library. The server alone builds
+  63 crates (203 in 0.11.0, when Burn was part of it).
 
 ## [0.11.0] - 2026-10-21
 

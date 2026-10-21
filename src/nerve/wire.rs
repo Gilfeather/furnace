@@ -21,11 +21,10 @@ const MAX_HEAD: usize = 64 * 1024;
 const MAX_BODY: usize = 16 << 20;
 
 /// Why a call through the client failed
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
     /// The URL is not `http://host[:port]/path` (an `https://` URL among them)
-    #[error("{url}: {reason}")]
     Url {
         /// The URL as given
         url: String,
@@ -33,17 +32,41 @@ pub enum Error {
         reason: String,
     },
     /// The call did not finish within the client's timeout
-    #[error("{0} timed out")]
     Timeout(&'static str),
     /// Connecting, writing or reading failed: refused, reset, closed early
-    #[error(transparent)]
-    Io(#[from] io::Error),
+    Io(io::Error),
     /// The server's answer is not HTTP/1.1 the client reads
-    #[error("{0}")]
     Protocol(String),
     /// The response body is larger than the client collects
-    #[error("response body too large")]
     TooLarge,
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Url { url, reason } => write!(f, "{url}: {reason}"),
+            Self::Timeout(what) => write!(f, "{what} timed out"),
+            Self::Io(e) => std::fmt::Display::fmt(e, f),
+            Self::Protocol(m) => f.write_str(m),
+            Self::TooLarge => f.write_str("response body too large"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    // `Io` is the I/O error itself, its source included
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => e.source(),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 /// What the client's calls return

@@ -255,11 +255,10 @@ pub enum Event {
 ///
 /// Two errors are equal when they are the same variant with the same fields; for `Failed`,
 /// when their messages are.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum EngineError {
     /// The prompt does not fit the context (400)
-    #[error("the prompt is {prompt_tokens} tokens, the model's context is {max_context}")]
     TooLong {
         /// The prompt's length in tokens
         prompt_tokens: usize,
@@ -267,16 +266,31 @@ pub enum EngineError {
         max_context: usize,
     },
     /// The engine is full (503)
-    #[error("{0}")]
     Busy(String),
     /// The request cannot be served as asked (400)
-    #[error("{0}")]
     Invalid(String),
     /// The model failed (500). The model's own error, so a caller can downcast it; a message
     /// becomes one with `.into()`.
-    #[error("{0}")]
     Failed(BoxError),
 }
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLong {
+                prompt_tokens,
+                max_context,
+            } => write!(
+                f,
+                "the prompt is {prompt_tokens} tokens, the model's context is {max_context}"
+            ),
+            Self::Busy(m) | Self::Invalid(m) => f.write_str(m),
+            Self::Failed(e) => std::fmt::Display::fmt(e, f),
+        }
+    }
+}
+
+impl std::error::Error for EngineError {}
 
 impl EngineError {
     /// [`Failed`](Self::Failed) with only a message
