@@ -97,23 +97,39 @@ curl -s localhost:3000/v2/models/resnet18     # inputs, outputs, shapes
 Then send it tensors with any Triton or KServe client, or JSON to `POST /predict`
 ([Quick start](#quick-start) below).
 
-Measured as a server, with 16 concurrent clients on a 16-thread laptop CPU (AMD Ryzen 9 7940HS):
+Measured as a server, against the minimum a Burn user would write by hand (one axum route
+calling `forward` on a blocking thread) and against FastAPI. Shared runners are noisy: the
+absolute numbers move from run to run, the ratios between the servers measured side by side
+are what carries over.
+
+<!-- bench:server-table:start -->
+
+On GitHub's `ubuntu-latest` runner (AMD EPYC 7763 64-Core Processor, 4 cores), 2026-10-19, commit [`25896c0`](https://github.com/Gilfeather/furnace/commit/25896c045fdc2ae4d188012be971a09fc66a43d8),
+16 concurrent clients, medians of 3 runs ([workflow run](https://github.com/Gilfeather/furnace/actions/runs/39277593270)):
 
 | | **Furnace** | Hand-written axum | FastAPI (uvicorn, 4 workers) |
 |---|---|---|---|
-| Model that returns its input: requests/s, median latency | **85,700, 0.17 ms** | 88,200, 0.17 ms | 24,900, 0.55 ms |
-| Transformer text classifier in Burn: requests/s, p95 | **418, 46 ms** | 412, 48 ms | |
-| ResNet-18 in Burn: requests/s, p95 | **61, 366 ms** | 61, 366 ms | |
-| Ready after start | **30 ms** | 32 ms | 3.1 s (1.6 s with 1 worker) |
-| Memory (peak private), returning its input | **6 MB** | 6 MB | 565 MB with 1 worker |
+| Model that returns its input: requests/s, median latency | **33,151, 0.43 ms** | 39,917, 0.36 ms | 10,518, 1.3 ms |
+| Small CNN digit classifier in Burn: requests/s, p95 | **17,238, 1.8 ms** | 19,648, 1.5 ms |  |
+| ResNet-18 in Burn: requests/s, p95 | **25, 938 ms** | 25, 939 ms |  |
+| Transformer text classifier in Burn: requests/s, p95 | **116, 167 ms** | 114, 168 ms |  |
+| Ready after start, returning its input | **7.1 ms** | 7 ms | 1.2 s (454 ms with 1 worker) |
+| Memory (peak private), returning its input | **1.9 MB** | 1.6 MB | 46 MB with 1 worker |
 
-The hand-written server is the minimum a Burn user would write: one axum route calling `forward`
-on a blocking thread. Furnace keeps up with it while adding request IDs, metrics, input checks,
-backpressure and the Triton protocol, about 7 µs per request. For ONNX models, compiled to Burn,
-ONNX Runtime's kernels are faster: ResNet-18 takes 9.8 ms per image over HTTP with Furnace and
-8.6 ms with FastAPI + ONNX Runtime, which needs 1.8 s to start and 693 MB. Details and how to
-reproduce: [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Starting in milliseconds makes scaling to
-zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
+<!-- bench:server-table:end -->
+
+<!-- bench:server-notes:start -->
+
+Furnace adds request IDs, metrics, input checks, backpressure and the Triton protocol to the hand-written server: 9.9 µs per request in process, one request at a time (41.9 µs against 32.0 µs).
+Under load it serves 83% of the hand-written server's requests per second with the model that returns its input and 100% with ResNet-18.
+The release binary with ResNet-18 built in is ready 52 ms after it starts and has answered its first inference at 94 ms.
+
+<!-- bench:server-notes:end -->
+
+For ONNX models, compiled to Burn, ONNX Runtime's kernels are faster on a CPU
+([the engines compared](docs/PERFORMANCE.md#resnet-18-compared-with-other-engines)). Details and
+how to reproduce: [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Starting in milliseconds makes
+scaling to zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
 
 ## Features
 
@@ -220,7 +236,16 @@ stimulus dies before it reaches anything; reflex pathways are direct calls, micr
 stimulus to effector; a signal's deadline selects its pathway, so the brain only sees what is
 new and not urgent; the brain's output is commands, carried out by effectors (webhooks,
 local commands, files, the response) with their own retry, circuit-breaker and rate-limit
-loops. Measured against a hand-written server doing the same work: 146 ns per hop, 0.8 µs from stimulus to effector call on a reflex arc, a brain fraction of 0.45 on a stream with half repeats, 47 µs added to a webhook; at 16 clients the fabric server serves 11% fewer requests per second than the bare handler (the server layer around it, not the fabric).
+loops.
+
+<!-- bench:nerve:start -->
+
+On a Windows laptop (furnace 0.9.0, 2026-10-20), against a hand-written server doing the same work: 146 ns per hop, 0.8 µs from stimulus to effector call on a reflex arc, a brain fraction of 0.46 on a stream with half repeats, 47 µs added to a webhook.
+At 16 clients the fabric server serves 11% fewer requests per second than the bare handler (the server layer around it, not the fabric).
+
+<!-- bench:nerve:end -->
+
+[docs/NERVE.md](docs/NERVE.md#measured) has every measurement and its target.
 
 ```rust,no_run
 use std::time::Duration;

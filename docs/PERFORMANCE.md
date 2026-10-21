@@ -18,6 +18,18 @@ runners are noisy and their CPUs vary from run to run, so read the ratios betwee
 measured on the same runner, not the absolute numbers. To run it on a fork:
 `gh workflow run bench.yml`.
 
+README.md's numbers (the server table, the sentences under it and the nervous system's
+figures) are not typed by hand: they sit between `<!-- bench:NAME:start -->` and
+`<!-- bench:NAME:end -->` markers and come from this workflow's x86_64 runner. Run it by hand
+with *update_readme* ticked (Actions → Benchmarks → Run workflow, or
+`gh workflow run bench.yml -f update_readme=true`): its last job rewrites them with
+[`benches/readme-numbers.sh`](../benches/readme-numbers.sh) and opens a pull request from a
+`bench/readme-<date>` branch. The weekly and release runs leave README.md alone. The repository
+has to allow it once, in Settings → Actions → General → *Allow GitHub Actions to create and
+approve pull requests*. A pull request opened by the workflow starts no CI: close and reopen it
+to run the checks. From a run's `bench-x86_64` artifact, `benches/readme-numbers.sh DIR` does
+the same locally (it needs jq).
+
 ## Serving a Burn model
 
 Furnace is a server, so the question is what it adds around a model, and how it compares with

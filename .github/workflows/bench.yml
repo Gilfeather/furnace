@@ -3,8 +3,15 @@ name: Benchmarks
 # Furnace against a hand-written axum server and FastAPI, on GitHub's own runners, so anyone can
 # see the hardware and rerun the comparison. Shared runners are noisy: the ratios between servers
 # measured on the same runner matter, not the absolute numbers. Too slow for every pull request.
+# A manual run with `update_readme` also opens a pull request with README.md's numbers from the
+# x86_64 runner (benches/readme-numbers.sh); the weekly and release runs never change it.
 on:
   workflow_dispatch:
+    inputs:
+      update_readme:
+        description: Open a pull request that updates README.md with the x86_64 results
+        type: boolean
+        default: false
   schedule:
     # Mondays, 04:23 UTC
     - cron: '23 4 * * 1'
@@ -55,6 +62,7 @@ jobs:
           . -> target
           benches/burn -> target
           benches/llm -> target
+          benches/nerve -> target
 
     # Python only for the FastAPI servers compared against, at the versions the published numbers
     # were measured with
@@ -109,6 +117,7 @@ jobs:
       run: |
         cargo build --release --locked --manifest-path benches/burn/Cargo.toml
         cargo build --release --locked --manifest-path benches/llm/Cargo.toml
+        cargo build --release --locked --manifest-path benches/nerve/Cargo.toml
 
     - name: Burn models (benches/burn)
       shell: bash
@@ -124,6 +133,12 @@ jobs:
         benches/llm/target/release/furnace-llm-bench --runs "$RUNS" --json results/llm.json \
           | tee results/llm.md
         benches/llm/target/release/furnace-llm-bench overhead | tee results/llm-overhead.txt
+
+    - name: Nervous system (benches/nerve)
+      shell: bash
+      run: |
+        benches/nerve/target/release/furnace-nerve-bench --runs "$RUNS" --clients "$BURN_CLIENTS" \
+          --json results/nerve.json | tee results/nerve.txt
 
     - name: Cold start (furnace binary, ResNet-18)
       shell: bash
@@ -172,3 +187,59 @@ jobs:
       with:
         name: ratios
         path: ratios.md
+
+  readme:
+    name: README numbers
+    needs: bench
+    # Only a manual run that asks for it. The x86_64 results are enough, even when the Arm runner
+    # failed
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.update_readme }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Download results
+      uses: actions/download-artifact@v5
+      with:
+        name: bench-x86_64
+        path: results
+
+    - name: Rewrite README.md
+      shell: bash
+      env:
+        BENCH_COMMIT: ${{ github.sha }}
+        BENCH_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        BENCH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: bash benches/readme-numbers.sh results README.md
+
+    # Needs "Allow GitHub Actions to create and approve pull requests" (Settings → Actions →
+    # General). A pull request opened with this token starts no workflows: close and reopen it
+    # to run CI
+    - name: Open a pull request
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        BASE: ${{ github.ref_name }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        if git diff --quiet README.md; then
+          echo "README.md is unchanged"
+          exit 0
+        fi
+        day=$(date -u +%Y-%m-%d)
+        branch="bench/readme-$day"
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git switch -c "$branch"
+        git commit -q -m "docs: README numbers from the benchmarks run of $day" README.md
+        # A second run on the same day replaces the first one's branch and its open pull request
+        git push --force origin "$branch"
+        if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]; then
+          gh pr create --base "$BASE" --head "$branch" \
+            --title "docs: README numbers from the benchmarks run of $day" \
+            --body "README.md's measured numbers from the x86_64 runner of $RUN_URL, rewritten by \`benches/readme-numbers.sh\`. Opened by the workflow, so no CI ran: close and reopen this pull request to run it."
+        fi

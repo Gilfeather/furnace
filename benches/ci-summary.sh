@@ -6,7 +6,8 @@
 #   benches/ci-summary.sh combine DIR...    the ratios of several runners side by side
 #
 # DIR holds what the workflow saved: cpu.json, burn.json and burn.md (furnace-burn-bench),
-# overhead.txt, llm.json and llm.md (furnace-llm-bench), llm-overhead.txt and cold-start.txt.
+# overhead.txt, llm.json and llm.md (furnace-llm-bench), llm-overhead.txt, nerve.json and nerve.txt
+# (furnace-nerve-bench) and cold-start.txt.
 set -euo pipefail
 
 runner() {
@@ -14,12 +15,13 @@ runner() {
   # `cold-start` prints "binary ready  median  12.3 ms ...": the three medians
   local cold
   cold=$(awk '{ for (i = 1; i < NF; i++) if ($i == "median") print $(i + 1) }' "$dir/cold-start.txt" | paste -sd ' ')
-  jq -n --slurpfile burn "$dir/burn.json" --slurpfile llm "$dir/llm.json" --arg cold "$cold" '
+  jq -n --slurpfile burn "$dir/burn.json" --slurpfile llm "$dir/llm.json" --slurpfile nerve "$dir/nerve.json" --arg cold "$cold" '
     def two: . * 100 | round / 100;
     def one: . * 10 | round / 10;
     def times($a; $b): "\($a / $b | two)×";
     def burn($m; $s): $burn[0].models[] | select(.model == $m) | .servers[] | select(.server == $s);
     def llm($s): $llm[0].servers[] | select(.server == $s);
+    def nerve($s): $nerve[0].servers[] | select(.server == $s) | .load[-1];
     def fastapi($s): if $s == "fastapi" then "FastAPI, 1 worker" else "FastAPI, 4 workers" end;
     ($cold | split(" ")) as $c
     | [
@@ -34,6 +36,9 @@ runner() {
         ([llm("furnace").load, llm("fastapi").load] | transpose[]
           | {measure: "LLM stream, \(.[0].clients) client\(if .[0].clients == 1 then "" else "s" end): time to first token p50, FastAPI / Furnace",
              value: times(.[1].ttft_p50_ms; .[0].ttft_p50_ms)}),
+        (nerve("furnace") as $f | nerve("hand-written") as $h
+          | {measure: "nervous system demo, \($f.clients) clients: requests/s, Furnace / hand-written axum",
+             value: times($f.requests_per_second; $h.requests_per_second)}),
         {measure: "echo server ready after start: Furnace / hand-written axum / FastAPI, 1 worker",
          value: "\(burn("echo"; "furnace").ready_ms | round) / \(burn("echo"; "hand-written").ready_ms | round) / \(burn("echo"; "fastapi").ready_ms | round) ms"},
         {measure: "furnace binary, ResNet-18 cold start: listening / ready / first inference",
@@ -71,6 +76,12 @@ runner() {
   echo "In process, no network (\`overhead\`):"
   echo
   cat "$dir/llm-overhead.txt"
+  echo
+  echo "### Nervous system: benches/nerve"
+  echo
+  echo '```'
+  cat "$dir/nerve.txt"
+  echo '```'
   echo
   echo "### Cold start: furnace binary, ResNet-18"
   echo
