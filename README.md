@@ -11,8 +11,8 @@ router you mount in your own Rust service or as a standalone server.
 ## Embed it in your Axum app
 
 Your app keeps its own routes for pre- and post-processing, the database and the rest of your
-API. Furnace adds the inference endpoints, with dynamic batching, backpressure, metrics and the
-KServe / Triton protocol:
+API. Furnace adds the inference endpoints, with backpressure, metrics, optional dynamic
+batching and the KServe / Triton protocol:
 
 ```rust
 use axum::{Json, Router, routing::get};
@@ -26,6 +26,7 @@ async fn labels() -> Json<Vec<String>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt::init(); // Furnace logs through `tracing`; without this it prints nothing
     let device = BackendKind::Cpu.device();
     let mut net = Net::new(&device); // your Burn Module
     furnace::weights::load_burnpack(&mut net, "net.bpk".as_ref())?;
@@ -44,18 +45,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```toml
 [dependencies]
-furnace-server = { version = "0.10", default-features = false }
+furnace-server = { version = "0.11", default-features = false }
 burn = "0.22"
 axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+tracing-subscriber = "0.3"
 ```
 
+The snippets in this README follow `main`, which is released as 0.11. Until 0.11 is on
+crates.io, depend on the repository instead:
+`furnace-server = { git = "https://github.com/Gilfeather/furnace", default-features = false }`.
+
 The app now answers `GET /labels` itself and, through Furnace, `POST /predict`,
-`POST /v2/models/digits/infer`, `GET /healthz`, `GET /readyz` and `GET /metrics`, batching
-concurrent requests together. Furnace's API keys and rate limits guard only its own routes (for
-per-IP rate limits, serve `app.into_make_service_with_connect_info::<furnace::api::ClientAddr>()`).
-Models with several or integer inputs, and every setting, are covered
-[below](#your-own-burn-models).
+`POST /v2/models/digits/infer`, `GET /healthz`, `GET /readyz` and `GET /metrics`. Furnace's API
+keys and rate limits guard only its own routes (for per-IP rate limits, serve
+`app.into_make_service_with_connect_info::<furnace::api::ClientAddr>()`). Models with several
+or integer inputs, batching, and every setting are covered [below](#your-own-burn-models).
 
 ## Or run it standalone
 
@@ -102,8 +107,9 @@ zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
   `furnace --model-name foo` (with [burn-onnx](https://github.com/tracel-ai/burn-onnx)).
 - **KServe / Triton Open Inference Protocol** over HTTP and gRPC: Triton and KServe clients work
   unchanged. Tensors are FP32, INT64 or INT32, several in and out, in JSON or binary.
-- **LLMs too** (`--features llm`): the OpenAI chat and completions API with streaming, next
-  to your other models in the same server. GGUF files run on the CPU through candle
+- **LLMs too**, from the library (feature `llm`; the `furnace` command does not serve them):
+  the OpenAI chat and completions API with streaming, next to your other models in the same
+  server. GGUF files run on the CPU through candle
   ([`furnace-candle`](furnace-candle)), and your own Burn LLM plugs in with prefill and
   decode. See [docs/LLM.md](docs/LLM.md).
 - **A nervous system**: receptors, reflex arcs, a brain and effectors, with habituation,
@@ -124,14 +130,15 @@ zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
 
 ## Your own Burn models
 
-Furnace is a library (from version 0.9). Add it next to Burn; the ONNX import is not needed
-for this:
+Add Furnace next to Burn; the ONNX import is not needed for this (until 0.11 is released, use
+the `git` line [above](#embed-it-in-your-axum-app)):
 
 ```toml
 [dependencies]
-furnace-server = { version = "0.10", default-features = false }
+furnace-server = { version = "0.11", default-features = false }
 burn = "0.22"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = "0.3"
 ```
 
 A model that takes one float tensor and returns one is served by its `forward` as it is:
@@ -142,6 +149,7 @@ use furnace::{BackendKind, Model, Server};
 
 #[tokio::main]
 async fn main() -> furnace::Result<()> {
+    tracing_subscriber::fmt::init(); // Furnace's startup and request logs
     let device = BackendKind::Cpu.device();
     let mut net = DigitNet::new(&device); // your Burn Module
     furnace::weights::load_burnpack(&mut net, "digits.bpk".as_ref())?;
@@ -152,15 +160,19 @@ async fn main() -> furnace::Result<()> {
 }
 ```
 
-It then answers `POST /predict` and `POST /v2/models/digits/infer`, batching concurrent requests
-together. A model with several inputs or outputs, or integer ones (token ids, masks), implements
-`furnace::BurnModel` to name its tensors and is served on `/v2/models/{name}/infer`, batched too
-when its inputs have fixed shapes.
+It then answers `POST /predict` and `POST /v2/models/digits/infer`, one forward pass per
+request. A model with several inputs or outputs, or integer ones (token ids, masks), implements
+`furnace::BurnModel` to name its tensors and is served on `/v2/models/{name}/infer`.
 [`examples/serve_burn_model`](examples/serve_burn_model/main.rs) runs both kinds:
 `cargo run --release --example serve_burn_model`. `Server::router()` gives the same API as an
-axum router to mount in your own app ([above](#embed-it-in-your-axum-app)), and
-`Server::configure` reaches every `ServerConfig` setting: batching, limits, gRPC, TLS, API keys
-and the rest of the options below.
+axum router to mount in your own app ([above](#embed-it-in-your-axum-app)).
+
+**Batching is off by default.** `Server::new().max_batch_size(8)` merges concurrent requests
+into shared forward passes once the server is busy (models whose inputs have fixed shapes).
+It pays for convolutional networks and on GPUs; for a transformer on a CPU it makes requests
+slower, so leave it off there. [docs/API.md](docs/API.md#dynamic-batching) has the details.
+`Server::request_timeout(..)` sets the `504` limit, and `Server::configure` reaches every other
+`ServerConfig` setting: limits, gRPC, TLS, API keys and the rest of the options below.
 
 ## The nervous system
 
@@ -175,20 +187,46 @@ local commands, files, the response) with their own retry, circuit-breaker and r
 loops. Measured against a hand-written server doing the same work: 146 ns per hop, 0.8 µs from stimulus to effector call on a reflex arc, a brain fraction of 0.45 on a stream with half repeats, 47 µs added to a webhook; at 16 clients the fabric server serves 11% fewer requests per second than the bare handler (the server layer around it, not the fabric).
 
 ```rust
-use furnace::nerve::prelude::*;
+use std::time::Duration;
 
-let mut b = Fabric::builder();
-let events = b.receptor(Http::new("events", "/events").text());
-b.gate(events, Mechanisms::NONE.threshold(0.6).habituation(Habituation::new(Duration::from_secs(30))));
-let triage = b.neuron(FnNeuron::reflex("triage", |signal, _| match signal.payload.as_text() {
-    Some(t) if t.contains("ALERT") => signal.command("alarm", json!({"text": t})), // acts at once
-    _ => signal, // goes on to the brain
-}));
-let brain = b.neuron(Llm::new("brain", engine)); // its answer is commands
-b.effector(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")?);
-b.reflex(events, triage);
-b.deliberative(triage, brain);
-Server::new().nerve(b).serve().await?;
+use furnace::Server;
+use furnace::llm::mock::MockEngine;
+use furnace::nerve::prelude::*;
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> furnace::Result<()> {
+    tracing_subscriber::fmt::init();
+    // Stands in for a real LLM (a GGUF file through furnace-candle, or your Burn model);
+    // the brain's answer is commands for the effectors
+    let engine = MockEngine::new("mock", &[r#"{"effector": "log", "args": {"line": "seen"}}"#]);
+
+    let mut b = Fabric::builder();
+    let events = b.receptor(Http::new("events", "/events").text()); // POST /events
+    let repeats = Habituation::new(Duration::from_secs(30));
+    b.gate(events, Mechanisms::NONE.threshold(0.6).habituation(repeats)); // repeats die here
+    let triage = b.neuron(FnNeuron::reflex("triage", |signal, _| {
+        if signal.payload.as_text().is_some_and(|t| t.contains("ALERT")) {
+            signal.command("alarm", json!({"text": signal.payload.as_text()})) // acts at once
+        } else {
+            signal // goes on to the brain
+        }
+    }));
+    let brain = b.neuron(Llm::new("brain", engine));
+    b.effector(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")?);
+    b.effector(FileAppend::new("log", "journal.log"));
+    b.reflex(events, triage);
+    b.deliberative(triage, brain);
+    Server::new().port(3000).nerve(b).serve().await
+}
+```
+
+```toml
+[dependencies]
+furnace-server = { version = "0.11", default-features = false, features = ["llm"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde_json = "1"
+tracing-subscriber = "0.3"
 ```
 
 [docs/NERVE.md](docs/NERVE.md) has the concepts, the API, the demo
@@ -234,16 +272,24 @@ cargo build --release
 ./target/release/furnace --model-name resnet18
 ```
 
-Send it an image (with a server built using `--features image`), or raw floats:
+Send it an image as JSON floats (`/predict` takes the 150,528 values of one preprocessed image):
 
 ```bash
-curl -O https://github.com/pytorch/hub/raw/master/images/dog.jpg
-curl -X POST http://localhost:3000/predict -H "Content-Type: image/jpeg" --data-binary @dog.jpg
-# "output" holds 1000 logits; the largest is class 258 (Samoyed)
-
 cargo run --example resnet18_sample_data      # writes resnet18_single_sample.json
 curl -X POST http://localhost:3000/predict -H "Content-Type: application/json" \
   --data-binary @resnet18_single_sample.json
+# "output" holds 1000 logits
+```
+
+To send a JPEG or PNG as it is, with the ImageNet preprocessing done by the server, build with
+the `image` feature (the release binaries and the Docker image above do not have it):
+
+```bash
+cargo build --release --features image
+./target/release/furnace --model-name resnet18
+curl -O https://github.com/pytorch/hub/raw/master/images/dog.jpg
+curl -X POST http://localhost:3000/predict -H "Content-Type: image/jpeg" --data-binary @dog.jpg
+# the largest of the 1000 logits is class 258 (Samoyed)
 ```
 
 Or serve two models written in Burn, with no ONNX file at all:

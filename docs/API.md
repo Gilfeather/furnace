@@ -204,7 +204,8 @@ model. A convolutional network on a CPU runs a batch of 4 in about the time of 2
 so batching serves more requests under load (ResNet-18: about 10-20% more at 16 clients, with
 shorter tail latency). A transformer on a CPU takes nearly 4 times as long for 4, so merging
 only makes requests wait (a 4-layer text encoder: about 25% fewer requests and twice the p95).
-Turn it on, e.g. `--max-batch-size 8`, for models of the first kind and on GPUs;
+Turn it on, e.g. `--max-batch-size 8` (in Rust, `Server::new().max_batch_size(8)`), for
+models of the first kind and on GPUs;
 `benches/burn` measures a model both ways.
 
 Up to `--batch-workers` forward passes (default 4) run at the same time. While a worker is
@@ -282,7 +283,8 @@ takes its tensors by name. `GET /v2/models/{model}` lists them, e.g. for a text 
 
 Send every input, in any order, as `FP32`, `INT64` or `INT32` (taken for `INT64` inputs) in JSON
 or as binary tensor data. Every output comes back unless `outputs` names some. When every input
-has a fixed shape per item, concurrent requests are batched together like `/predict`'s; a model
+has a fixed shape per item, concurrent requests can be batched like `/predict`'s (with
+batching turned on, [above](#dynamic-batching)); a model
 with an input whose shape each request fixes (a sequence length, say) runs one request per
 forward pass. Such models are not served on
 `/predict`, which answers `400 NAMED_TENSORS_REQUIRED` pointing here. The CPU backend computes
@@ -513,8 +515,29 @@ output. Download it (see the README's quick start), then `cargo build --release`
 **Lots of `503 SERVER_BUSY`**: increase `--max-concurrent-requests`. Requests waiting to be
 batched hold a slot too.
 
-**`backend not available in this build`**: rebuild with the matching feature,
-e.g. `--features wgpu`.
+**`Server startup failed: Failed to bind to 127.0.0.1:3000: ...`**: another process has the
+port (`Address already in use`; on Windows, `os error 10048`). Stop it, or pick another port
+with `--port` (in Rust, `Server::port`). With `--grpc-port`, the same holds for
+`Failed to bind gRPC to ...`.
+
+**A feature missing from the build.** Some options need a Cargo feature, and a build without
+it says so or refuses the request:
+
+| What you see | Rebuild with |
+|---|---|
+| `backend not available in this build. Available backends: cpu` | `--features wgpu` (or `metal`, `cuda`) |
+| ``Server startup failed: --grpc-port needs a build with the `grpc` feature`` | `--features grpc` |
+| ``Server startup failed: --tls-cert needs a build with the `tls` feature`` | `--features tls` |
+| `415` for `Content-Type: image/jpeg` or `image/png` | `--features image` |
+| Your code does not compile: `furnace::llm`, `nerve::Llm` or `Server::llm` not found | `features = ["llm"]` on `furnace-server` |
+| `unknown built-in model` for a model whose `.onnx` is in `models/` | the default `onnx` feature, without `--no-default-features` |
+
+The release binaries and the Docker image are built with `grpc` and `tls`, not `image`. LLMs
+are served from the library only ([LLM.md](LLM.md)).
+
+**The server prints nothing** (from your own program): Furnace logs through `tracing`, which
+writes nowhere until a subscriber is installed. Add `tracing-subscriber = "0.3"` to
+`Cargo.toml` and call `tracing_subscriber::fmt::init()` first thing in `main`.
 
 **Windows: `link.exe` not found**: install Visual Studio Build Tools with the
 "Desktop development with C++" workload.

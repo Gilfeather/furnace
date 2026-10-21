@@ -14,6 +14,31 @@ Everything is pure Rust: the tokenizer (`tokenizers` with fancy-regex, without O
 esaxx), the chat templates (`minijinja`) and the engine adapters. CI fails if a C or C++ crate
 enters the dependency tree.
 
+LLMs are served from the library only: the `furnace` command, the release binaries and the
+Docker image do not serve them. Your program builds a `Server` with `.llm(engine)`:
+
+```toml
+[dependencies]
+furnace-server = { version = "0.11", default-features = false, features = ["llm"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = "0.3"
+```
+
+For GGUF files through candle, add `furnace-candle`. It is not on crates.io yet (see below),
+so take both crates from the repository, which keeps them the same version of
+`furnace-server`:
+
+```toml
+[dependencies]
+furnace-server = { git = "https://github.com/Gilfeather/furnace", default-features = false, features = ["llm"] }
+furnace-candle = { git = "https://github.com/Gilfeather/furnace" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = "0.3"
+```
+
+This page follows `main`, which is released as 0.11; until 0.11 is on crates.io, use the
+`git` line for `furnace-server` in either case.
+
 ## A GGUF file, with candle
 
 The [`furnace-candle`](../furnace-candle) crate serves quantized GGUF files of the llama family
@@ -27,6 +52,7 @@ use furnace_candle::Gguf;
 
 #[tokio::main]
 async fn main() -> Result<(), furnace::llm::BoxError> {
+    tracing_subscriber::fmt::init(); // Furnace logs through `tracing`
     let engine = Gguf::new("qwen2.5-0.5b-instruct-q4_k_m.gguf").load()?;
     Server::new().port(8080).llm(engine).serve().await?;
     Ok(())
@@ -41,18 +67,25 @@ cargo run --release -p furnace-candle --example serve_gguf -- qwen2.5-0.5b-instr
 
 Nothing is downloaded for you; for this one, `qwen2.5-0.5b-instruct-q4_k_m.gguf` from
 [Qwen/Qwen2.5-0.5B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF)
-(491 MB). Options: `Gguf::name`, `max_context` (4096 tokens by default, since the KV cache
-grows with it), `max_sequences` (4), `tokenizer` (a `tokenizer.json` to use instead of the
-GGUF file's), and `scheduler` (worker threads, queue length).
+(491 MB). The model's name, what clients put in `"model"`, is the file name without `.gguf`
+(`qwen2.5-0.5b-instruct-q4_k_m` here); `Gguf::name` sets another. Other options:
+`max_context` (4096 tokens by default, since the KV cache grows with it), `max_sequences` (4),
+`tokenizer` (a `tokenizer.json` to use instead of the GGUF file's), and `scheduler` (worker
+threads, queue length).
 
 `furnace-candle` is not on crates.io yet: the published candle-core 0.11.0 builds Oniguruma
-(C) for its GGUF tokenizer, so it uses candle's main branch from git until the next release.
+(C) for its GGUF tokenizer. Until a candle release drops it, `furnace-candle/Cargo.toml` takes
+candle from git, pinned to one revision of a fork: candle's main branch (which uses
+fancy-regex) plus a pending upstream fix that moves to zip 9 for security advisories.
 
 ## Your own model: `StepModel`
 
 A model that can prefill a prompt and decode one token at a time implements `StepModel`:
 
 ```rust
+use furnace::Server;
+use furnace::llm::{BoxError, Logits, Scheduled, StepModel, TextPipeline};
+
 impl StepModel for MyLlm {
     type Sequence = MyCache;            // KV cache and position of one request
 
@@ -67,6 +100,11 @@ impl StepModel for MyLlm {
 let pipeline = TextPipeline::from_files("tokenizer.json", Some("tokenizer_config.json".as_ref()))?;
 Server::new().llm(Scheduled::new(MyLlm::load()?, pipeline)).serve().await?;
 ```
+
+`Logits` is the next-token logits over the vocabulary, on the host (`Logits(Vec<f32>)`);
+`BoxError` is `Box<dyn std::error::Error + Send + Sync>`; `TextPipeline` is the tokenizer and
+the chat template. `max_sequences` defaults to 1. Their documentation, and the rest of
+`furnace::llm`, is on [docs.rs](https://docs.rs/furnace-server/latest/furnace/llm/).
 
 `Scheduled` is Furnace's scheduler. It runs the model on its own worker threads and does
 everything else: the chat template, tokenization, sampling (temperature, top-p, top-k, seed,
@@ -107,7 +145,9 @@ curl localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -d '
 }'
 ```
 
-Without `model`, a request goes to the first LLM added.
+`model` is the name the engine reports: for a GGUF file, its file name without `.gguf`; for
+a `StepModel`, what its `name()` returns. `GET /v1/models` lists them. Without `model`, a
+request goes to the first LLM added.
 
 **Served:** `messages` (text content, or text parts), `prompt` (one string), `max_tokens` /
 `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `seed`, `presence_penalty`,
