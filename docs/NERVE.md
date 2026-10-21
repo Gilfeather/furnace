@@ -9,13 +9,19 @@ side are separate systems. The mechanisms are a neuron's.
 
 ```toml
 [dependencies]
-furnace-server = { version = "0.10", default-features = false }
+# `llm` for an LLM brain (`nerve::Llm`); the rest of the nervous system needs no feature
+furnace-server = { version = "0.11", default-features = false, features = ["llm"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde_json = "1"
+tracing-subscriber = "0.3"
 ```
 
-The nervous system is always built: the server's own routes run on it. The `nerve` feature is
-still accepted and changes nothing. Everything is pure Rust and adds no dependency: `nerve`
-uses what the crate already has, plus a small HTTP/1.1 client over Tokio sockets for the
-outbound side (internal to the crate).
+This page follows `main`, which is released as 0.11; until 0.11 is on crates.io, use
+`furnace-server = { git = "https://github.com/Gilfeather/furnace", default-features = false, features = ["llm"] }`.
+
+The nervous system is always built: the server's own routes run on it. Everything is pure Rust
+and adds no dependency: it uses what the crate already has, plus a small HTTP/1.1 client over
+Tokio sockets for the outbound side (internal to the crate).
 
 ## Why a fly dodges a hand
 
@@ -67,8 +73,8 @@ Firing`, where `Firing` is `Quiet`, `Fire(Vec<Signal>)` or `Compute(closure)` fo
 work. Four kinds: receptors (world → signal), reflexes (feature → command, in process), brains
 (the slow model; its output is commands) and effectors (command → world).
 
-**Mechanisms.** Every neuron is added with `Mechanisms`, each optional and each a few words of
-state, run by the fabric before `stimulate`:
+**Mechanisms.** A neuron has none until you give it some with `b.gate(id, Mechanisms)`. Each
+is optional and a few words of state, run by the fabric before `stimulate`:
 
 - *Threshold*: fires only if `intensity >= threshold`.
 - *Habituation*: a bounded, set-associative table keyed by feature. Each repeat multiplies the
@@ -110,33 +116,53 @@ Server-Sent-Events push.
 that does something, a reflex arc (receive, decide in process, act):
 
 ```rust
-use furnace::nerve::prelude::*;
 use furnace::Server;
+use furnace::nerve::prelude::*;
 use serde_json::json;
 
-let mut b = Fabric::builder();
-let events = b.receptor(Http::new("events", "/events").text()); // POST /events
-let triage = b.neuron(FnNeuron::reflex("triage", |signal, _| {
-    let text = signal.payload.as_text()?;
-    text.contains("ALERT").then(|| signal.command("alarm", json!({"text": text})))
-}));
-b.effector(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")?);
-b.reflex(events, triage);
-Server::new().port(3000).nerve(b).serve().await?;
+#[tokio::main]
+async fn main() -> furnace::Result<()> {
+    tracing_subscriber::fmt::init(); // Furnace logs through `tracing`
+    let mut b = Fabric::builder();
+    let events = b.receptor(Http::new("events", "/events").text()); // POST /events
+    let triage = b.neuron(FnNeuron::reflex("triage", |signal, _| {
+        let text = signal.payload.as_text()?;
+        text.contains("ALERT").then(|| signal.command("alarm", json!({"text": text})))
+    }));
+    b.effector(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")?);
+    b.reflex(events, triage);
+    Server::new().port(3000).nerve(b).serve().await
+}
 ```
 
-The other common shape sends what comes in to the brain, which decides what to do:
+`curl -i -X POST localhost:3000/events -d 'ALERT: smoke'` answers `204` (the
+`x-furnace-nerve` header says what happened), and the webhook effector posts `{"text": "ALERT: smoke"}` to
+whatever listens on port 9000 (retrying, then giving up, when nothing does).
+
+The other common shape sends what comes in to the brain, which decides what to do (feature
+`llm`):
 
 ```rust
-let mut b = Fabric::builder();
-let events = b.receptor(Http::new("events", "/events").text());
-// Any LlmEngine (a Scheduled Burn model, the candle adapter, a mock). Its answer is parsed as
-// commands: {"effector": "...", "args": {...}}, arrays of them, or tool calls.
-let brain = b.neuron(Llm::new("brain", engine));
-b.deliberative(events, brain);
-b.effector(Webhook::new("page", "http://127.0.0.1:9000/page")?);
-b.effector(FileAppend::new("log", "journal.log"));
-Server::new().port(3000).nerve(b).serve().await?;
+use furnace::Server;
+use furnace::llm::mock::MockEngine;
+use furnace::nerve::prelude::*;
+
+#[tokio::main]
+async fn main() -> furnace::Result<()> {
+    tracing_subscriber::fmt::init();
+    // Any LlmEngine: `Scheduled` over your Burn model, furnace-candle's `Gguf`, or this mock,
+    // which always answers the same. The answer is parsed as commands:
+    // {"effector": "...", "args": {...}}, arrays of them, or tool calls.
+    let engine = MockEngine::new("mock", &[r#"{"effector": "log", "args": {"line": "seen"}}"#]);
+
+    let mut b = Fabric::builder();
+    let events = b.receptor(Http::new("events", "/events").text());
+    let brain = b.neuron(Llm::new("brain", engine));
+    b.deliberative(events, brain);
+    b.effector(Webhook::new("page", "http://127.0.0.1:9000/page")?);
+    b.effector(FileAppend::new("log", "journal.log"));
+    Server::new().port(3000).nerve(b).serve().await
+}
 ```
 
 What the builder does for you:
@@ -161,53 +187,65 @@ brain's pathway:
 
 ```rust
 use std::time::Duration;
-use furnace::nerve::prelude::*;
+
 use furnace::Server;
+use furnace::llm::mock::MockEngine;
+use furnace::nerve::prelude::*;
 use serde_json::json;
 
-let mut b = Fabric::builder();
+#[tokio::main]
+async fn main() -> furnace::Result<()> {
+    tracing_subscriber::fmt::init();
+    // The brain: a mock that takes 100 ms and always asks for the same two commands. Put a
+    // real LlmEngine here.
+    let answer = r#"[{"effector": "webhook", "args": {"action": "investigate"}},
+                     {"effector": "log", "args": {"line": "brain: looked"}}]"#;
+    let engine = MockEngine::new("mock", &[answer]).first_delay(Duration::from_millis(100));
 
-// A receptor: POST /events. The feature is a 64-bit sketch of the body; repeats habituate
-// here and never reach anything.
-let events = b.receptor(Http::new("events", "/events").text());
-b.gate(
-    events,
-    Mechanisms::NONE.threshold(0.6).habituation(Habituation::new(Duration::from_secs(30))),
-);
+    let mut b = Fabric::builder();
 
-// A reflex: in process, no blocking. Alerts become commands with a 2 ms deadline, which the
-// brain's pathway (hundreds of milliseconds) can never meet; the rest pass on.
-let triage = b.neuron(FnNeuron::reflex("triage", |signal, _| {
-    if signal.payload.as_text().is_some_and(|t| t.contains("ALERT")) {
-        vec![
-            signal
-                .command("alarm", json!({"text": signal.payload.as_text()}))
-                .with_urgency(Urgency::within(Duration::from_millis(2))),
-            signal.command("respond", json!({"status": 200, "body": "alarm"})),
-        ]
-    } else {
-        vec![signal]
-    }
-}));
-let brain = b.neuron(Llm::new("brain", engine));
+    // A receptor: POST /events. The feature is a 64-bit sketch of the body; repeats habituate
+    // here and never reach anything.
+    let events = b.receptor(Http::new("events", "/events").text());
+    b.gate(
+        events,
+        Mechanisms::NONE.threshold(0.6).habituation(Habituation::new(Duration::from_secs(30))),
+    );
 
-// Effectors, by name, each with its local loop
-let alarm = b.effector(
-    Effector::new(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")?)
-        .refractory(Duration::from_millis(100)),
-);
-b.effector(Webhook::new("webhook", "http://127.0.0.1:9000/hook")?);
-b.effector(FileAppend::new("log", "journal.log"));
-b.effector(Respond::new("respond"));
+    // A reflex: in process, no blocking. Alerts become commands with a 2 ms deadline, which
+    // the brain's pathway (hundreds of milliseconds) can never meet; the rest pass on.
+    let triage = b.neuron(FnNeuron::reflex("triage", |signal, _| {
+        if signal.payload.as_text().is_some_and(|t| t.contains("ALERT")) {
+            vec![
+                signal
+                    .command("alarm", json!({"text": signal.payload.as_text()}))
+                    .with_urgency(Urgency::within(Duration::from_millis(2))),
+                signal.command("respond", json!({"status": 200, "body": "alarm"})),
+            ]
+        } else {
+            vec![signal]
+        }
+    }));
+    let brain = b.neuron(Llm::new("brain", engine));
 
-// Pathways: the brain's weighs more, so it wins whenever the deadline allows it. The reflex
-// pathway to the alarm is optional (the command would find it); declared, it has its own
-// measured latency in `GET /nerve`.
-b.reflex(events, triage);
-b.reflex(triage, alarm);
-b.deliberative(triage, brain);
+    // Effectors, by name, each with its local loop
+    let alarm = b.effector(
+        Effector::new(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")?)
+            .refractory(Duration::from_millis(100)),
+    );
+    b.effector(Webhook::new("webhook", "http://127.0.0.1:9000/hook")?);
+    b.effector(FileAppend::new("log", "journal.log"));
+    b.effector(Respond::new("respond"));
 
-Server::new().port(3000).nerve(b).serve().await?;
+    // Pathways: the brain's weighs more, so it wins whenever the deadline allows it. The
+    // reflex pathway to the alarm is optional (the command would find it); declared, it has
+    // its own measured latency in `GET /nerve`.
+    b.reflex(events, triage);
+    b.reflex(triage, alarm);
+    b.deliberative(triage, brain);
+
+    Server::new().port(3000).nerve(b).serve().await
+}
 ```
 
 `Server::nerve` takes the builder, adds the server's models and LLMs to it (see below), mounts the HTTP receptors as routes, starts the other receptors, serves
@@ -320,23 +358,29 @@ that prints the commands it gets, the server with the fabric above (plus an in-p
 of 28×28 frames through a small Burn classifier whose verdict is the frame's brightness), and
 a demo stream: 200 text events and 200 frames, half of them repeats, 5% urgent. Repeated
 events die at the receptor; urgent ones reach the alarm webhook over the reflex arc in a few
-microseconds; novel ones go to a mock brain that takes 100 ms to answer with three commands.
-The summary comes from `/metrics`:
+microseconds; novel ones go to a mock brain that takes 100 ms to answer with three commands
+(to the `webhook`, `command` and `log` effectors).
 
-```text
-signals received 400, reached the brain 190: brain fraction 0.475
-events            receptor  fired 105  quiet: habituation 95
-frames            receptor  fired 105  quiet: habituation 95
-...
-pathway triage -> alarm (reflex): 10 signals, p50 13.9 µs, p99 23.1 µs
-pathway triage -> brain (deliberative): 95 signals, p50 779387.4 µs, p99 1314082.6 µs
-reflex arc events -> alarm: stimulus to effector call p50 3.2 µs, p99 3.3 µs (10 times)
-```
+What it prints, in order (the counts depend on timing, so none are given here):
 
-The deliberative pathway's seconds are the queue: 190 novel signals at a few hundred per
-second against a brain that answers 16 at a time every 100 ms. That is the point of the
-numbers: the brain is the bottleneck, and the fabric keeps everything else away from it.
-`--serve` keeps the server up to poke at with `curl` (`POST /events`, `GET /nerve`).
+- `furnace nerve demo: server on :3000, webhook receiver on :3001`
+- a `[webhook] ...` line for every call the receiver gets: the alarms, and the brain's
+  `{"action": "investigate"}`
+- `Text events by status (204 quiet or reflex, 202 to the brain): {...}`, the status codes of
+  the 200 `POST /events` requests
+- `Frames: N quiet at the receptor, N to the brain (... ms for all)`
+- once the brain's queue has drained, a summary from `/metrics`:
+  `Signals received N, reached the brain N: brain fraction 0.xx`, then one line per neuron
+  (receptors, reflexes, the brain, the effectors) with its kind, how many times it fired and
+  how many signals died of habituation there
+- `Pathway and reflex-arc latencies: GET /nerve`, and the line count of the journal file the
+  `log` effector wrote (in the system's temporary directory)
+
+About half of the signals reach the brain: the repeats are quiet at the receptors and the
+urgent ones go to the alarm instead. The brain answers 16 at a time every 100 ms, so its queue
+is what takes the time: the brain is the bottleneck, and the fabric keeps everything else away
+from it. `GET /nerve` has the measured latencies of each pathway and reflex arc. `--serve`
+keeps the server up to poke at with `curl` (`POST /events`, `GET /nerve`).
 
 ## Measured
 
