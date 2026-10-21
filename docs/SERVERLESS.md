@@ -57,10 +57,10 @@ Cloud Run starts instances on demand and scales to zero by default. It pulls ima
 Artifact Registry, so copy the image there first:
 
 ```bash
-docker pull ghcr.io/gilfeather/furnace:0.11.0
-docker tag ghcr.io/gilfeather/furnace:0.11.0 REGION-docker.pkg.dev/PROJECT/REPO/furnace:0.11.0
-docker push REGION-docker.pkg.dev/PROJECT/REPO/furnace:0.11.0
-gcloud run deploy furnace --image REGION-docker.pkg.dev/PROJECT/REPO/furnace:0.11.0 \
+docker pull ghcr.io/gilfeather/furnace:0.12.0
+docker tag ghcr.io/gilfeather/furnace:0.12.0 REGION-docker.pkg.dev/PROJECT/REPO/furnace:0.12.0
+docker push REGION-docker.pkg.dev/PROJECT/REPO/furnace:0.12.0
+gcloud run deploy furnace --image REGION-docker.pkg.dev/PROJECT/REPO/furnace:0.12.0 \
   --port 3000 --cpu 2 --memory 512Mi --min-instances 0
 ```
 
@@ -69,7 +69,7 @@ gcloud run deploy furnace --image REGION-docker.pkg.dev/PROJECT/REPO/furnace:0.1
 ```toml
 # fly.toml
 [build]
-  image = "ghcr.io/gilfeather/furnace:0.11.0"
+  image = "ghcr.io/gilfeather/furnace:0.12.0"
 
 [http_service]
   internal_port = 3000

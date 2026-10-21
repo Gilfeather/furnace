@@ -3,7 +3,7 @@
 # library is still called `furnace`. Burn models are served through furnace-burn, the `furnace`
 # command is furnace-cli.
 name = "furnace-server"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Furnace Contributors"]

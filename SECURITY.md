@@ -29,5 +29,5 @@ older minor versions before 1.0.
 
 ```bash
 gh attestation verify furnace-linux-x86_64 --repo Gilfeather/furnace
-gh attestation verify oci://ghcr.io/gilfeather/furnace:0.11.0 --repo Gilfeather/furnace
+gh attestation verify oci://ghcr.io/gilfeather/furnace:0.12.0 --repo Gilfeather/furnace
 ```

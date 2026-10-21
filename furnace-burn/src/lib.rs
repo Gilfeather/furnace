@@ -9,8 +9,8 @@
 //!
 //! ```toml
 //! [dependencies]
-//! furnace = { package = "furnace-server", version = "0.11" }
-//! furnace-burn = "0.11"
+//! furnace = { package = "furnace-server", version = "0.12" }
+//! furnace-burn = "0.12"
 //! ```
 //!
 //! # Serving a Burn model

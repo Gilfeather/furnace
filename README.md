@@ -66,16 +66,16 @@ impl Net {
 
 ```toml
 [dependencies]
-furnace-server = { version = "0.11", default-features = false }
-furnace-burn = "0.11"
+furnace-server = "0.12"
+furnace-burn = "0.12"
 burn = "0.22"
 axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 tracing-subscriber = "0.3"
 ```
 
-The snippets in this README follow `main`. furnace-burn is not on crates.io yet, so depend on
-the repository until it is:
+The snippets in this README follow `main`, which is released as 0.12. Until 0.12 is on
+crates.io, take both crates from the repository, so they are the same `furnace-server`:
 `furnace-server = { git = "https://github.com/Gilfeather/furnace" }` and
 `furnace-burn = { git = "https://github.com/Gilfeather/furnace" }`.
 
@@ -171,13 +171,13 @@ scaling to zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
 ## Your own Burn models
 
 Add furnace-server and furnace-burn next to Burn; furnace-burn's ONNX import (feature `onnx`)
-is not needed for this (until furnace-burn is on crates.io, use the `git` lines
+is not needed for this (until 0.12 is on crates.io, use the `git` lines
 [above](#embed-it-in-your-axum-app)):
 
 ```toml
 [dependencies]
-furnace-server = { version = "0.11", default-features = false }
-furnace-burn = "0.11"
+furnace-server = "0.12"
+furnace-burn = "0.12"
 burn = "0.22"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = "0.3"
@@ -295,7 +295,7 @@ async fn main() -> furnace::Result<()> {
 
 ```toml
 [dependencies]
-furnace-server = { version = "0.11", default-features = false, features = ["llm"] }
+furnace-server = { version = "0.12", features = ["llm"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde_json = "1"
 tracing-subscriber = "0.3"
@@ -313,13 +313,13 @@ the fabric, and the measurements.
   Windows come with `resnet18.bpk` on the [releases page](https://github.com/Gilfeather/furnace/releases).
   Put both in one directory and run `./furnace --model-name resnet18`. With
   [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), `cargo binstall furnace-cli`
-  fetches the binary for your platform once furnace-cli is on crates.io, and on macOS or Linux
+  fetches the binary for your platform, and on macOS or Linux
   `brew install gilfeather/tap/furnace` installs it with the ResNet-18 weights. Each release
   carries checksums, an SBOM and build provenance you can verify ([SECURITY.md](SECURITY.md)).
 - **Docker**: `ghcr.io/gilfeather/furnace`, for x86_64 and ARM64 ([below](#docker)).
 - **Kubernetes**: a Helm chart and a KServe serving runtime in [`deploy/`](deploy/README.md).
-- **crates.io** (package `furnace-cli`, command `furnace`; not published yet). ONNX models are
-  compiled in, so point the build at your `.onnx` files:
+- **crates.io** (package `furnace-cli`, command `furnace`). ONNX models are compiled in, so
+  point the build at your `.onnx` files:
 
   ```bash
   FURNACE_MODELS_DIR=/path/to/models cargo install furnace-cli

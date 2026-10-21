@@ -2682,7 +2682,7 @@ dependencies = [
 
 [[package]]
 name = "furnace-burn"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "burn",
  "burn-store",
@@ -2713,7 +2713,7 @@ dependencies = [
 
 [[package]]
 name = "furnace-server"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "axum",
  "bytes",
