@@ -297,18 +297,30 @@ impl Payload {
             Self::Text(s) => Bytes::copy_from_slice(s.as_bytes()),
             Self::Json(v) => Bytes::from(v.to_string()),
             Self::Command(c) => Bytes::from(serde_json::to_vec(&**c).unwrap_or_default()),
-            Self::Tensors(t) => Bytes::from(
-                t.iter()
-                    .flat_map(|t| match &t.values {
+            Self::Tensors(t) => {
+                // One buffer for every tensor, sized up front
+                let size = t
+                    .iter()
+                    .map(|t| match &t.values {
+                        crate::tensor::Values::F32(v) => size_of_val(v.as_slice()),
+                        crate::tensor::Values::I64(v) => size_of_val(v.as_slice()),
+                    })
+                    .sum();
+                let mut bytes = Vec::with_capacity(size);
+                for t in t.iter() {
+                    match &t.values {
                         crate::tensor::Values::F32(v) => {
-                            v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>()
+                            v.iter()
+                                .for_each(|x| bytes.extend_from_slice(&x.to_le_bytes()));
                         }
                         crate::tensor::Values::I64(v) => {
-                            v.iter().flat_map(|x| x.to_le_bytes()).collect()
+                            v.iter()
+                                .for_each(|x| bytes.extend_from_slice(&x.to_le_bytes()));
                         }
-                    })
-                    .collect::<Vec<u8>>(),
-            ),
+                    }
+                }
+                Bytes::from(bytes)
+            }
             #[cfg(feature = "llm")]
             Self::Prompt(_) => Bytes::new(),
         }
@@ -570,10 +582,15 @@ pub struct Signal {
 impl Signal {
     /// A signal of full intensity and no urgency, seen now
     pub fn new(feature: Feature, payload: Payload) -> Self {
+        Self::seen_at(feature, payload, Instant::now())
+    }
+
+    /// [`Signal::new`], seen `at`
+    pub(crate) fn seen_at(feature: Feature, payload: Payload, at: Instant) -> Self {
         Self {
             id: SignalId::next(),
             origin: NeuronId::NONE,
-            at: Instant::now(),
+            at,
             urgency: Urgency::NONE,
             feature,
             intensity: 1.0,

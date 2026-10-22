@@ -41,13 +41,24 @@ impl Act for SseOut {
     }
 
     fn act(&self, command: &Command, signal: &Signal) -> Action {
-        let event = serde_json::json!({
-            "signal": signal.id.0,
-            "effector": command.effector,
-            "args": command.args,
-        });
         // No receivers is not a failure: nobody is listening right now
-        let _ = self.sender.send(Bytes::from(event.to_string()));
+        if self.sender.receiver_count() == 0 {
+            return Action::ok();
+        }
+        // Borrowed, the keys in the sorted order a `serde_json::Value` writes them in
+        #[derive(serde::Serialize)]
+        struct Event<'a> {
+            args: &'a serde_json::Value,
+            effector: &'a str,
+            signal: u64,
+        }
+        let event = Event {
+            args: &command.args,
+            effector: &command.effector,
+            signal: signal.id.0,
+        };
+        let event = serde_json::to_vec(&event).expect("a command serializes");
+        let _ = self.sender.send(Bytes::from(event));
         Action::ok()
     }
 

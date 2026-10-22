@@ -22,7 +22,7 @@ use tracing::error;
 
 use super::effector::Respond;
 use super::fabric::{Announced, Fabric, FabricBuilder, Outcome, Summation};
-use super::latency::LatencyEstimate;
+use super::latency::Latency;
 use super::neuron::{Cx, Firing, Neuron, NeuronKind};
 use super::signal::{Answer, Feature, NeuronId, PathwayId, Payload, ReplyHandle, Signal};
 use crate::batching::BatchConfig;
@@ -71,7 +71,7 @@ impl Neuron for Entrance {
 struct Served {
     name: String,
     source: ModelSource,
-    latency: LatencyEstimate,
+    latency: Latency,
 }
 
 impl Served {
@@ -260,7 +260,7 @@ impl Serving {
             let served = builder.neuron(Served {
                 name: model_name(&model.name),
                 source: model.source,
-                latency: LatencyEstimate::new(),
+                latency: Latency::new(),
             });
             let deliberative = batching.enabled() && model.batches;
             let pathway = builder.next_pathway();

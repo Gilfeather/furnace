@@ -441,6 +441,7 @@ impl Client {
         headers: &[(&str, &str)],
         body: &[u8],
     ) -> Result<Streaming> {
+        use std::fmt::Write as _;
         let mut head = format!(
             "{method} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: furnace-nerve\r\n",
             url.path,
@@ -453,8 +454,10 @@ impl Client {
             head.push_str("\r\n");
         }
         if !body.is_empty() || method == "POST" || method == "PUT" {
-            head.push_str(&format!("Content-Length: {}\r\n", body.len()));
+            let _ = write!(head, "Content-Length: {}\r\n", body.len());
         }
+        // Room for the body too, so it is appended without growing the buffer again
+        head.reserve_exact(2 + body.len());
         head.push_str("\r\n");
         let mut request = head.into_bytes();
         request.extend_from_slice(body);
