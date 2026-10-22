@@ -116,7 +116,7 @@ impl Act for Process {
                 child.wait_with_output().await
             };
             match tokio::time::timeout(timeout, run).await {
-                Ok(Ok(output)) if output.status.success() => Ok(()),
+                Ok(Ok(output)) if output.status.success() => Ok(serde_json::Value::Null),
                 Ok(Ok(output)) => Err(ActError::fatal(format!(
                     "{program} exited with {}: {}",
                     output.status,
@@ -167,7 +167,7 @@ mod tests {
     }
 
     /// Run `process` once for `command` and `signal`, as the effector's loop would
-    async fn run(process: &Process, command: &Command, signal: &Signal) -> Result<(), ActError> {
+    async fn run(process: &Process, command: &Command, signal: &Signal) -> super::super::ActResult {
         match process.act(command, signal) {
             Action::Done(result) => result,
             Action::Pending(future) => future.await,
@@ -190,14 +190,20 @@ mod tests {
             )
         };
         let plain = Command::new("check", serde_json::Value::Null);
-        assert_eq!(run(&process, &plain, &signal("hello\n")).await, Ok(()));
+        assert_eq!(
+            run(&process, &plain, &signal("hello\n")).await,
+            Ok(serde_json::Value::Null)
+        );
         let err = run(&process, &plain, &signal("goodbye\n"))
             .await
             .unwrap_err();
         assert!(!err.retryable(), "{err}");
         // A command that gives its own stdin is fed that, not the payload
         let own = Command::new("check", serde_json::json!({"stdin": "hello\n"}));
-        assert_eq!(run(&process, &own, &signal("goodbye\n")).await, Ok(()));
+        assert_eq!(
+            run(&process, &own, &signal("goodbye\n")).await,
+            Ok(serde_json::Value::Null)
+        );
         // Without stdin_payload the process gets no input
         let plain_process = if cfg!(windows) {
             Process::new("check", "findstr").args(&["hello"])

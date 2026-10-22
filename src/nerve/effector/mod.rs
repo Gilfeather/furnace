@@ -15,6 +15,10 @@
 //! Effectors are addressed by name: a command `{ "effector": "alarm", "args": {...} }`
 //! reaches the effector registered as `alarm`. A plain (non-command) signal that reaches an
 //! effector acts with the signal's payload as its arguments.
+//!
+//! When a motor neuron's program sent the command, the outcome goes back to it: the value
+//! the act returned (what a device measured, a service's JSON answer), or why it failed for
+//! good. A program that stops waiting stops the retries too.
 
 mod channel;
 mod file_append;
@@ -35,6 +39,7 @@ use bytes::Bytes;
 use serde::Serialize;
 
 use super::latency::Latency;
+use super::motor::MotionError;
 use super::neuron::{Cx, Firing, Neuron, NeuronKind};
 use super::signal::{Command, Signal};
 use kuebiko::{render_family, render_labelled};
@@ -98,26 +103,35 @@ impl ActError {
     }
 }
 
+/// What an act did: a value it measured or was answered (`Value::Null` for nothing to
+/// say), which goes back to the motor program that sent the command, or why it failed
+pub type ActResult = Result<serde_json::Value, ActError>;
+
 /// An act still in progress on the motor side's runtime
-pub type ActFuture = Pin<Box<dyn Future<Output = Result<(), ActError>> + Send + 'static>>;
+pub type ActFuture = Pin<Box<dyn Future<Output = ActResult> + Send + 'static>>;
 
 /// What an act returns: done at once (an answer, a channel send, a file write) or still
 /// going on the motor side's runtime (a socket, a process)
 pub enum Action {
     /// Finished, with its outcome
-    Done(Result<(), ActError>),
+    Done(ActResult),
     /// Still going; the effector awaits it on the motor side
     Pending(ActFuture),
 }
 
 impl Action {
-    /// Done, successfully
+    /// Done, successfully, with nothing to say
     pub fn ok() -> Self {
-        Self::Done(Ok(()))
+        Self::Done(Ok(serde_json::Value::Null))
+    }
+
+    /// Done, successfully: `value` is what was measured or answered
+    pub fn value(value: serde_json::Value) -> Self {
+        Self::Done(Ok(value))
     }
 
     /// Still going: `future` finishes the act
-    pub fn pending(future: impl Future<Output = Result<(), ActError>> + Send + 'static) -> Self {
+    pub fn pending(future: impl Future<Output = ActResult> + Send + 'static) -> Self {
         Self::Pending(Box::pin(future))
     }
 }
@@ -348,7 +362,13 @@ impl Neuron for Effector {
         let inner = &self.inner;
         let delay = match inner.admit(cx.now) {
             Admission::After(delay) => delay,
-            Admission::Refractory | Admission::Open | Admission::RateLimited => {
+            refused => {
+                let why = match refused {
+                    Admission::Refractory => "refractory",
+                    Admission::Open => "its circuit is open",
+                    Admission::After(_) | Admission::RateLimited => "rate limited",
+                };
+                signal.report(Err(MotionError::failed(format!("{}: {why}", self.name()))));
                 return Firing::Quiet;
             }
         };
@@ -379,13 +399,20 @@ impl Neuron for Effector {
             return Firing::Fire(Vec::new());
         }
         match inner.act.act(&command, &signal) {
-            Action::Done(Ok(())) => inner.succeeded(started),
+            Action::Done(Ok(value)) => {
+                inner.succeeded(started);
+                signal.report(Ok(value));
+            }
             Action::Done(Err(error)) => {
                 if error.retryable() && inner.retry.attempts > 1 {
                     inner.counters.retries.fetch_add(1, Ordering::Relaxed);
                     spawn(None, 1, inner.backoff(1));
                 } else {
                     inner.failed(&error);
+                    signal.report(Err(MotionError::failed(format!(
+                        "{}: {error}",
+                        self.name()
+                    ))));
                 }
             }
             Action::Pending(future) => spawn(Some(future), 0, Duration::ZERO),

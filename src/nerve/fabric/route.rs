@@ -7,6 +7,7 @@ use tracing::{debug, warn};
 
 use super::{Cell, Fabric, MAX_HOPS, Outcome, Pathway};
 use crate::nerve::latency::Latency;
+use crate::nerve::motor::MotionError;
 use crate::nerve::neuron::{Cx, Firing, NeuronKind, Quiet};
 use crate::nerve::signal::{NeuronId, PathwayId, Signal};
 
@@ -64,6 +65,11 @@ impl Fabric {
         cell.counters.received.fetch_add(1, Ordering::Relaxed);
         if let Err(reason) = cell.gate.admit(&mut signal, nanos) {
             cell.counters.quiet(reason);
+            signal.report(Err(MotionError::failed(format!(
+                "quiet at '{}': {}",
+                cell.neuron.name(),
+                reason.as_str()
+            ))));
             return Outcome {
                 quiet: Some((id, reason)),
                 hops: depth,
@@ -71,12 +77,14 @@ impl Fabric {
             };
         }
         signal.trace.push(id);
+        cell.taps.copy(&signal);
         let mut acted = 0;
         match cell.kind {
             NeuronKind::Brain => {
                 signal.trace.mark_brain();
                 self.0.reached_brain.fetch_add(1, Ordering::Relaxed);
             }
+            NeuronKind::Motor => acted = 1,
             NeuronKind::Effector => {
                 acted = 1;
                 if !signal.trace.was_queued()
@@ -137,6 +145,12 @@ impl Fabric {
         outcome
     }
 
+    /// Fire `signal` from `from` as if `from` had fired it: a motor program's commands,
+    /// questions and reports leave its motor neuron this way
+    pub(crate) fn emit(&self, from: NeuronId, signal: Signal) -> Outcome {
+        self.route(from, signal, 1, &mut None)
+    }
+
     /// Send a signal `from` fired along the pathway its timing selects
     fn route(
         &self,
@@ -153,14 +167,27 @@ impl Fabric {
                 "nerve: signal {} dropped after {MAX_HOPS} hops (a loop?)",
                 signal.id.0
             );
+            signal.report(Err(MotionError::failed(format!(
+                "dropped after {MAX_HOPS} hops (a loop?)"
+            ))));
+            return Outcome::default();
+        }
+        // What a neuron fires in answer to a motor neuron's question goes back to it
+        if signal.answers_from(from) {
             return Outcome::default();
         }
         let now = Instant::now();
         let cell = &self.0.cells[from.index()];
         let selected = match signal.payload.as_command() {
-            // A command names its effector; the pathway to it is the one (declared or not)
+            // A command names its effector or motor neuron; the pathway to it is the one
+            // (declared or not)
             Some(command) => match self.0.by_name.get(&command.effector) {
-                Some(&target) if self.0.cells[target.index()].kind == NeuronKind::Effector => {
+                Some(&target)
+                    if matches!(
+                        self.0.cells[target.index()].kind,
+                        NeuronKind::Effector | NeuronKind::Motor
+                    ) =>
+                {
                     match cell
                         .out
                         .iter()
@@ -177,10 +204,11 @@ impl Fabric {
                 _ => {
                     self.0.unrouted.fetch_add(1, Ordering::Relaxed);
                     debug!(
-                        "nerve: no effector named '{}' for a command from {}",
+                        "nerve: no effector or motor neuron named '{}' for a command from {}",
                         command.effector,
                         cell.neuron.name()
                     );
+                    signal.report(Err(MotionError::Unrouted(command.effector.clone())));
                     return Outcome {
                         unrouted: 1,
                         ..Outcome::default()
@@ -224,8 +252,9 @@ impl Fabric {
                         ..Outcome::default()
                     },
                     // Full: dropped rather than queued without bound
-                    Err(_) => {
+                    Err(signal) => {
                         pathway.overflow.fetch_add(1, Ordering::Relaxed);
+                        signal.report(Err(MotionError::failed("the pathway's queue is full")));
                         Outcome {
                             dropped: 1,
                             ..Outcome::default()

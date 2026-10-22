@@ -91,7 +91,10 @@ impl Act for Webhook {
                 .request("POST", &shared.url, &headers, &body)
                 .await
             {
-                Ok(response) if (200..300).contains(&response.status) => Ok(()),
+                // A JSON answer is what the act returns, to the motor program that sent it
+                Ok(response) if (200..300).contains(&response.status) => {
+                    Ok(serde_json::from_slice(&response.body).unwrap_or_default())
+                }
                 Ok(response) => Err(ActError::Status(response.status)),
                 Err(wire::Error::Timeout(what)) => {
                     Err(ActError::Timeout(format!("{what} to {}", shared.url.host)))
