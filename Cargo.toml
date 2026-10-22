@@ -3,7 +3,7 @@
 # library is still called `furnace`. Burn models are served through furnace-burn, the `furnace`
 # command is furnace-cli.
 name = "furnace-server"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Furnace Contributors"]
@@ -78,8 +78,8 @@ test-models = []
 
 [dependencies]
 # furnace's own parts, crates of their own with no dependencies
-amate = { path = "amate", version = "0.13.0" }
-kuebiko = { path = "kuebiko", version = "0.13.0", features = ["serde"] }
+amate = { path = "amate", version = "0.14.0" }
+kuebiko = { path = "kuebiko", version = "0.14.0", features = ["serde"] }
 
 bytes = "1.9"
 
@@ -108,7 +108,7 @@ tokio-stream = { version = "0.1", optional = true }
 # crypto provider of RustCrypto primitives
 rustls = { version = "0.23.46", default-features = false, features = ["std", "logging"], optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging"], optional = true }
-rustls-pure = { path = "rustls-pure", version = "0.13.0", optional = true }
+rustls-pure = { path = "rustls-pure", version = "0.14.0", optional = true }
 # LLM serving (feature `llm`). tokenizers without its defaults: they build Oniguruma (C) and
 # esaxx (C++); fancy-regex is the pure-Rust regex engine. minijinja without `stacker` (cc).
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"], optional = true }
