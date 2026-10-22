@@ -116,11 +116,13 @@ jobs:
       with:
         toolchain: stable
 
-    # macOS's own openssl is LibreSSL; the test wants OpenSSL 3 (and GnuTLS) from Homebrew
-    - name: Install OpenSSL 3 and GnuTLS
+    # macOS's own openssl and curl are on LibreSSL, and that curl cannot be asked for TLS 1.3;
+    # the test takes OpenSSL 3, GnuTLS and curl (on OpenSSL) from Homebrew
+    - name: Install OpenSSL 3, GnuTLS and curl
       run: |
-        brew install openssl@3 gnutls
+        brew install openssl@3 gnutls curl
         echo "OPENSSL=$(brew --prefix openssl@3)/bin/openssl" >> "$GITHUB_ENV"
+        echo "$(brew --prefix curl)/bin" >> "$GITHUB_PATH"
 
     - name: Interoperability tests
       env:
