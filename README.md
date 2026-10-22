@@ -10,6 +10,19 @@ router you mount in your own Rust service or as a standalone server. The server 
 (`furnace-server`) runs no model and depends on no ML framework; Burn models come in through
 [`furnace-burn`](furnace-burn), and any other engine through the `TensorModel` trait.
 
+**Try it in a minute**: [the nervous system](#the-nervous-system) in your terminal, with a mock
+LLM as the brain, no model file and no port:
+
+```bash
+cargo install --locked --git https://github.com/Gilfeather/furnace furnace-demo && furnace-demo
+```
+
+Every signal shows where it went, why, and how long until the actuator acted: a reflex in
+microseconds, the mock brain in a couple of hundred milliseconds, repeats quiet at the
+receptor. Releases after 0.13 also publish it as
+`docker run --rm -t ghcr.io/gilfeather/furnace-demo`. Before you depend on Furnace, read
+[what it cannot do yet](#limits-and-what-is-not-done-yet) and the [FAQ](docs/FAQ.md).
+
 ## Embed it in your Axum app
 
 Your app keeps its own routes for pre- and post-processing, the database and the rest of your
@@ -307,9 +320,38 @@ serde_json = "1"
 tracing-subscriber = "0.3"
 ```
 
-[docs/NERVE.md](docs/NERVE.md) has the concepts, the API, the demo
-(`cargo run --release --example nerve`), how the server's own routes run on
-the fabric, and the measurements.
+[docs/NERVE.md](docs/NERVE.md) has the concepts, the API, the demos
+([`furnace-demo`](furnace-demo/src/main.rs) and the full
+`cargo run --release -p furnace-burn --example nerve`), how the server's own routes run on the
+fabric, and the measurements.
+
+## Limits, and what is not done yet
+
+- **The API changes before 1.0.** Any 0.x release may break it, with a migration note in the
+  [CHANGELOG](CHANGELOG.md) and no deprecated aliases kept around.
+  [docs/ROADMAP-1.0.md](docs/ROADMAP-1.0.md) says what will be frozen and what must happen
+  first.
+- **One author.** Furnace is written and maintained by one person, with what that means for
+  reviews, response times and the bus factor.
+- **No long production record.** CI runs unit, integration and KServe end-to-end tests, but
+  nobody has reported running Furnace in production for months yet ([ADOPTERS.md](ADOPTERS.md)
+  is empty).
+- **The TLS cryptography has not been audited.** To stay pure Rust, the `tls` feature uses a
+  small rustls crypto provider of Furnace's own ([src/tls/provider.rs](src/tls/provider.rs))
+  on RustCrypto primitives, not ring or aws-lc-rs. Nobody outside has reviewed that glue;
+  mechanical checks against published test vectors are under way. If you need audited TLS
+  today, terminate TLS in a proxy in front of Furnace.
+- **Almost no GPU numbers.** Burn's wgpu, Metal and CUDA backends build through furnace-burn,
+  but every published measurement is on CPU, apart from one old, untuned wgpu run on an
+  integrated GPU ([docs/PERFORMANCE.md](docs/PERFORMANCE.md)).
+- **Junctions on other machines are wired by hand.** A fabric lives in one process. To reach a
+  junction on another machine, connect fabrics with a `Webhook` effector on one side and an
+  `Http` receptor on the other (or SSE out and in); the network hop is then an effector, not a
+  pathway, so its latency does not take part in choosing between reflex and brain.
+- **Outbound webhooks speak plain `http://`**; HTTPS webhooks are not supported yet.
+
+[docs/FAQ.md](docs/FAQ.md) answers how Furnace differs from a cache, Ray Serve, Triton,
+BentoML, actors and message queues, whether it needs an LLM, and why pure Rust.
 
 ## Install
 
@@ -514,7 +556,8 @@ root, no ML framework), [`furnace-burn`](furnace-burn) (Burn models, the ONNX im
 on their own: [`amate`](amate) (dynamic batching),
 [`kuebiko`](kuebiko) (latency histograms, Prometheus text) and
 [`kamui`](kamui) (the allocator that reuses large blocks).
-[`furnace-candle`](furnace-candle) is built only with `-p furnace-candle`. Debug builds optimize the dependencies, so `cargo test` needs no
+[`furnace-candle`](furnace-candle) is built only with `-p furnace-candle`, and
+[`furnace-demo`](furnace-demo) only with `-p furnace-demo`. Debug builds optimize the dependencies, so `cargo test` needs no
 `--release` and rebuilds in seconds after a change. Generated model code is in
 `target/*/build/furnace-burn-*/out/models/`. Furnace ships a patched copy of Burn's CPU backend
 in `furnace-burn/vendor/burn-flex` with faster convolutions; see

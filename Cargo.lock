@@ -3366,6 +3366,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "furnace-demo"
+version = "0.13.0"
+dependencies = [
+ "furnace-server",
+ "serde_json",
+]
+
+[[package]]
 name = "furnace-server"
 version = "0.13.0"
 dependencies = [

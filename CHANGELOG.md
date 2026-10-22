@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `furnace-demo`: the nervous system in one process, in the terminal, with a mock LLM as the
+  brain and no model file or port. `cargo install --locked --git
+  https://github.com/Gilfeather/furnace furnace-demo`; releases publish it as the image
+  `ghcr.io/<owner>/furnace-demo`.
+- The README lists what Furnace cannot do yet; docs/FAQ.md answers how it differs from a
+  cache, Ray Serve, Triton, BentoML, actors and message queues; docs/ROADMAP-1.0.md says what
+  1.0 will freeze and what must happen first.
+
 ## [0.13.0] - 2026-10-21
 
 furnace-server depends on fewer crates (45 instead of 63 with no features), and three of its
