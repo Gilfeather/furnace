@@ -74,7 +74,7 @@ pub trait Batching: Send + Sync + 'static {
     }
 
     /// How long after the first item was queued a worker may wait for more; asked when a
-    /// batch starts, so it may be learned
+    /// worker collecting a batch would wait, so it may be learned
     fn window(&self) -> Duration;
 
     /// Run a batch; its results are the implementor's to deliver
@@ -135,14 +135,22 @@ impl<I> Sender<I> {
 /// Handle to the workers; they stop when it is dropped
 pub struct Engine<I> {
     sender: Sender<I>,
-    /// Items announced and not yet received by a worker
-    arriving: Arc<AtomicUsize>,
-    /// Items queued and not yet received by a worker
-    waiting: Arc<AtomicUsize>,
+    counts: Arc<Counts>,
     /// [`Config::capacity`], at least 1
     capacity: Option<usize>,
+}
+
+/// What the engine and its workers count together
+#[derive(Default)]
+struct Counts {
+    /// Items announced and not yet received by a worker
+    arriving: AtomicUsize,
+    /// Items queued and not yet received by a worker
+    waiting: AtomicUsize,
+    /// Workers running a batch
+    busy: AtomicUsize,
     /// A [`Message::Wake`] is queued and no worker has received it yet
-    wake_queued: Arc<AtomicBool>,
+    wake_queued: AtomicBool,
 }
 
 impl<I: Send + 'static> Engine<I> {
@@ -174,19 +182,13 @@ impl<I: Send + 'static> Engine<I> {
             receiver,
             carry: None,
         }));
-        let arriving = Arc::new(AtomicUsize::new(0));
-        let waiting = Arc::new(AtomicUsize::new(0));
-        let busy = Arc::new(AtomicUsize::new(0));
-        let wake_queued = Arc::new(AtomicBool::new(false));
+        let counts = Arc::new(Counts::default());
         for i in 0..config.workers {
             let worker = Worker {
                 batching: batching.clone(),
                 config,
                 queue: queue.clone(),
-                arriving: arriving.clone(),
-                waiting: waiting.clone(),
-                busy: busy.clone(),
-                wake_queued: wake_queued.clone(),
+                counts: counts.clone(),
             };
             std::thread::Builder::new()
                 .name(thread_name(i))
@@ -195,17 +197,15 @@ impl<I: Send + 'static> Engine<I> {
         }
         Self {
             sender,
-            arriving,
-            waiting,
+            counts,
             capacity: config.capacity.map(|c| c.max(1)),
-            wake_queued,
         }
     }
 
     /// Announce an item that will probably be submitted soon: a worker collecting a batch
     /// waits for it. Hold the guard while preparing the item, then [`Engine::submit`] it.
     pub fn arrival(&self) -> Arrival<'_, I> {
-        self.arriving.fetch_add(1, Ordering::SeqCst);
+        self.counts.arriving.fetch_add(1, Ordering::SeqCst);
         Arrival {
             engine: self,
             submitted: false,
@@ -227,9 +227,9 @@ impl<I: Send + 'static> Engine<I> {
     fn send(&self, item: I, announced: bool) -> Result<(), I> {
         // Counted before it is sent, so a worker never takes an item that is not counted; the
         // count is also what bounds the queue
-        let before = self.waiting.fetch_add(1, Ordering::Relaxed);
+        let before = self.counts.waiting.fetch_add(1, Ordering::Relaxed);
         if self.capacity.is_some_and(|capacity| before >= capacity) {
-            self.waiting.fetch_sub(1, Ordering::Relaxed);
+            self.counts.waiting.fetch_sub(1, Ordering::Relaxed);
             return Err(item);
         }
         let message = Message::Item {
@@ -242,7 +242,7 @@ impl<I: Send + 'static> Engine<I> {
         match self.sender.send(message) {
             Ok(()) => Ok(()),
             Err(Message::Item { queued, .. }) => {
-                self.waiting.fetch_sub(1, Ordering::Relaxed);
+                self.counts.waiting.fetch_sub(1, Ordering::Relaxed);
                 Err(queued.item)
             }
             Err(Message::Wake) => unreachable!("an item was sent"),
@@ -251,7 +251,7 @@ impl<I: Send + 'static> Engine<I> {
 
     /// Items queued and not yet taken by a worker
     pub fn waiting(&self) -> usize {
-        self.waiting.load(Ordering::Relaxed)
+        self.counts.waiting.load(Ordering::Relaxed)
     }
 }
 
@@ -264,13 +264,14 @@ pub struct Arrival<'a, I> {
 impl<I> Drop for Arrival<'_, I> {
     fn drop(&mut self) {
         if !self.submitted {
-            self.engine.arriving.fetch_sub(1, Ordering::SeqCst);
+            let counts = &self.engine.counts;
+            counts.arriving.fetch_sub(1, Ordering::SeqCst);
             // One wake-up queued is enough: the worker that receives it looks at what is still
             // arriving, this arrival's end included
-            if !self.engine.wake_queued.swap(true, Ordering::SeqCst)
+            if !counts.wake_queued.swap(true, Ordering::SeqCst)
                 && self.engine.sender.send(Message::Wake).is_err()
             {
-                self.engine.wake_queued.store(false, Ordering::SeqCst);
+                counts.wake_queued.store(false, Ordering::SeqCst);
             }
         }
     }
@@ -280,12 +281,7 @@ struct Worker<B: Batching> {
     batching: Arc<B>,
     config: Config,
     queue: Arc<Mutex<Queue<B::Item>>>,
-    arriving: Arc<AtomicUsize>,
-    waiting: Arc<AtomicUsize>,
-    /// Workers running a batch
-    busy: Arc<AtomicUsize>,
-    /// See [`Engine::wake_queued`]
-    wake_queued: Arc<AtomicBool>,
+    counts: Arc<Counts>,
 }
 
 impl<B: Batching> Worker<B> {
@@ -296,19 +292,19 @@ impl<B: Batching> Worker<B> {
                 let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
                 let batch = queue.next_batch(&self);
                 // Counted before the next worker can look
-                self.busy.fetch_add(1, Ordering::SeqCst);
+                self.counts.busy.fetch_add(1, Ordering::SeqCst);
                 batch
             };
             match batch {
-                Some(batch) => self.run_batch(batch),
+                Some((batch, weight)) => self.run_batch(batch, weight),
                 None => return,
             }
-            self.busy.fetch_sub(1, Ordering::SeqCst);
+            self.counts.busy.fetch_sub(1, Ordering::SeqCst);
         }
     }
 
-    fn run_batch(&self, batch: Vec<Queued<B::Item>>) {
-        let weight: usize = batch.iter().map(|q| self.batching.weight(&q.item)).sum();
+    /// Run a batch of this total weight
+    fn run_batch(&self, batch: Vec<Queued<B::Item>>, weight: usize) {
         // Without unwinding (release builds abort on panic) this is a plain call. With it,
         // a panicking batch is dropped with whatever it would have delivered, and the
         // worker goes on.
@@ -319,11 +315,16 @@ impl<B: Batching> Worker<B> {
 
     /// A worker has the item now, so it no longer counts as waiting or arriving
     fn received(&self, queued: Queued<B::Item>, announced: bool) -> Queued<B::Item> {
-        self.waiting.fetch_sub(1, Ordering::Relaxed);
+        self.counts.waiting.fetch_sub(1, Ordering::Relaxed);
         if announced {
-            self.arriving.fetch_sub(1, Ordering::SeqCst);
+            self.counts.arriving.fetch_sub(1, Ordering::SeqCst);
         }
         queued
+    }
+
+    /// A wake-up was received, so the next one may be queued
+    fn woken(&self) {
+        self.counts.wake_queued.store(false, Ordering::SeqCst);
     }
 }
 
@@ -334,8 +335,11 @@ struct Queue<I> {
 }
 
 impl<I> Queue<I> {
-    /// Wait for the next batch; `None` once the [`Engine`] is gone
-    fn next_batch<B: Batching<Item = I>>(&mut self, worker: &Worker<B>) -> Option<Vec<Queued<I>>> {
+    /// Wait for the next batch and its total weight; `None` once the [`Engine`] is gone
+    fn next_batch<B: Batching<Item = I>>(
+        &mut self,
+        worker: &Worker<B>,
+    ) -> Option<(Vec<Queued<I>>, usize)> {
         let config = &worker.config;
         let first = loop {
             let queued = match self.carry.take() {
@@ -343,7 +347,7 @@ impl<I> Queue<I> {
                 None => match self.receiver.recv().ok()? {
                     Message::Item { queued, announced } => worker.received(queued, announced),
                     Message::Wake => {
-                        worker.wake_queued.store(false, Ordering::SeqCst);
+                        worker.woken();
                         continue;
                     }
                 },
@@ -353,13 +357,15 @@ impl<I> Queue<I> {
             }
         };
 
+        let mut weight = worker.batching.weight(&first.item);
         // Another worker is idle: it takes the next item, and both run side by side
-        if worker.busy.load(Ordering::SeqCst) + 1 < config.workers {
-            return Some(vec![first]);
+        if worker.counts.busy.load(Ordering::SeqCst) + 1 < config.workers {
+            return Some((vec![first], weight));
         }
 
-        let deadline = first.queued_at + worker.batching.window();
-        let mut weight = worker.batching.weight(&first.item);
+        // Asked only once the worker would wait for more
+        let mut deadline = None;
+        let first_queued_at = first.queued_at;
         let mut batch = vec![first];
         while weight < config.max_batch {
             let message = match self.receiver.try_recv() {
@@ -367,9 +373,13 @@ impl<I> Queue<I> {
                 Err(TryRecvError::Disconnected) => break,
                 Err(TryRecvError::Empty) => {
                     // Nothing queued: wait only if something may still come
-                    if !config.waits_unannounced && worker.arriving.load(Ordering::SeqCst) == 0 {
+                    if !config.waits_unannounced
+                        && worker.counts.arriving.load(Ordering::SeqCst) == 0
+                    {
                         break;
                     }
+                    let deadline =
+                        *deadline.get_or_insert_with(|| first_queued_at + worker.batching.window());
                     let now = Instant::now();
                     if now >= deadline {
                         break;
@@ -382,7 +392,7 @@ impl<I> Queue<I> {
             };
             let Message::Item { queued, announced } = message else {
                 // A wake-up: received before what is arriving is looked at again
-                worker.wake_queued.store(false, Ordering::SeqCst);
+                worker.woken();
                 continue;
             };
             let queued = worker.received(queued, announced);
@@ -397,7 +407,7 @@ impl<I> Queue<I> {
             weight += item_weight;
             batch.push(queued);
         }
-        Some(batch)
+        Some((batch, weight))
     }
 }
 

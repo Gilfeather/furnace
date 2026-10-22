@@ -45,56 +45,68 @@ impl HostTensorExt for HostTensor {
         let Values::I64(values) = self.values else {
             return Err(type_mismatch("an integer", "floats"));
         };
-        let dtype = int_dtype(device);
-        let (min, max) = range_of(dtype);
-        let outside = |pos: usize, value: i64| -> FurnaceError {
-            ModelError::InvalidInput(format!(
-                "integer {value} at index {pos} is outside {min}..={max}, the range of this \
-                 backend's integers"
-            ))
-            .into()
-        };
-        let data = if dtype == IntDType::I32 {
-            // Narrow here, checking each value on the way, rather than scan first and leave the
-            // same conversion to Burn
-            let mut narrowed = Vec::with_capacity(values.len());
-            for (pos, &value) in values.iter().enumerate() {
-                narrowed.push(i32::try_from(value).map_err(|_| outside(pos, value))?);
-            }
-            TensorData::new(narrowed, shape)
-        } else {
-            if let Some(pos) = values.iter().position(|v| !(min..=max).contains(v)) {
-                return Err(outside(pos, values[pos]));
-            }
-            TensorData::new(values, shape)
-        };
-        Ok(Tensor::from_data(data, device))
+        Ok(Tensor::from_data(int_data(values, &shape, device)?, device))
     }
 
     fn from_float<const D: usize>(tensor: Tensor<D>) -> Result<Self> {
         let shape = tensor.dims().to_vec();
-        let data = tensor.into_data();
-        let values = match data.as_slice::<f32>() {
-            Ok(_) => data.try_into_vec::<f32>().map_err(read_error)?,
-            Err(_) => data.iter::<f32>().collect(),
-        };
         Ok(Self {
             shape,
-            values: Values::F32(values),
+            values: Values::F32(float_values(tensor.into_data())?),
         })
     }
 
     fn from_int<const D: usize>(tensor: Tensor<D, Int>) -> Result<Self> {
         let shape = tensor.dims().to_vec();
-        let data = tensor.into_data();
-        let values = match data.as_slice::<i64>() {
-            Ok(_) => data.try_into_vec::<i64>().map_err(read_error)?,
-            Err(_) => data.iter::<i64>().collect(),
-        };
         Ok(Self {
             shape,
-            values: Values::I64(values),
+            values: Values::I64(int_values(tensor.into_data())?),
         })
+    }
+}
+
+// The work that does not depend on the rank is kept out of the generic methods above, so each
+// rank a model uses adds no copy of it to the binary
+
+/// Integers as `device` stores them, each checked against the range of its integers
+fn int_data(values: Vec<i64>, shape: &[usize], device: &Device) -> Result<TensorData> {
+    let dtype = int_dtype(device);
+    let (min, max) = range_of(dtype);
+    let outside = |pos: usize, value: i64| -> FurnaceError {
+        ModelError::InvalidInput(format!(
+            "integer {value} at index {pos} is outside {min}..={max}, the range of this \
+             backend's integers"
+        ))
+        .into()
+    };
+    if dtype == IntDType::I32 {
+        // Narrow here, checking each value on the way, rather than scan first and leave the
+        // same conversion to Burn
+        let mut narrowed = Vec::with_capacity(values.len());
+        for (pos, &value) in values.iter().enumerate() {
+            narrowed.push(i32::try_from(value).map_err(|_| outside(pos, value))?);
+        }
+        return Ok(TensorData::new(narrowed, shape));
+    }
+    if let Some(pos) = values.iter().position(|v| !(min..=max).contains(v)) {
+        return Err(outside(pos, values[pos]));
+    }
+    Ok(TensorData::new(values, shape))
+}
+
+/// A float tensor's elements: its buffer when it holds `f32`, else converted
+fn float_values(data: TensorData) -> Result<Vec<f32>> {
+    match data.as_slice::<f32>() {
+        Ok(_) => data.try_into_vec::<f32>().map_err(read_error),
+        Err(_) => Ok(data.iter::<f32>().collect()),
+    }
+}
+
+/// An integer tensor's elements: its buffer when it holds `i64`, else widened
+fn int_values(data: TensorData) -> Result<Vec<i64>> {
+    match data.as_slice::<i64>() {
+        Ok(_) => data.try_into_vec::<i64>().map_err(read_error),
+        Err(_) => Ok(data.iter::<i64>().collect()),
     }
 }
 
