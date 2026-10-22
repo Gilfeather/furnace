@@ -16,7 +16,7 @@ forward pass makes in the same order. Smaller allocations go straight to the sys
 
 ```toml
 [dependencies]
-kamui = "0.14"
+kamui = "0.15"
 ```
 
 ```rust

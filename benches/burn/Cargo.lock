@@ -115,7 +115,7 @@ checksum = "c880a97d28a3681c0267bd29cff89621202715b065127cd445fa0f0fe0aa2880"
 
 [[package]]
 name = "amate"
-version = "0.14.0"
+version = "0.15.0"
 
 [[package]]
 name = "android_system_properties"
@@ -2680,7 +2680,7 @@ dependencies = [
 
 [[package]]
 name = "furnace-burn"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "burn",
  "burn-store",
@@ -2711,7 +2711,7 @@ dependencies = [
 
 [[package]]
 name = "furnace-server"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "amate",
  "axum",
@@ -3685,7 +3685,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kuebiko"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "serde",
 ]

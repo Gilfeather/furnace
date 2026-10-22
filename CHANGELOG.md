@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-23
+
+The motor side of the nervous system as a hierarchy: a spine between the brain and the body,
+a nerve per body part, and motor neurons that break an action down, retry locally, report
+back up and stop on request. Also less waste on every crate's hot path.
+
 ### Added
 - The nervous system's motor side is a hierarchy: a brain names an action ("get dressed")
   and motor neurons carry it out. `FabricBuilder::motor(name, program)` adds one; a command
