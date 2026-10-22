@@ -167,8 +167,10 @@ scaling to zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
   decode. See [docs/LLM.md](docs/LLM.md).
 - **A nervous system**: receptors, reflex arcs, a brain and effectors, with habituation,
   thresholds, refractory periods and pathway selection by timing, so that most signals never
-  reach the LLM and the ones that must act do so in microseconds. The server's own routes run
-  on it: every model is a neuron. See [docs/NERVE.md](docs/NERVE.md).
+  reach the LLM and the ones that must act do so in microseconds. The motor side is a
+  hierarchy too: the brain names an action ("get dressed") and motor neurons break it down,
+  retry and adjust locally, and report back up. The server's own routes run on it: every model
+  is a neuron. See [docs/NERVE.md](docs/NERVE.md).
 - **Several models per process**, each swappable for new weights without downtime.
 - **Dynamic batching** of concurrent requests, for models where it pays (off by default).
 - **Pure Rust**, CPU or GPU: `--backend cpu|wgpu|metal|cuda`.
@@ -254,7 +256,7 @@ slower, so leave it off there. [docs/API.md](docs/API.md#dynamic-batching) has t
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-dark.svg">
-  <img alt="Receptors feed a network of junctions of any depth that branches and merges; at every junction a signal acts now through an effector or passes on to the next junction; an optional brain is one possible end" src="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-light.svg" width="900">
+  <img alt="Receptors feed a network of junctions of any depth that branches and merges; at every junction a signal acts now through an effector or passes on to the next junction; an optional brain is one possible end. Below, the motor side: the brain names an action, motor junctions break it down into commands for the junctions and effectors below them, and outcomes, senses and answers come back up" src="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-light.svg" width="900">
 </picture>
 
 Furnace moves signals between sensors, models and actuators. Receptors gate each input
@@ -267,6 +269,14 @@ reflex wins, with no central scheduler. Effectors act on their own runtime with 
 circuit breaker and a rate limit. The brain (an LLM, any large model, a remote server) is
 optional. Depth has no limit but 32 hops per signal, a guard against wiring loops. Not a
 cache: only habituation is cache-like; the rest is routing at every junction and acting.
+
+The motor side has junctions too. The brain is told a few actions ("get dressed", "stop"),
+not the joints. A motor neuron takes such a command and runs a program on the motor side:
+commands to the motor neurons and effectors below it, in turn or together, each answering
+with its outcome; signals it waits for from a receptor; a small question to the brain when it
+is stuck. A slipped grip is tried again by the hand, not the brain, and how the action ended
+goes back up. `cargo run --example get_dressed` shows it, from the thermometer to the knuckles
+and back.
 
 <!-- bench:nerve:start -->
 
@@ -289,7 +299,7 @@ use serde_json::json;
 async fn main() -> furnace::Result<()> {
     tracing_subscriber::fmt::init();
     // Stands in for a real LLM (a GGUF file through furnace-candle, or your Burn model);
-    // the brain's answer is commands for the effectors
+    // the brain's answer is commands for the actions it is told about
     let engine = MockEngine::new("mock", &[r#"{"effector": "log", "args": {"line": "seen"}}"#]);
 
     let mut b = Fabric::builder();
@@ -305,7 +315,9 @@ async fn main() -> furnace::Result<()> {
     }));
     let brain = b.neuron(Llm::new("brain", engine));
     b.effector(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")?);
-    b.effector(FileAppend::new("log", "journal.log"));
+    let log = b.effector(FileAppend::new("log", "journal.log"));
+    // What the brain is told it may call: the journal, not the alarm
+    b.action(log, "Write a line to the journal.", json!({"line": "text"}));
     b.reflex(events, triage);
     b.deliberative(triage, brain);
     Server::new().port(3000).nerve(b).serve().await
@@ -320,8 +332,8 @@ serde_json = "1"
 tracing-subscriber = "0.3"
 ```
 
-[docs/NERVE.md](docs/NERVE.md) has the concepts, the API, the demos
-([`furnace-demo`](furnace-demo/src/main.rs) and the full
+[docs/NERVE.md](docs/NERVE.md) has the concepts, the API, the motor side, the demos
+([`furnace-demo`](furnace-demo/src/main.rs), [`get_dressed`](examples/get_dressed.rs) and the full
 `cargo run --release -p furnace-burn --example nerve`), how the server's own routes run on the
 fabric, and the measurements.
 

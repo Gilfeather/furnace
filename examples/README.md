@@ -9,7 +9,8 @@ From the simplest to the most involved:
 | 2 | [`serve_burn_model`](../furnace-burn/examples/serve_burn_model/main.rs) | Your own Burn models from Rust: one with `furnace_burn::from_fn`, one with integer inputs through `BurnModel` |
 | 3 | Axum, in the [main README](../README.md#embed-it-in-your-axum-app) | The same API as a router in your own axum app, next to your routes (`Server::router()`) |
 | 4 | [`nerve`](../furnace-burn/examples/nerve/main.rs) | The nervous system end to end: receptors, reflexes, a brain and effectors ([docs/NERVE.md](../docs/NERVE.md)) |
-| 5 | [`serve_gguf`](../furnace-candle/examples/serve_gguf.rs) | An LLM from a GGUF file, with the OpenAI API ([docs/LLM.md](../docs/LLM.md)) |
+| 5 | [`get_dressed`](get_dressed.rs) | The motor side: the brain says "get dressed", motor neurons break it down to the knuckles, retry a slipped grip and report back; no hardware, no model file |
+| 6 | [`serve_gguf`](../furnace-candle/examples/serve_gguf.rs) | An LLM from a GGUF file, with the OpenAI API ([docs/LLM.md](../docs/LLM.md)) |
 
 ## 1. The `furnace` command with ResNet-18
 
@@ -61,7 +62,17 @@ cargo run --release --example nerve -- --serve   # keep serving, for curl
 
 [docs/NERVE.md](../docs/NERVE.md#the-demo) explains what it prints.
 
-## 5. An LLM from a GGUF file
+## 5. The motor side
+
+```bash
+cargo run --example get_dressed
+```
+
+A thermometer, eyes, joints, a grip and a brain, all stand-ins that print what they do; the
+lines are indented by how deep in the body they happen. [docs/NERVE.md](../docs/NERVE.md#the-motor-side)
+tells the story.
+
+## 6. An LLM from a GGUF file
 
 ```bash
 cargo run --release -p furnace-candle --example serve_gguf -- qwen2.5-0.5b-instruct-q4_k_m.gguf

@@ -2,8 +2,9 @@
 //! large slow model (the brain, an LLM) and actuators.
 //!
 //! ![Receptors feed junctions of any depth that branch and merge; at every junction a signal
-//! acts now or passes on; an optional brain is one possible
-//! end](https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-light.svg)
+//! acts now or passes on; an optional brain is one possible end. On the motor side the brain
+//! names an action and motor junctions break it
+//! down](https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-light.svg)
 //!
 //! Not a server that loads models and answers requests, but what moves signals between
 //! them: overwhelmingly light, so that the models are the only cost. Most signals must
@@ -24,6 +25,11 @@
 //! - **Effectors** ([`effector`]) act on the world (a webhook, a command, a file, a
 //!   response) with their own local loops: retry, circuit breaker, rate limit, refractory
 //!   period. The brain is never in a retry loop.
+//! - **Motor neurons** ([`motor`]) stand between the brain and the effectors: the brain names
+//!   an action ("get dressed"), and a motor neuron's program breaks it down into commands for
+//!   the motor neurons and effectors below it, waits for what a receptor senses, asks a small
+//!   question, retries locally and reports back up. The brain is told the actions declared
+//!   with [`FabricBuilder::action`], not the joints.
 //!
 //! ```no_run
 //! use std::time::Duration;

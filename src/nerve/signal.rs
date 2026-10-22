@@ -354,7 +354,8 @@ pub struct Trace {
     /// Hops beyond the first [`TRACE_HOPS`]
     overflow: u16,
     brain: bool,
-    /// Whether the signal went through a deliberative queue (then it is not a reflex arc)
+    /// Whether the signal left the synchronous chain: a deliberative queue, a motor neuron's
+    /// program (then it is not a reflex arc)
     queued: bool,
 }
 
@@ -408,7 +409,8 @@ impl Trace {
         self.brain
     }
 
-    /// Whether the signal waited in a deliberative queue
+    /// Whether the signal left the synchronous chain on its way: it waited in a deliberative
+    /// queue, or a motor neuron's program sent it. Such a chain is not a reflex arc.
     pub fn was_queued(&self) -> bool {
         self.queued
     }

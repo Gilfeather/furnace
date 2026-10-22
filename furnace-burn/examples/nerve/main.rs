@@ -119,15 +119,27 @@ fn build_fabric(journal: &std::path::Path) -> furnace::Result<(FabricBuilder, Ch
     let alarm = b.effector(
         Effector::new(Webhook::new("alarm", &hook)?).refractory(Duration::from_millis(50)),
     );
-    b.effector(Webhook::new("webhook", &hook)?);
+    let webhook = b.effector(Webhook::new("webhook", &hook)?);
     let echo = if cfg!(windows) {
         Process::new("command", "cmd").args(&["/C", "echo"])
     } else {
         Process::new("command", "echo")
     };
-    b.effector(Effector::new(echo).no_retry());
-    b.effector(FileAppend::new("log", journal));
+    let command = b.effector(Effector::new(echo).no_retry());
+    let log = b.effector(FileAppend::new("log", journal));
     b.effector(Respond::new("respond"));
+    // What the brain is told it may call; the alarm and the response are the reflexes'
+    b.action(
+        webhook,
+        "Call the operations webhook.",
+        json!({"action": "what to do"}),
+    );
+    b.action(
+        command,
+        "Run the local command.",
+        json!({"args": ["words"]}),
+    );
+    b.action(log, "Write a line to the journal.", json!({"line": "text"}));
 
     b.reflex(events, triage);
     b.reflex(frames, classifier);

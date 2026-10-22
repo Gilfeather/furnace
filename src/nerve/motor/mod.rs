@@ -363,8 +363,11 @@ impl Motion {
         let (feedback, receiver) = Feedback::outcome();
         let mut signal = self.signal.command(to, args);
         signal.feedback = Some(feedback);
-        if let Ok(fabric) = self.fabric() {
-            fabric.emit(self.id, signal);
+        match self.fabric() {
+            Ok(fabric) => {
+                fabric.emit(self.id, signal);
+            }
+            Err(e) => signal.report(Err(e)),
         }
         receiver
     }
