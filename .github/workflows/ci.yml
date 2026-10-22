@@ -8,8 +8,8 @@ name: CI
 # furnace-candle's src/lib.rs); later patterns override earlier ones.
 #
 # The workspace's default members are furnace-server (the root), furnace-burn and furnace-cli:
-# `cargo test`, `cargo clippy` and `cargo check` without `-p` cover those three. The built-in
-# ONNX models go in furnace-burn/models/.
+# `cargo test`, `cargo clippy` and `cargo check` without `-p` cover those three (furnace-demo is
+# linted with `-p` in the features job). The built-in ONNX models go in furnace-burn/models/.
 on:
   push:
     branches: [ main ]
@@ -149,7 +149,7 @@ jobs:
                     "-p furnace-burn --features onnx" \
                     "-p furnace-burn --features embed-weights" \
                     "-p furnace-cli --no-default-features" \
-                    "-p furnace-cli --features embed-weights"; do
+                    "-p furnace-cli --features embed-weights"                     "-p furnace-demo"; do
           echo "::group::clippy $args"
           cargo clippy --all-targets $args -- -D warnings
           echo "::endgroup::"

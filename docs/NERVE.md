@@ -365,8 +365,25 @@ brain adds, and an effector's latency, are in the JSON only.
 
 ## The demo
 
+The short one, [`furnace-demo`](../furnace-demo/src/main.rs), needs no model file and no port:
+
 ```bash
-cargo run --release --example nerve
+cargo install --locked --git https://github.com/Gilfeather/furnace furnace-demo && furnace-demo
+```
+
+Two receptors (`logs` with no deadline, `smoke` with 5 ms) feed one junction with two
+pathways: a reflex that acts in place, and a mock LLM brain that takes about 150 ms. A signal
+with no deadline takes the heavier pathway, the brain; once the brain's p99 has been measured,
+a 5 ms signal no longer fits there and takes the reflex. Each line shows where a signal went,
+why, and how long after the stimulus the actuator acted; repeats show up as quiet at the
+receptor. It ends with what the fabric measured, the same numbers `GET /nerve` serves.
+Releases after 0.13 also publish it as a container image:
+`docker run --rm -t ghcr.io/gilfeather/furnace-demo`.
+
+The full one runs a server, webhooks and a Burn classifier:
+
+```bash
+cargo run --release -p furnace-burn --example nerve
 ```
 
 [`furnace-burn/examples/nerve`](../furnace-burn/examples/nerve/main.rs) runs, in one process, a

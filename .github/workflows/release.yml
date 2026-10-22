@@ -49,6 +49,7 @@ jobs:
           ```
 
           Or `brew install gilfeather/tap/furnace`, or `docker run -p 3000:3000 ghcr.io/gilfeather/furnace`.
+          The nervous system in one minute: `docker run --rm -t ghcr.io/gilfeather/furnace-demo`.
 
           **Verifying a download**: `SHA256SUMS` lists every asset's checksum, `furnace.spdx.json`
           is the software bill of materials, and every binary and image carries a build provenance
@@ -311,11 +312,12 @@ jobs:
         CARGO_REGISTRY_TOKEN: ${{ steps.auth-cli.outputs.token }}
       run: bash .github/publish-crate.sh furnace-cli
 
-  # Container image on GitHub Container Registry: ghcr.io/<owner>/furnace:<version> and :latest,
-  # for linux/amd64 and linux/arm64. Each architecture builds natively on its own runner (no
-  # emulation), then one manifest list joins them under the shared tags.
+  # Container images on GitHub Container Registry: ghcr.io/<owner>/furnace:<version> and :latest,
+  # and the demo (furnace-demo/Dockerfile) as ghcr.io/<owner>/furnace-demo, for linux/amd64 and
+  # linux/arm64. Each architecture builds natively on its own runner (no emulation), then one
+  # manifest list per image joins them under the shared tags.
   docker-image:
-    name: Docker image (${{ matrix.arch }})
+    name: Docker image (${{ matrix.image }}, ${{ matrix.arch }})
     needs: create-release
     runs-on: ${{ matrix.os }}
     permissions:
@@ -328,13 +330,26 @@ jobs:
         include:
           - os: ubuntu-latest
             arch: amd64
+            image: furnace
+            dockerfile: Dockerfile
           - os: ubuntu-24.04-arm
             arch: arm64
+            image: furnace
+            dockerfile: Dockerfile
+          - os: ubuntu-latest
+            arch: amd64
+            image: furnace-demo
+            dockerfile: furnace-demo/Dockerfile
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            image: furnace-demo
+            dockerfile: furnace-demo/Dockerfile
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
 
     - name: Download ONNX models
+      if: matrix.image == 'furnace'
       run: |
         mkdir -p furnace-burn/models
         curl -fsSL "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx" -o furnace-burn/models/resnet18.onnx
@@ -352,16 +367,19 @@ jobs:
 
     - name: Image name
       id: image
-      run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      env:
+        IMAGE: ${{ matrix.image }}
+      run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$IMAGE" >> "$GITHUB_OUTPUT"
 
     - name: Build and push
       id: push
       uses: docker/build-push-action@v7
       with:
         context: .
+        file: ${{ matrix.dockerfile }}
         push: true
-        # The same features as the release binaries (the Dockerfile's default)
-        build-args: FEATURES=grpc tls
+        # The server: the same features as the release binaries (the Dockerfile's default)
+        build-args: ${{ matrix.image == 'furnace' && 'FEATURES=grpc tls' || '' }}
         tags: ${{ steps.image.outputs.name }}:${{ needs.create-release.outputs.version }}-${{ matrix.arch }}
         labels: |
           org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -397,8 +415,10 @@ jobs:
       env:
         VERSION: ${{ needs.create-release.outputs.version }}
       run: |
-        image="ghcr.io/${GITHUB_REPOSITORY,,}"
-        docker buildx imagetools create \
-          -t "$image:$VERSION" -t "$image:latest" \
-          "$image:$VERSION-amd64" "$image:$VERSION-arm64"
-        docker buildx imagetools inspect "$image:$VERSION"
+        for name in furnace furnace-demo; do
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$name"
+          docker buildx imagetools create \
+            -t "$image:$VERSION" -t "$image:latest" \
+            "$image:$VERSION-amd64" "$image:$VERSION-arm64"
+          docker buildx imagetools inspect "$image:$VERSION"
+        done

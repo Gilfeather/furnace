@@ -38,6 +38,7 @@ exclude = [
     "/amate/",
     "/kuebiko/",
     "/kamui/",
+    "/furnace-demo/",
 ]
 
 [package.metadata.docs.rs]
@@ -45,10 +46,10 @@ exclude = [
 features = ["grpc", "tls", "image", "llm"]
 
 [workspace]
-members = [".", "amate", "kuebiko", "kamui", "furnace-burn", "furnace-cli", "furnace-candle"]
+members = [".", "amate", "kuebiko", "kamui", "furnace-burn", "furnace-cli", "furnace-candle", "furnace-demo"]
 # `cargo build`, `cargo test` and `cargo clippy` at the root cover the server and its parts, the
 # Burn adapter and the `furnace` command; furnace-candle (candle from git) only with
-# `-p furnace-candle`
+# `-p furnace-candle`; furnace-demo (the LLM feature on) only with `-p furnace-demo`
 default-members = [".", "amate", "kuebiko", "kamui", "furnace-burn", "furnace-cli"]
 # Benchmarks with their own workspaces, lockfiles and targets, and the helpers they share
 exclude = ["benches/burn", "benches/common", "benches/compare", "benches/llm", "benches/nerve"]

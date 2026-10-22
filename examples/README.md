@@ -4,6 +4,7 @@ From the simplest to the most involved:
 
 | Step | Example | What it shows |
 |---|---|---|
+| 0 | [`furnace-demo`](../furnace-demo/src/main.rs) | The nervous system in a minute: `cargo run --release -p furnace-demo`, no model file |
 | 1 | [`resnet18_sample_data`](resnet18_sample_data.rs) | Request bodies for the `furnace` command serving the built-in ResNet-18: no Rust of your own |
 | 2 | [`serve_burn_model`](../furnace-burn/examples/serve_burn_model/main.rs) | Your own Burn models from Rust: one with `furnace_burn::from_fn`, one with integer inputs through `BurnModel` |
 | 3 | Axum, in the [main README](../README.md#embed-it-in-your-axum-app) | The same API as a router in your own axum app, next to your routes (`Server::router()`) |
