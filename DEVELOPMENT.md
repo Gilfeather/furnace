@@ -140,7 +140,7 @@ cargo bench -p furnace-burn --features onnx
 ## Release Process
 
 1. Create release branch: `git checkout -b release/v1.0.0`
-2. Update the version in `Cargo.toml`, `amate/Cargo.toml`, `kuebiko/Cargo.toml`, `kamui/Cargo.toml`, `rustls-pure/Cargo.toml`, `furnace-burn/Cargo.toml` and `furnace-cli/Cargo.toml` (and their dependencies on each other)
+2. Update the version in `Cargo.toml`, `amate/Cargo.toml`, `kuebiko/Cargo.toml`, `kamui/Cargo.toml`, `furnace-burn/Cargo.toml` and `furnace-cli/Cargo.toml` (and their dependencies on each other). Not rustls-pure's: it has its own (below)
 3. Update `CHANGELOG.md`
 4. Create PR to main
 5. After merge, create GitHub release
@@ -156,6 +156,27 @@ release. furnace-server depends on amate, kuebiko and rustls-pure (with `tls`), 
 kamui: their versions must be on crates.io before the workflow reaches those crates, published
 by the workflow itself or by hand.
 
+### Releasing rustls-pure
+
+rustls-pure has a version of its own, apart from the other crates, and is released only when
+it changes (a fix, a new minimum Rust or rustls version, a README that crates.io should show):
+
+1. In a PR: raise `version` in `rustls-pure/Cargo.toml` (before 1.0, a patch for fixes and
+   docs, a minor for anything breaking, a higher MSRV or a new rustls minor version), and
+   move its entries in `rustls-pure/CHANGELOG.md` under that version with the date. If
+   Furnace needs the new version, raise furnace-server's `rustls-pure` dependency too.
+2. Merge, then tag that `main` commit and push the tag:
+   `git tag rustls-pure-v0.14.1 && git push origin rustls-pure-v0.14.1`.
+3. `.github/workflows/rustls-pure-release.yml` checks that the tag matches the version, runs
+   the tests and publishes it through Trusted Publishing (`.github/publish-crate.sh` skips a
+   version already on crates.io).
+
+The furnace release workflow also publishes rustls-pure, but only a version not on crates.io
+yet, so a Furnace release does not bump or republish it. Trusted Publishing for rustls-pure
+needs two entries on crates.io (below): workflow `release.yml` and workflow
+`rustls-pure-release.yml`. A vulnerability fix follows
+[rustls-pure/SECURITY.md](rustls-pure/SECURITY.md).
+
 ### Publishing a new crate for the first time
 
 Trusted Publishing works only for a crate that is already on crates.io, so a new crate's first
@@ -164,10 +185,9 @@ Tokens, scope `publish-new`). Whether that comes before or after the tag depends
 new crate sits:
 
 - **A crate that furnace-server or furnace-cli depends on** (amate, kuebiko and kamui in
-  0.13.0, rustls-pure in the release after it): by hand *before* the tag, or the workflow fails
-  at furnace-server. A part that depends on nothing else of the workspace, such as
-  rustls-pure, can instead be published at its current version as soon as it is on `main`
-  (steps 2 to 4); the release workflow then publishes its next versions.
+  0.13.0, rustls-pure in 0.14.0): by hand *before* the tag, or the workflow fails at
+  furnace-server. A part that depends on nothing else of the workspace, such as rustls-pure,
+  can instead be published at its current version as soon as it is on `main` (steps 2 to 4).
   1. Merge the release PR (versions bumped).
   2. `cargo login` with the token, then, from an up-to-date `main`:
      `cargo publish --locked -p amate`, `cargo publish --locked -p kuebiko`,
@@ -188,4 +208,4 @@ new crate sits:
 
 Trusted Publishing on crates.io, for each new crate: Settings → Trusted Publishing → Add →
 GitHub, with repository owner `Gilfeather`, repository name `furnace`, workflow filename
-`release.yml` and no environment.
+`release.yml` and no environment (rustls-pure: a second entry with `rustls-pure-release.yml`).

@@ -1,0 +1,104 @@
+name: rustls-pure
+
+# Weekly, and by hand: rustls-pure against the newest rustls its version range allows, on its
+# minimum supported Rust version, and against other TLS implementations (OpenSSL, GnuTLS,
+# curl). Pull requests run its unit tests in the CI workflow; these checks depend on what
+# others release, so they run on a schedule instead.
+on:
+  schedule:
+    # Mondays, 04:37 UTC
+    - cron: '37 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  latest-rustls:
+    name: Newest rustls (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: stable
+
+    # The newest rustls within rustls-pure's range (Cargo.toml), with whatever it needs
+    - name: Update rustls
+      run: |
+        cargo update --recursive rustls
+        cargo tree -p rustls-pure -i rustls --depth 0
+
+    - name: Test
+      run: cargo test -p rustls-pure
+
+    # What a user builds: no C or assembly, so none of the crates that compile them
+    - name: Check that no C dependency is built
+      shell: bash
+      run: |
+        deps=$(cargo tree -p rustls-pure -e normal,build --prefix none --format '{p}' | sort -u)
+        echo "$deps"
+        if echo "$deps" | grep -E '^(cc|cmake|ring|aws-lc-rs|aws-lc-sys|openssl-sys) '; then
+          echo "::error::rustls-pure now builds C code"
+          exit 1
+        fi
+
+  msrv:
+    name: Minimum supported Rust version
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Read the MSRV
+      id: msrv
+      run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' rustls-pure/Cargo.toml)" >> "$GITHUB_OUTPUT"
+
+    - name: Install Rust ${{ steps.msrv.outputs.version }}
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: ${{ steps.msrv.outputs.version }}
+
+    # The lockfile's versions; a dependency update that needs a newer Rust shows up here
+    - name: Test
+      run: cargo test -p rustls-pure --locked
+
+  interop:
+    name: Interoperability (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: stable
+
+    - name: Install GnuTLS (Linux)
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y gnutls-bin
+
+    # macOS's own openssl is LibreSSL; the test wants OpenSSL 3 (and GnuTLS) from Homebrew
+    - name: Install OpenSSL 3 and GnuTLS (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install openssl@3 gnutls
+        echo "OPENSSL=$(brew --prefix openssl@3)/bin/openssl" >> "$GITHUB_ENV"
+
+    - name: Interoperability tests
+      run: bash rustls-pure/interop/run.sh
