@@ -247,17 +247,11 @@ const TAG_LEN: usize = 16;
 
 impl<C: Cipher> Tls13AeadAlgorithm for Aead<C> {
     fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageEncrypter> {
-        Box::new(Crypter {
-            cipher: C::new_from_slice(key.as_ref()).expect("key of the suite's length"),
-            iv,
-        })
+        Box::new(Crypter::<C>::new(key.as_ref(), iv))
     }
 
     fn decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageDecrypter> {
-        Box::new(Crypter {
-            cipher: C::new_from_slice(key.as_ref()).expect("key of the suite's length"),
-            iv,
-        })
+        Box::new(Crypter::<C>::new(key.as_ref(), iv))
     }
 
     fn key_len(&self) -> usize {
@@ -279,9 +273,33 @@ struct Crypter<C> {
 }
 
 impl<C: Cipher> Crypter<C> {
+    fn new(key: &[u8], iv: Iv) -> Self {
+        Self {
+            cipher: C::new_from_slice(key).expect("key of the suite's length"),
+            iv,
+        }
+    }
+
+    /// The record's nonce: the IV XORed with its sequence number (RFC 8446 section 5.3), so no
+    /// two records under one key share one
     fn nonce(&self, seq: u64) -> aes_gcm::aead::Nonce<C> {
         let nonce = Nonce::new(&self.iv, seq).0;
         aes_gcm::aead::Nonce::<C>::try_from(&nonce[..]).expect("12-byte nonces")
+    }
+
+    /// Encrypts record `seq` in place and returns its tag
+    fn seal(&self, seq: u64, aad: &[u8], text: &mut [u8]) -> Result<aes_gcm::aead::Tag<C>, Error> {
+        self.cipher
+            .encrypt_inout_detached(&self.nonce(seq), aad, text.into())
+            .map_err(|_| Error::EncryptError)
+    }
+
+    /// Decrypts record `seq` in place if `tag` is right; the AEAD compares tags in constant time
+    fn open(&self, seq: u64, aad: &[u8], text: &mut [u8], tag: &[u8]) -> Result<(), Error> {
+        let tag = aes_gcm::aead::Tag::<C>::try_from(tag).map_err(|_| Error::DecryptError)?;
+        self.cipher
+            .decrypt_inout_detached(&self.nonce(seq), aad, text.into(), &tag)
+            .map_err(|_| Error::DecryptError)
     }
 }
 
@@ -296,14 +314,7 @@ impl<C: Cipher> MessageEncrypter for Crypter<C> {
         payload.extend_from_chunks(&msg.payload);
         // TLSInnerPlaintext: the content, then its real type (RFC 8446 section 5.2)
         payload.extend_from_slice(&msg.typ.to_array());
-        let tag = self
-            .cipher
-            .encrypt_inout_detached(
-                &self.nonce(seq),
-                &make_tls13_aad(total_len),
-                payload.as_mut().into(),
-            )
-            .map_err(|_| Error::EncryptError)?;
+        let tag = self.seal(seq, &make_tls13_aad(total_len), payload.as_mut())?;
         debug_assert_eq!(tag.len(), TAG_LEN);
         payload.extend_from_slice(&tag);
         Ok(OutboundOpaqueMessage::new(
@@ -329,13 +340,9 @@ impl<C: Cipher> MessageDecrypter for Crypter<C> {
         let Some(plain_len) = payload.len().checked_sub(TAG_LEN) else {
             return Err(Error::DecryptError);
         };
-        let nonce = self.nonce(seq);
         let aad = make_tls13_aad(payload.len());
         let (text, tag) = payload.split_at_mut(plain_len);
-        let tag = aes_gcm::aead::Tag::<C>::try_from(&*tag).map_err(|_| Error::DecryptError)?;
-        self.cipher
-            .decrypt_inout_detached(&nonce, &aad, text.into(), &tag)
-            .map_err(|_| Error::DecryptError)?;
+        self.open(seq, &aad, text, tag)?;
         payload.truncate(plain_len);
         msg.into_tls13_unpadded_message()
     }
@@ -801,3 +808,6 @@ static SUPPORTED_SIG_ALGS: WebPkiSupportedAlgorithms = WebPkiSupportedAlgorithms
         (SignatureScheme::ED25519, &[&ED25519]),
     ],
 };
+
+#[cfg(test)]
+mod tests;
