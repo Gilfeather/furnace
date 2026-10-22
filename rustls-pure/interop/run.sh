@@ -247,10 +247,17 @@ if command -v curl >/dev/null; then
   for kind in p256 p384; do
     start "$server" "$work/$kind-server.crt" "$work/$kind-server.key" "$port"
     # --ssl-no-revoke: Schannel would look for revocation lists the test CA does not have
+    status=0
     out=$(curl -sS --tlsv1.3 --ssl-no-revoke --cacert "$work/$kind-ca.crt" \
-      --resolve "localhost:$port:127.0.0.1" "https://localhost:$port/" 2>&1 || true)
-    check "$out" "rustls-pure" "$kind certificate"
+      --resolve "localhost:$port:127.0.0.1" "https://localhost:$port/" 2>&1) || status=$?
     stop
+    # Exit status 4: this curl's TLS library cannot be asked for TLS 1.3 (macOS's own curl,
+    # on LibreSSL 3.3), which says nothing about rustls-pure
+    if [ "$status" -eq 4 ]; then
+      echo "skipped curl: this build cannot ask for TLS 1.3 (${out%%$'\n'*})"
+      break
+    fi
+    check "$out" "rustls-pure" "$kind certificate"
   done
 else
   echo "== curl: not installed, skipped"
