@@ -442,6 +442,8 @@ impl Contents {
     }
 }
 
+// The tests build servers from models alone
+#[cfg(test)]
 impl From<Vec<ServedModel>> for Contents {
     fn from(models: Vec<ServedModel>) -> Self {
         Self {
@@ -1008,16 +1010,19 @@ fn new_request_id() -> HeaderValue {
     // RFC 9562: version 4 (random) and the variant `10`
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    let id = format!(
-        "{}-{}-{}-{}-{}",
-        &hex[..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..]
-    );
-    HeaderValue::from_str(&id).expect("a UUID is a valid header value")
+    // 8-4-4-4-12 lowercase hex digits, written in place
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut id = [b'-'; 36];
+    let mut at = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if matches!(index, 4 | 6 | 8 | 10) {
+            at += 1;
+        }
+        id[at] = HEX[usize::from(byte >> 4)];
+        id[at + 1] = HEX[usize::from(byte & 0x0f)];
+        at += 2;
+    }
+    HeaderValue::from_bytes(&id).expect("a UUID is a valid header value")
 }
 
 /// 64 random bits for the IDs this process hands out, different in every process: `stream`
@@ -1263,10 +1268,10 @@ async fn readiness(State(state): State<AppState>) -> Response {
 }
 
 async fn predict(State(state): State<AppState>, request: Request) -> Response {
-    let Some(slot) = state.default_slot().cloned() else {
+    let Some(slot) = state.default_slot() else {
         return no_tensor_model_response();
     };
-    predict_with(&state, &slot, request).await
+    predict_with(&state, slot, request).await
 }
 
 /// For `/predict` and `/model/info` on a server that serves only LLMs
@@ -1285,10 +1290,10 @@ async fn predict_named(
     Path(name): Path<String>,
     request: Request,
 ) -> Response {
-    let Some(slot) = state.slot(&name).cloned() else {
+    let Some(slot) = state.slot(&name) else {
         return unknown_model_response(&state, &name);
     };
-    predict_with(&state, &slot, request).await
+    predict_with(&state, slot, request).await
 }
 
 fn unknown_model_response(state: &ServerState, name: &str) -> Response {
@@ -1436,7 +1441,11 @@ impl RequestFormat {
         let content_type = headers.get(CONTENT_TYPE)?.to_str().ok()?;
         let essence = media_type_essence(content_type);
         if essence.eq_ignore_ascii_case("application/json")
-            || essence.to_ascii_lowercase().ends_with("+json")
+            || essence
+                .len()
+                .checked_sub(5)
+                .and_then(|at| essence.get(at..))
+                .is_some_and(|suffix| suffix.eq_ignore_ascii_case("+json"))
         {
             return Some(Self::Json);
         }
@@ -1652,11 +1661,14 @@ fn binary_output_response(
     output_shape: &[usize],
     inference_time_ms: f64,
 ) -> Response {
-    let shape = output_shape
-        .iter()
-        .map(usize::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
+    use std::fmt::Write as _;
+    let mut shape = String::new();
+    for (index, dim) in output_shape.iter().enumerate() {
+        if index > 0 {
+            shape.push(',');
+        }
+        let _ = write!(shape, "{dim}");
+    }
     let header = |value: String| {
         HeaderValue::from_str(&value).expect("digits and commas are a valid header value")
     };
@@ -1954,13 +1966,14 @@ fn in_flight(state: &ServerState) -> usize {
 }
 
 fn json_metrics(state: &ServerState) -> MetricsResponse {
-    let models: Vec<ModelMetrics> = state
+    // One reading per model, for its own numbers and for the totals
+    let (models, stats): (Vec<ModelMetrics>, Vec<ModelStats>) = state
         .models
         .iter()
         .map(|slot| {
             let loaded = slot.get();
             let stats = loaded.model.get_stats();
-            ModelMetrics {
+            let metrics = ModelMetrics {
                 name: slot.name.clone(),
                 ready: loaded.ready(),
                 inference_count: stats.inference_count,
@@ -1969,15 +1982,11 @@ fn json_metrics(state: &ServerState) -> MetricsResponse {
                 average_batch_size: average_batch_size(&stats),
                 average_inference_time_ms: stats.average_inference_time_ms,
                 inference_latency_ms: slot.inference_latency.percentiles_ms(),
-            }
+            };
+            (metrics, stats)
         })
-        .collect();
+        .unzip();
     // Totals over the models
-    let stats: Vec<ModelStats> = state
-        .models
-        .iter()
-        .map(|slot| slot.get().model.get_stats())
-        .collect();
     let success_count: u64 = stats.iter().map(|s| s.success_count).sum();
     let total_inference_time_ms: f64 = stats.iter().map(|s| s.total_inference_time_ms).sum();
     let stats = ModelStats {

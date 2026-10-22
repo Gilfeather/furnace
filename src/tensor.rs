@@ -186,10 +186,16 @@ impl HostTensor {
 
     /// Join tensors of the same type and per-item shape along the batch dimension
     pub fn concat_batch(parts: Vec<Self>) -> Result<Self> {
+        let total: usize = parts.iter().map(|part| part.values.len()).sum();
         let mut parts = parts.into_iter();
         let mut joined = parts
             .next()
             .ok_or_else(|| ModelError::InferenceFailed("nothing to join".to_string()))?;
+        let rest = total - joined.values.len();
+        match &mut joined.values {
+            Values::F32(values) => values.reserve(rest),
+            Values::I64(values) => values.reserve(rest),
+        }
         for part in parts {
             if part.shape[1..] != joined.shape[1..] {
                 return Err(ModelError::InferenceFailed(format!(

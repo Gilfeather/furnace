@@ -20,7 +20,7 @@ use axum::extract::Path;
 use axum::http::header::CONTENT_LENGTH;
 use serde::de::{DeserializeSeed, SeqAccess};
 
-use super::infer::{decode_raw, encode_raw, values_datatype};
+use super::infer::{decode_raw, encode_raw_into, f32s_to_le_into, raw_len, values_datatype};
 use super::*;
 
 /// Name of the model's input tensor in v2 metadata and requests
@@ -568,7 +568,9 @@ async fn infer_named(
         Err(e) => return e.into_response(),
     };
 
+    // The binary outputs' values, written after the JSON header
     let mut raw = Vec::new();
+    let mut raw_size = 0;
     let mut tensors = Vec::with_capacity(selected.len());
     for (index, binary) in selected {
         let output = std::mem::replace(
@@ -581,9 +583,9 @@ async fn infer_named(
         let datatype = values_datatype(&output.values).v2_name().to_string();
         let name = model.outputs()[index].name.clone();
         let (data, parameters) = if binary {
-            let bytes = encode_raw(&output.values);
-            let size = bytes.len();
-            raw.extend(bytes);
+            let size = raw_len(&output.values);
+            raw_size += size;
+            raw.push(output.values);
             (None, Some(serde_json::json!({ "binary_data_size": size })))
         } else {
             let data = match output.values {
@@ -606,17 +608,27 @@ async fn infer_named(
         id: request.id.clone(),
         outputs: tensors,
     };
-    if raw.is_empty() {
+    if raw_size == 0 {
         return Json(response).into_response();
     }
-    binary_response(&response, raw)
+    binary_response(&response, raw_size, |body| {
+        for values in &raw {
+            encode_raw_into(values, body);
+        }
+    })
 }
 
-/// The binary tensor data extension's response: the JSON header, then the raw output bytes
-fn binary_response(header: &InferResponse, raw: Vec<u8>) -> Response {
+/// The binary tensor data extension's response: the JSON header, then the `raw_size` raw output
+/// bytes that `write_raw` appends
+fn binary_response(
+    header: &InferResponse,
+    raw_size: usize,
+    write_raw: impl FnOnce(&mut Vec<u8>),
+) -> Response {
     let mut body = serde_json::to_vec(header).expect("serializable response");
     let json_len = body.len();
-    body.extend(raw);
+    body.reserve_exact(raw_size);
+    write_raw(&mut body);
     let total = body.len();
     (
         [
@@ -731,12 +743,12 @@ pub(super) async fn infer(
     }
 
     // Binary tensor data: the JSON header, then the output's raw little-endian bytes
-    let raw = f32s_to_le(&output);
+    let raw_size = size_of_val(output.as_slice());
     let header = response(
         None,
-        Some(serde_json::json!({ "binary_data_size": raw.len() })),
+        Some(serde_json::json!({ "binary_data_size": raw_size })),
     );
-    binary_response(&header, raw)
+    binary_response(&header, raw_size, |body| f32s_to_le_into(&output, body))
 }
 
 /// Check an input tensor's name, datatype and shape against the model; returns its batch size.

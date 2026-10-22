@@ -618,44 +618,55 @@ impl Reply {
         finish_reason: Option<FinishReason>,
         usage: Option<Option<Usage>>,
         last: bool,
-    ) -> String {
+    ) -> SseEvent {
         let finish_reason = finish_reason.map(FinishReason::as_str);
-        let serialized = match self.kind {
-            Kind::Chat => {
-                let choice = [ChatChoice {
+        match self.kind {
+            Kind::Chat => self.event(
+                &[ChatChoice {
                     index: 0,
                     delta: Delta { role, content },
                     logprobs: None,
                     finish_reason,
-                }];
-                serde_json::to_string(&Chunk {
-                    id: &self.id,
-                    object: self.object(true),
-                    created: self.created,
-                    model: &self.model,
-                    choices: if last { &[] } else { &choice },
-                    usage,
-                })
-            }
-            Kind::Text => {
-                let choice = [TextChoice {
+                }],
+                usage,
+                last,
+            ),
+            Kind::Text => self.event(
+                &[TextChoice {
                     index: 0,
                     text: content.unwrap_or(""),
                     logprobs: None,
                     finish_reason,
-                }];
-                serde_json::to_string(&Chunk {
-                    id: &self.id,
-                    object: self.object(true),
-                    created: self.created,
-                    model: &self.model,
-                    choices: if last { &[] } else { &choice },
-                    usage,
-                })
-            }
-        };
-        serialized.expect("chunks serialize")
+                }],
+                usage,
+                last,
+            ),
+        }
     }
+
+    /// A chunk with `choice`, or none in the `last` one
+    fn event<C: Serialize>(
+        &self,
+        choice: &[C],
+        usage: Option<Option<Usage>>,
+        last: bool,
+    ) -> SseEvent {
+        json_event(&Chunk {
+            id: &self.id,
+            object: self.object(true),
+            created: self.created,
+            model: &self.model,
+            choices: if last { &[] } else { choice },
+            usage,
+        })
+    }
+}
+
+/// An event whose `data:` is `value` as JSON, serialized straight into the event
+fn json_event(value: &impl Serialize) -> SseEvent {
+    SseEvent::default()
+        .json_data(value)
+        .expect("chunks serialize")
 }
 
 /// A streaming response in progress
@@ -664,7 +675,7 @@ struct Streamed {
     tracked: Tracked,
     include_usage: bool,
     /// Payloads ready to go out
-    pending: VecDeque<String>,
+    pending: VecDeque<SseEvent>,
     done: bool,
     completion_tokens: usize,
     /// How long to wait for the engine's next event before giving up on the stream
@@ -705,12 +716,12 @@ impl Streamed {
                 self.end();
             }
             Some(Event::Error(e)) => {
-                self.pending.push_back(error_body(&e).to_string());
+                self.pending.push_back(json_event(&error_body(&e)));
                 self.end();
             }
             None => {
                 self.pending
-                    .push_back(error_body(&ended_early()).to_string());
+                    .push_back(json_event(&error_body(&ended_early())));
                 self.end();
             }
         }
@@ -720,12 +731,12 @@ impl Streamed {
     fn stalled(&mut self, idle: Duration) {
         let message = timeout_message(idle);
         let error = error_value(&message, "server_error", None, Some("timeout"));
-        self.pending.push_back(error.to_string());
+        self.pending.push_back(json_event(&error));
         self.end();
     }
 
     fn end(&mut self) {
-        self.pending.push_back("[DONE]".to_string());
+        self.pending.push_back(SseEvent::default().data("[DONE]"));
         self.done = true;
     }
 }
@@ -764,11 +775,8 @@ fn stream(
     streamed.on(Some(first));
     let events = futures_util::stream::unfold(streamed, |mut streamed| async move {
         loop {
-            if let Some(data) = streamed.pending.pop_front() {
-                return Some((
-                    Ok::<_, Infallible>(SseEvent::default().data(data)),
-                    streamed,
-                ));
+            if let Some(event) = streamed.pending.pop_front() {
+                return Some((Ok::<_, Infallible>(event), streamed));
             }
             if streamed.done {
                 return None;

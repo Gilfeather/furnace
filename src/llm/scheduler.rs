@@ -354,7 +354,7 @@ async fn relay(
                         return;
                     }
                 };
-                let (text, matched) = stop.push(&piece);
+                let (text, matched) = stop.push(piece);
                 if !text.is_empty() && events.send(Event::Text(text)).await.is_err() {
                     return;
                 }
@@ -441,6 +441,8 @@ fn guarded<T>(call: impl FnOnce() -> Result<T, BoxError>) -> Result<T, BoxError>
 /// A worker's loop, until the engine is dropped
 fn work<M: StepModel>(shared: &Arc<Shared<M>>) {
     let mut running: Vec<Running<M>> = Vec::new();
+    // The last token of each running sequence, reused from step to step
+    let mut tokens: Vec<u32> = Vec::new();
     loop {
         // Drop the sequences whose client went away, or whose stop string matched
         running.retain(|r| !r.steps.is_closed());
@@ -485,7 +487,8 @@ fn work<M: StepModel>(shared: &Arc<Shared<M>>) {
         }
 
         if !running.is_empty() {
-            let tokens: Vec<u32> = running.iter().map(|r| r.last).collect();
+            tokens.clear();
+            tokens.extend(running.iter().map(|r| r.last));
             let start = Instant::now();
             let results = {
                 let mut sequences: Vec<&mut M::Sequence> =
