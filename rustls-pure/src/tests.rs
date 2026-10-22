@@ -1,6 +1,6 @@
 //! Checks of the provider against known answers and known attacks.
 //!
-//! Most come from Wycheproof (`tests/fixtures/wycheproof`): for every algorithm the provider
+//! Most come from Wycheproof (`wycheproof/`): for every algorithm the provider
 //! offers, inputs that must be accepted and inputs that must be refused, such as forged
 //! signatures, points off the curve, altered tags and low-order keys. The rest check the glue
 //! between rustls and the primitives, which Wycheproof cannot see: nonces, sequence numbers,
@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use super::*;
 
-const VECTORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/wycheproof");
+const VECTORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wycheproof");
 
 /// What a Wycheproof test expects of an implementation
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -31,7 +31,7 @@ enum Expect {
 struct Case<'a> {
     group: &'a Value,
     test: &'a Value,
-    /// Set when furnace refuses an input that Wycheproof lets through, and why
+    /// Set when the provider refuses an input that Wycheproof lets through, and why
     stricter: Cell<Option<&'static str>>,
 }
 

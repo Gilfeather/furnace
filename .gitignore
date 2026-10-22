@@ -43,7 +43,7 @@ resnet18_*.json
 *_test.json
 *_sample.json
 # except the Wycheproof vectors the TLS tests read
-!/tests/fixtures/wycheproof/*_test.json
+!/rustls-pure/wycheproof/*_test.json
 
 # Temporary files
 *.tmp

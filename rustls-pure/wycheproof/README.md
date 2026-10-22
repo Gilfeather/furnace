@@ -5,7 +5,7 @@ from `testvectors_v1/` at commit
 [`7a325932231bd7a724c791c8b0d65ea4d6d2f435`](https://github.com/C2SP/wycheproof/tree/7a325932231bd7a724c791c8b0d65ea4d6d2f435/testvectors_v1).
 They are licensed under the Apache License 2.0 (`LICENSE` here, from the same commit).
 
-`src/tls/provider/tests.rs` runs them against furnace's TLS crypto provider: the vectors mark
+`src/tests.rs` runs them against the provider: the vectors mark
 which inputs must be accepted and which (forged signatures, points off the curve, altered tags,
 low-order keys and so on) must be refused. Only the algorithms the provider offers are here:
 

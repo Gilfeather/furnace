@@ -161,6 +161,7 @@ furnace-cli/src/main.rs  # The `furnace` command
 amate/                   # The batching engine (no dependencies)
 kuebiko/                 # Latency histograms and the Prometheus text format (no dependencies)
 kamui/                   # The `furnace` command's global allocator (no dependencies)
+rustls-pure/             # The pure-Rust crypto provider for rustls behind `--features tls`
 ```
 
 ### Error Handling
