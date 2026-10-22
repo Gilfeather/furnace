@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `rustls-pure` has a version of its own and is released when it changes, apart from the
+  other crates; its history is in [rustls-pure/CHANGELOG.md](rustls-pure/CHANGELOG.md).
+  furnace-server depends on `rustls-pure` 0.14.
+
 ## [0.14.0] - 2026-10-22
 
 A one-minute demo, the limits and the road to 1.0 written down, overload, failure, soak and

@@ -33,9 +33,11 @@
 //! - key exchange with X25519, P-256 and P-384
 //! - server keys and client certificates (for mutual TLS) using ECDSA P-256 / P-384 or Ed25519
 //!
-//! RSA is not offered: the pure-Rust `rsa` crate has an unfixed timing side channel
-//! (RUSTSEC-2023-0071). Certificate authorities, cert-manager and Let's Encrypt all issue ECDSA
-//! certificates.
+//! RSA is not offered, for keys or for verifying certificates: the pure-Rust `rsa` crate has an
+//! unfixed timing side channel (RUSTSEC-2023-0071). Certificate chains signed with RSA are
+//! refused, so a client for arbitrary public websites, many of which still use RSA, is not what
+//! this is for; connections where you choose the certificates are. Certificate authorities,
+//! cert-manager and Let's Encrypt all issue ECDSA certificates.
 //!
 //! The provider has not had an outside security audit. It is checked mechanically instead:
 //! its tests run Google's [Wycheproof](https://github.com/C2SP/wycheproof) test vectors for

@@ -1,0 +1,54 @@
+name: Release rustls-pure
+
+# rustls-pure is released on its own: a `rustls-pure-v<version>` tag, on a main commit whose
+# rustls-pure/Cargo.toml has that version, publishes it to crates.io (DEVELOPMENT.md,
+# "Releasing rustls-pure"). Furnace's own release workflow publishes it too when a Furnace
+# release needs a version that is not on crates.io yet; .github/publish-crate.sh skips a
+# version that is.
+on:
+  push:
+    tags: [ 'rustls-pure-v*' ]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    # crates.io Trusted Publishing: the OIDC token is exchanged for a short-lived crates.io token
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: stable
+
+    - name: Check that the tag names the crate's version
+      run: |
+        version=$(cargo metadata --no-deps --format-version 1 \
+          | jq -r '.packages[] | select(.name == "rustls-pure") | .version')
+        if [ "rustls-pure-v$version" != "$GITHUB_REF_NAME" ]; then
+          echo "::error::the tag is $GITHUB_REF_NAME, but rustls-pure/Cargo.toml has $version"
+          exit 1
+        fi
+
+    - name: Test
+      run: cargo test -p rustls-pure --locked
+
+    - name: Authenticate with crates.io
+      id: auth
+      uses: rust-lang/crates-io-auth-action@v1
+
+    - name: Publish rustls-pure
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      run: bash .github/publish-crate.sh rustls-pure

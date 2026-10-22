@@ -28,9 +28,20 @@ use rustls with its default provider, or terminate TLS in a proxy.
 | Key exchange | X25519, P-256, P-384 |
 | Keys and certificates | ECDSA P-256, ECDSA P-384, Ed25519 (PKCS#8, or SEC1 for ECDSA) |
 
-RSA is not offered: the pure-Rust `rsa` crate has an unfixed timing side channel
-([RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)). Every CA,
-cert-manager and Let's Encrypt can issue ECDSA certificates.
+## What it is for, and what not
+
+**rustls-pure does not verify RSA signatures.** It accepts certificates signed with ECDSA
+P-256 / P-384 or Ed25519 only, and refuses any chain with an RSA signature in it. Much of the
+public web still serves RSA certificates, or ECDSA ones under RSA-signed intermediates and
+roots, so **it is not suited to a client that connects to arbitrary public websites**. It is
+meant for connections where you choose the certificates: your own servers and services,
+service-to-service and mutual TLS, an internal CA, and public servers whose whole chain is
+ECDSA.
+
+RSA is left out on purpose. Its only pure-Rust implementation, the `rsa` crate, has an unfixed
+timing side channel ([RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)),
+which would come with it into every build; and ECDSA and Ed25519 are the modern choice anyway.
+Every CA, cert-manager and Let's Encrypt can issue ECDSA certificates.
 
 ## Usage
 
@@ -74,6 +85,16 @@ let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls_pure::p
 
 Both work with tokio-rustls and anything else that takes a rustls config.
 
+## Supported versions
+
+- **rustls** 0.23.46 or any later 0.23 release. A weekly CI job builds and tests against the
+  newest one.
+- **Rust** 1.89 or later (the MSRV), tested weekly too.
+
+rustls-pure has a version of its own, apart from Furnace's, and a release only when it changes
+([CHANGELOG](CHANGELOG.md)). Before 1.0, raising either minimum, or moving to rustls 0.24, is
+a minor version.
+
 ## Compared with rustls-rustcrypto
 
 [rustls-rustcrypto](https://github.com/RustCrypto/rustls-rustcrypto), from the RustCrypto
@@ -100,6 +121,16 @@ or Ed25519 keys is enough and you want the narrower, stricter, test-vector-check
 `cargo test -p rustls-pure` from a checkout of the repository. The Wycheproof vectors are in
 [`wycheproof/`](wycheproof/README.md) (Apache-2.0, copied unchanged from a pinned commit); they
 are left out of the published crate.
+
+`bash rustls-pure/interop/run.sh` checks it against other TLS implementations on the same
+machine, with certificates it makes for the run: OpenSSL, and GnuTLS and curl when installed,
+each as a client of rustls-pure's server and as a server for its client, with every cipher
+suite, key exchange group and key type, with client certificates, and refusing a server with
+an RSA certificate or an unknown CA. It runs weekly on Linux and macOS.
+
+## Security
+
+Report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes.
 
 MIT licensed. Forged in kamiforge: built as part of [Furnace](https://github.com/Gilfeather/furnace),
 the pure-Rust inference server, which serves HTTPS and gRPC with it.

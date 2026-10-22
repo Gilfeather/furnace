@@ -231,19 +231,20 @@ jobs:
       with:
         toolchain: stable
 
-    # In the order they depend on each other: furnace-server needs amate, kuebiko and
-    # rustls-pure of the same version on crates.io, furnace-burn needs furnace-server,
-    # furnace-cli needs furnace-burn and kamui. `cargo publish` waits until the crate it
-    # uploaded is in the index before it returns, so the next one finds it. Each crate gets its
-    # own token: a Trusted Publishing token expires after 30 minutes, and verifying furnace-burn
-    # and furnace-cli (a build of Burn each) can take longer than that. .github/publish-crate.sh
-    # skips a crate whose version is on crates.io already, such as one published by hand before
-    # the tag (DEVELOPMENT.md).
+    # In the order they depend on each other: furnace-server needs amate and kuebiko of the
+    # same version, and rustls-pure of the version it names, on crates.io; furnace-burn needs
+    # furnace-server, furnace-cli needs furnace-burn and kamui. `cargo publish` waits until
+    # the crate it uploaded is in the index before it returns, so the next one finds it. Each
+    # crate gets its own token: a Trusted Publishing token expires after 30 minutes, and
+    # verifying furnace-burn and furnace-cli (a build of Burn each) can take longer than that.
+    # .github/publish-crate.sh skips a crate whose version is on crates.io already, such as
+    # one published by hand before the tag (DEVELOPMENT.md).
     #
     # furnace's parts. Like furnace-burn below, their first version is published by hand;
     # PUBLISH_PART_CRATES=true then publishes them with every release. Until they are on
-    # crates.io, furnace-server cannot be. A part added later (rustls-pure) is published by hand
-    # before the release that first needs it, and these steps then skip that version.
+    # crates.io, furnace-server cannot be. rustls-pure has a version of its own and is mostly
+    # released on its own (rustls-pure-release.yml); here it is published only when its version
+    # is not on crates.io yet, and skipped otherwise.
     - name: Authenticate with crates.io (amate)
       if: vars.PUBLISH_PART_CRATES == 'true'
       id: auth-amate

@@ -8,6 +8,9 @@ public issue. Include what is affected, how to reproduce it, and the impact you 
 should get a first answer within a week. Once a fix is released, the advisory is published with
 credit to you, unless you prefer otherwise.
 
+rustls-pure, the TLS crypto provider (released apart from Furnace), has a policy of its own:
+[rustls-pure/SECURITY.md](rustls-pure/SECURITY.md).
+
 ## Supported versions
 
 Fixes go into the latest release (0.x: the latest minor version). There are no backports to
