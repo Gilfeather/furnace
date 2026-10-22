@@ -1,4 +1,30 @@
-//! A pure-Rust crypto provider for rustls, built on RustCrypto primitives.
+//! A pure-Rust crypto provider for [rustls], built on [RustCrypto] primitives: no C, no
+//! assembly, so it builds wherever Rust does.
+//!
+//! ```no_run
+//! use std::sync::Arc;
+//!
+//! use rustls::pki_types::pem::PemObject;
+//! use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+//!
+//! let provider = Arc::new(rustls_pure::provider());
+//! // A server
+//! let certs = CertificateDer::pem_file_iter("cert.pem")?.collect::<Result<Vec<_>, _>>()?;
+//! let key = PrivateKeyDer::from_pem_file("key.pem")?;
+//! let server = rustls::ServerConfig::builder_with_provider(provider.clone())
+//!     .with_protocol_versions(&[&rustls::version::TLS13])?
+//!     .with_no_client_auth()
+//!     .with_single_cert(certs, key)?;
+//! // A client
+//! let mut roots = rustls::RootCertStore::empty();
+//! roots.add(CertificateDer::from_pem_file("ca.pem")?)?;
+//! let client = rustls::ClientConfig::builder_with_provider(provider)
+//!     .with_protocol_versions(&[&rustls::version::TLS13])?
+//!     .with_root_certificates(roots)
+//!     .with_no_client_auth();
+//! # let _ = (server, client);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 //!
 //! rustls does the TLS protocol itself; a provider only supplies the primitives. The ones here
 //! are deliberately few, which keeps the code small enough to review:
@@ -10,6 +36,18 @@
 //! RSA is not offered: the pure-Rust `rsa` crate has an unfixed timing side channel
 //! (RUSTSEC-2023-0071). Certificate authorities, cert-manager and Let's Encrypt all issue ECDSA
 //! certificates.
+//!
+//! The provider has not had an outside security audit. It is checked mechanically instead:
+//! its tests run Google's [Wycheproof](https://github.com/C2SP/wycheproof) test vectors for
+//! every algorithm it offers, and pin nonce construction, record integrity, the source of
+//! randomness and the wiping of keys. Where the standards allow a choice it refuses: X25519
+//! exchanges that end in an all-zero secret, compressed or malformed key shares, and malleable
+//! Ed25519 signatures.
+//!
+//! [rustls]: https://docs.rs/rustls
+//! [RustCrypto]: https://github.com/RustCrypto
+
+#![forbid(unsafe_code)]
 
 use std::fmt;
 use std::sync::Arc;
@@ -39,8 +77,9 @@ use rustls::{
 };
 use sha2::Digest as _;
 
-/// The provider: pass it to `rustls::ServerConfig::builder_with_provider`
-pub(super) fn provider() -> CryptoProvider {
+/// The provider: pass it to `rustls::ServerConfig::builder_with_provider` or
+/// `rustls::ClientConfig::builder_with_provider`, with TLS 1.3 as the protocol version
+pub fn provider() -> CryptoProvider {
     CryptoProvider {
         cipher_suites: vec![
             TLS13_AES_128_GCM_SHA256,
@@ -175,7 +214,7 @@ impl<M: hmac::Mac + Clone + Send + Sync> rustls_hmac::Key for HmacKey<M> {
 // Cipher suites (TLS 1.3)
 
 /// AES-128-GCM with SHA-256
-pub(super) static TLS13_AES_128_GCM_SHA256: SupportedCipherSuite =
+static TLS13_AES_128_GCM_SHA256: SupportedCipherSuite =
     SupportedCipherSuite::Tls13(&Tls13CipherSuite {
         common: CipherSuiteCommon {
             suite: CipherSuite::TLS13_AES_128_GCM_SHA256,
@@ -189,7 +228,7 @@ pub(super) static TLS13_AES_128_GCM_SHA256: SupportedCipherSuite =
     });
 
 /// AES-256-GCM with SHA-384
-pub(super) static TLS13_AES_256_GCM_SHA384: SupportedCipherSuite =
+static TLS13_AES_256_GCM_SHA384: SupportedCipherSuite =
     SupportedCipherSuite::Tls13(&Tls13CipherSuite {
         common: CipherSuiteCommon {
             suite: CipherSuite::TLS13_AES_256_GCM_SHA384,
@@ -202,7 +241,7 @@ pub(super) static TLS13_AES_256_GCM_SHA384: SupportedCipherSuite =
     });
 
 /// ChaCha20-Poly1305 with SHA-256
-pub(super) static TLS13_CHACHA20_POLY1305_SHA256: SupportedCipherSuite =
+static TLS13_CHACHA20_POLY1305_SHA256: SupportedCipherSuite =
     SupportedCipherSuite::Tls13(&Tls13CipherSuite {
         common: CipherSuiteCommon {
             suite: CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
@@ -521,7 +560,7 @@ impl KeyProvider for Keys {
     ) -> Result<Arc<dyn SigningKey>, Error> {
         let unsupported = |what: &str| {
             Error::General(format!(
-                "{what}; furnace's pure-Rust TLS takes ECDSA P-256 / P-384 or Ed25519 keys"
+                "{what}; rustls-pure takes ECDSA P-256 / P-384 or Ed25519 keys"
             ))
         };
         let key: Arc<dyn SigningKey> = match &key_der {

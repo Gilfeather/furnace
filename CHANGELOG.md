@@ -20,8 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Property tests (proptest, a dev-dependency) of the JSON fast path against serde_json, the
   nerve client's response parsing, the `/predict` and Open Inference Protocol decoders, and
   amate, kuebiko and kamui.
+- `rustls-pure`: the pure-Rust rustls crypto provider behind the `tls` feature, as a crate of
+  its own (it was `src/tls/provider.rs`). Its tests run Google's Wycheproof test vectors for
+  every algorithm it offers, and check nonce construction, record integrity, the source of
+  randomness and key wiping. It has had no outside audit.
 
 ### Fixed
+- TLS: the AES-GCM and ChaCha20-Poly1305 record keys (and AES's key schedule) are wiped when a
+  connection's keys are dropped; the AEAD crates were built without their `zeroize` feature.
 - amate: an announced item that gave up (`Arrival` dropped without a submit) no longer takes
   room in a bounded queue. While the workers were busy, requests that failed after being
   announced (a malformed body, say) filled the batching queue with wake-ups, and requests

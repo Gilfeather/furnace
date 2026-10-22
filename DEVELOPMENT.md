@@ -140,20 +140,21 @@ cargo bench -p furnace-burn --features onnx
 ## Release Process
 
 1. Create release branch: `git checkout -b release/v1.0.0`
-2. Update the version in `Cargo.toml`, `amate/Cargo.toml`, `kuebiko/Cargo.toml`, `kamui/Cargo.toml`, `furnace-burn/Cargo.toml` and `furnace-cli/Cargo.toml` (and their dependencies on each other)
+2. Update the version in `Cargo.toml`, `amate/Cargo.toml`, `kuebiko/Cargo.toml`, `kamui/Cargo.toml`, `rustls-pure/Cargo.toml`, `furnace-burn/Cargo.toml` and `furnace-cli/Cargo.toml` (and their dependencies on each other)
 3. Update `CHANGELOG.md`
 4. Create PR to main
 5. After merge, create GitHub release
 6. GitHub Actions will build and publish binaries
 
-The release workflow (on a `v*` tag) publishes amate, kuebiko, kamui, furnace-server,
-furnace-burn and furnace-cli to crates.io in that order, through crates.io's Trusted Publishing
-(no token stored in the repository): amate, kuebiko and kamui only when the repository variable
-`PUBLISH_PART_CRATES` is `true`, furnace-burn and furnace-cli only when `PUBLISH_BURN_CRATES` is.
-A crate whose version is on crates.io already is skipped (`.github/publish-crate.sh`), so a
-version published by hand before the tag does not fail the release. furnace-server depends on
-amate and kuebiko, furnace-cli on kamui: their versions must be on crates.io before the
-workflow reaches those crates, published by the workflow itself or by hand.
+The release workflow (on a `v*` tag) publishes amate, kuebiko, kamui, rustls-pure,
+furnace-server, furnace-burn and furnace-cli to crates.io in that order, through crates.io's
+Trusted Publishing (no token stored in the repository): amate, kuebiko, kamui and rustls-pure
+only when the repository variable `PUBLISH_PART_CRATES` is `true`, furnace-burn and furnace-cli
+only when `PUBLISH_BURN_CRATES` is. A crate whose version is on crates.io already is skipped
+(`.github/publish-crate.sh`), so a version published by hand before the tag does not fail the
+release. furnace-server depends on amate, kuebiko and rustls-pure (with `tls`), furnace-cli on
+kamui: their versions must be on crates.io before the workflow reaches those crates, published
+by the workflow itself or by hand.
 
 ### Publishing a new crate for the first time
 
@@ -163,16 +164,19 @@ Tokens, scope `publish-new`). Whether that comes before or after the tag depends
 new crate sits:
 
 - **A crate that furnace-server or furnace-cli depends on** (amate, kuebiko and kamui in
-  0.13.0): by hand *before* the tag, or the workflow fails at furnace-server.
+  0.13.0, rustls-pure in the release after it): by hand *before* the tag, or the workflow fails
+  at furnace-server. A part that depends on nothing else of the workspace, such as
+  rustls-pure, can instead be published at its current version as soon as it is on `main`
+  (steps 2 to 4); the release workflow then publishes its next versions.
   1. Merge the release PR (versions bumped).
   2. `cargo login` with the token, then, from an up-to-date `main`:
      `cargo publish --locked -p amate`, `cargo publish --locked -p kuebiko`,
-     `cargo publish --locked -p kamui`.
+     `cargo publish --locked -p kamui` (for rustls-pure: `cargo publish --locked -p rustls-pure`).
   3. Trusted Publishing for each (below), then
-     `gh variable set PUBLISH_PART_CRATES --body true`.
+     `gh variable set PUBLISH_PART_CRATES --body true` (already set since 0.13.0).
   4. Revoke the API token (`cargo logout`, and delete it on crates.io).
-  5. Push the `v<version>` tag on that `main` commit. The workflow skips the three versions
-     already on crates.io and publishes furnace-server, furnace-burn and furnace-cli.
+  5. Push the `v<version>` tag on that `main` commit. The workflow skips the versions already
+     on crates.io and publishes the rest.
 - **A crate that depends on furnace-server** (furnace-burn and furnace-cli in 0.12.0): by hand
   *after* the tag.
   1. Wait until the release workflow has published furnace-server of the new version.

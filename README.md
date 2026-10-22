@@ -337,10 +337,10 @@ fabric, and the measurements.
   nobody has reported running Furnace in production for months yet ([ADOPTERS.md](ADOPTERS.md)
   is empty).
 - **The TLS cryptography has not been audited.** To stay pure Rust, the `tls` feature uses a
-  small rustls crypto provider of Furnace's own ([src/tls/provider.rs](src/tls/provider.rs))
-  on RustCrypto primitives, not ring or aws-lc-rs. Nobody outside has reviewed that glue;
-  mechanical checks against published test vectors are under way. If you need audited TLS
-  today, terminate TLS in a proxy in front of Furnace.
+  small rustls crypto provider of Furnace's own ([rustls-pure](rustls-pure/README.md)) on
+  RustCrypto primitives, not ring or aws-lc-rs. Nobody outside has reviewed that glue; it is
+  checked mechanically against Google's Wycheproof test vectors instead. If you need audited
+  TLS today, terminate TLS in a proxy in front of Furnace.
 - **Almost no GPU numbers.** Burn's wgpu, Metal and CUDA backends build through furnace-burn,
   but every published measurement is on CPU, apart from one old, untuned wgpu run on an
   integrated GPU ([docs/PERFORMANCE.md](docs/PERFORMANCE.md)).
@@ -555,7 +555,8 @@ root, no ML framework), [`furnace-burn`](furnace-burn) (Burn models, the ONNX im
 `furnace-cli` (the `furnace` command), and three parts with no dependencies that anyone can use
 on their own: [`amate`](amate) (dynamic batching),
 [`kuebiko`](kuebiko) (latency histograms, Prometheus text) and
-[`kamui`](kamui) (the allocator that reuses large blocks).
+[`kamui`](kamui) (the allocator that reuses large blocks), plus
+[`rustls-pure`](rustls-pure) (the pure-Rust crypto provider for rustls behind `tls`).
 [`furnace-candle`](furnace-candle) is built only with `-p furnace-candle`, and
 [`furnace-demo`](furnace-demo) only with `-p furnace-demo`. Debug builds optimize the dependencies, so `cargo test` needs no
 `--release` and rebuilds in seconds after a change. Generated model code is in

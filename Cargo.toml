@@ -38,9 +38,8 @@ exclude = [
     "/amate/",
     "/kuebiko/",
     "/kamui/",
+    "/rustls-pure/",
     "/furnace-demo/",
-    # Wycheproof's test vectors (3 MB) for the TLS provider's tests, from the repository
-    "/tests/fixtures/wycheproof/",
 ]
 
 [package.metadata.docs.rs]
@@ -48,11 +47,11 @@ exclude = [
 features = ["grpc", "tls", "image", "llm"]
 
 [workspace]
-members = [".", "amate", "kuebiko", "kamui", "furnace-burn", "furnace-cli", "furnace-candle", "furnace-demo"]
+members = [".", "amate", "kuebiko", "kamui", "rustls-pure", "furnace-burn", "furnace-cli", "furnace-candle", "furnace-demo"]
 # `cargo build`, `cargo test` and `cargo clippy` at the root cover the server and its parts, the
 # Burn adapter and the `furnace` command; furnace-candle (candle from git) only with
 # `-p furnace-candle`; furnace-demo (the LLM feature on) only with `-p furnace-demo`
-default-members = [".", "amate", "kuebiko", "kamui", "furnace-burn", "furnace-cli"]
+default-members = [".", "amate", "kuebiko", "kamui", "rustls-pure", "furnace-burn", "furnace-cli"]
 # Benchmarks with their own workspaces, lockfiles and targets, and the helpers they share
 exclude = ["benches/burn", "benches/common", "benches/compare", "benches/llm", "benches/nerve"]
 
@@ -67,9 +66,9 @@ default = []
 image = ["dep:image"]
 # The Open Inference Protocol over gRPC (`--grpc-port`), next to the HTTP API
 grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost", "dep:tonic-prost-build", "dep:protox", "dep:tokio-stream"]
-# TLS for HTTP and gRPC (`--tls-cert`, `--tls-key`, `--tls-client-ca`): rustls with a pure-Rust
-# crypto provider built on RustCrypto (src/tls/provider.rs)
-tls = ["dep:rustls", "dep:tokio-rustls", "dep:aes-gcm", "dep:chacha20poly1305", "dep:p256", "dep:p384", "dep:ed25519-dalek", "dep:x25519-dalek", "dep:sha2", "dep:hmac", "dep:getrandom"]
+# TLS for HTTP and gRPC (`--tls-cert`, `--tls-key`, `--tls-client-ca`): rustls with rustls-pure,
+# the pure-Rust crypto provider built on RustCrypto (rustls-pure/)
+tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pure"]
 # Serve LLMs: OpenAI-compatible chat and completions with streaming, behind the `LlmEngine` and
 # `StepModel` traits (src/llm). Engines come from other crates, such as furnace-candle.
 llm = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:chrono"]
@@ -105,19 +104,11 @@ tonic = { version = "0.14", optional = true }
 tonic-prost = { version = "0.14", optional = true }
 # gRPC over TLS: the accepted connections as the stream tonic serves (feature `grpc`)
 tokio-stream = { version = "0.1", optional = true }
-# TLS (feature `tls`): rustls without its C-based providers, and RustCrypto primitives
+# TLS (feature `tls`): rustls without its C-based providers, and rustls-pure, the pure-Rust
+# crypto provider of RustCrypto primitives
 rustls = { version = "0.23.46", default-features = false, features = ["std", "logging"], optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging"], optional = true }
-# `zeroize`: the AEADs wipe their keys (and AES's key schedule) when a connection's keys drop
-aes-gcm = { version = "0.11", features = ["zeroize"], optional = true }
-chacha20poly1305 = { version = "0.11", features = ["zeroize"], optional = true }
-p256 = { version = "0.14", features = ["ecdh", "ecdsa", "pkcs8"], optional = true }
-p384 = { version = "0.14", features = ["ecdh", "ecdsa", "pkcs8"], optional = true }
-ed25519-dalek = { version = "3", features = ["pkcs8"], optional = true }
-x25519-dalek = { version = "3", features = ["static_secrets"], optional = true }
-sha2 = { version = "0.11", optional = true }
-hmac = { version = "0.13", features = ["zeroize"], optional = true }
-getrandom = { version = "0.4", optional = true }
+rustls-pure = { path = "rustls-pure", version = "0.13.0", optional = true }
 # LLM serving (feature `llm`). tokenizers without its defaults: they build Oniguruma (C) and
 # esaxx (C++); fancy-regex is the pure-Rust regex engine. minijinja without `stacker` (cc).
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"], optional = true }

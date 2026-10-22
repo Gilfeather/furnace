@@ -6,10 +6,8 @@
 //! already open keep theirs). A file that fails to load is logged and the previous
 //! certificate stays in use, so a half-written renewal does not take the server down.
 //!
-//! rustls runs the protocol, with the pure-Rust crypto provider in `tls/provider.rs` (RustCrypto
-//! primitives, TLS 1.3, ECDSA and Ed25519 keys).
-
-mod provider;
+//! rustls runs the protocol, with the pure-Rust crypto provider of the rustls-pure crate
+//! (RustCrypto primitives, TLS 1.3, ECDSA and Ed25519 keys).
 
 use std::io;
 use std::net::SocketAddr;
@@ -228,7 +226,7 @@ fn build(
         path: settings.key.clone(),
         source: e.into(),
     })?;
-    let provider = Arc::new(provider::provider());
+    let provider = Arc::new(rustls_pure::provider());
     let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| Error::Setup(e.into()))?;
@@ -478,6 +476,15 @@ pub(crate) mod tests {
         Path::new(FIXTURES).join(name)
     }
 
+    /// The first certificate in fixture `name`. A failure names the file only: no certificate,
+    /// nor anything read from one, goes into test output
+    fn fixture_cert(name: &str) -> CertificateDer<'static> {
+        match read_certs(&fixture(name)) {
+            Ok(mut certs) if !certs.is_empty() => certs.remove(0),
+            _ => panic!("no certificate in the fixture {name}"),
+        }
+    }
+
     pub(crate) fn settings(server: &str, client_ca: bool) -> TlsSettings {
         TlsSettings {
             cert: fixture(&format!("{server}.crt")),
@@ -515,13 +522,12 @@ pub(crate) mod tests {
     /// A client configuration trusting the test CA, offering `alpn`
     pub(crate) fn client_config(certificate: Option<&str>, alpn: &[u8]) -> rustls::ClientConfig {
         let mut roots = rustls::RootCertStore::empty();
-        roots
-            .add(read_certs(&fixture("ca.crt")).unwrap().remove(0))
-            .unwrap();
-        let builder = rustls::ClientConfig::builder_with_provider(Arc::new(provider::provider()))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
-            .with_root_certificates(roots);
+        roots.add(fixture_cert("ca.crt")).unwrap();
+        let builder =
+            rustls::ClientConfig::builder_with_provider(Arc::new(rustls_pure::provider()))
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
+                .with_root_certificates(roots);
         let mut config = match certificate {
             None => builder.with_no_client_auth(),
             Some(name) => builder
@@ -564,8 +570,11 @@ pub(crate) mod tests {
             let addr = serve(TlsConfigs::load(settings(server, false)).unwrap()).await;
             let (status, certificate) = get_healthz(addr, &client(None)).await.unwrap();
             assert_eq!(status, "HTTP/1.1 200 OK", "{server}");
-            let expected = read_certs(&fixture(&format!("{server}.crt"))).unwrap();
-            assert_eq!(certificate, expected[0], "{server}");
+            let expected = fixture_cert(&format!("{server}.crt"));
+            assert!(
+                certificate == expected,
+                "{server}: another certificate was served"
+            );
         }
     }
 
@@ -613,17 +622,20 @@ pub(crate) mod tests {
         assert!(configs.mutual());
         let addr = serve(configs).await;
         // One client certificate per key type the provider verifies
-        for certificate in ["client", "client-p384", "client-ed25519"] {
-            let (status, _) = get_healthz(addr, &client(Some(certificate))).await.unwrap();
-            assert_eq!(status, "HTTP/1.1 200 OK", "{certificate}");
+        for client_name in ["client", "client-p384", "client-ed25519"] {
+            let (status, _) = get_healthz(addr, &client(Some(client_name))).await.unwrap();
+            assert_eq!(status, "HTTP/1.1 200 OK", "{client_name}");
         }
         // In TLS 1.3 the server checks the client's certificate after the client has finished
-        // its side of the handshake, so the refusal shows when the request goes unanswered
-        for certificate in [None, Some("stranger")] {
-            let result = get_healthz(addr, &client(certificate)).await;
+        // its side of the handshake, so the refusal shows when the request goes unanswered.
+        // Only the status line is reported, not the certificate the server sent
+        for (client_name, presented) in [("no certificate", None), ("stranger", Some("stranger"))] {
+            let status = get_healthz(addr, &client(presented))
+                .await
+                .map(|(status, _)| status);
             assert!(
-                !matches!(&result, Ok((status, _)) if status.contains("200")),
-                "{certificate:?}: {result:?}"
+                !matches!(&status, Ok(status) if status.contains("200")),
+                "{client_name}: {status:?}"
             );
         }
     }
@@ -653,14 +665,15 @@ pub(crate) mod tests {
         })
         .unwrap();
         let addr = serve(configs.clone()).await;
-        let p256 = read_certs(&fixture("server-p256.crt")).unwrap().remove(0);
-        let p384 = read_certs(&fixture("server-p384.crt")).unwrap().remove(0);
-        assert_eq!(get_healthz(addr, &client(None)).await.unwrap().1, p256);
+        let p256 = fixture_cert("server-p256.crt");
+        let p384 = fixture_cert("server-p384.crt");
+        let served = || async { get_healthz(addr, &client(None)).await.unwrap().1 };
+        assert!(served().await == p256, "the first certificate is served");
 
         assert!(matches!(configs.reload_if_changed(), Ok(false)));
         install("server-p384");
         assert!(matches!(configs.reload_if_changed(), Ok(true)));
-        assert_eq!(get_healthz(addr, &client(None)).await.unwrap().1, p384);
+        assert!(served().await == p384, "the renewed certificate is served");
 
         // A half-written renewal: the error is reported once and the certificate stays
         std::fs::write(&key, "not a key").unwrap();
@@ -672,7 +685,7 @@ pub(crate) mod tests {
             Err(Error::PrivateKey { .. })
         ));
         assert!(matches!(configs.reload_if_changed(), Ok(false)));
-        assert_eq!(get_healthz(addr, &client(None)).await.unwrap().1, p384);
+        assert!(served().await == p384, "the renewed certificate stays");
     }
 
     #[test]

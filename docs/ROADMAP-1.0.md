@@ -12,8 +12,8 @@ promise of dates.
 - A **patch** release (0.13.0 → 0.13.1) only fixes bugs and never breaks anything.
 - Renamed or removed items are not kept as deprecated aliases before 1.0: the CHANGELOG is the
   migration path, and the API stays small.
-- The published crates (furnace-server, furnace-burn, furnace-cli and the parts amate, kuebiko
-  and kamui) share one version and are released together.
+- The published crates (furnace-server, furnace-burn, furnace-cli and the parts amate, kuebiko,
+  kamui and rustls-pure) share one version and are released together.
 
 ## What 1.0 freezes
 

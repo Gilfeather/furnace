@@ -410,8 +410,8 @@ without a restart, so renewals by cert-manager or certbot just work. If the new 
 load (e.g. caught half-written), the error is logged and the previous certificate stays.
 
 The TLS stack is pure Rust like the rest of Furnace: rustls for the protocol, and a small crypto
-provider of our own over [RustCrypto](https://github.com/RustCrypto) primitives
-([src/tls/provider.rs](../src/tls/provider.rs)). It is deliberately narrow:
+provider of our own over [RustCrypto](https://github.com/RustCrypto) primitives,
+[rustls-pure](../rustls-pure/README.md), a crate of its own. It is deliberately narrow:
 
 | | Supported |
 |---|---|
@@ -435,7 +435,7 @@ the curve, altered tags, low-order keys. Further tests pin what the vectors cann
 record's nonce is unique, a record that is altered, replayed or reordered does not decrypt, the
 randomness comes from the operating system, and keys are wiped when dropped. The tag comparisons
 happen in the AEAD crates and rustls, in constant time. See
-[src/tls/provider/tests.rs](../src/tls/provider/tests.rs).
+[rustls-pure/src/tests.rs](../rustls-pure/src/tests.rs).
 
 With `tritonclient.grpc`, connect with `ssl=True` and the CA (and, for mutual TLS, the client
 key and certificate): `InferenceServerClient(url="host:8001", ssl=True,

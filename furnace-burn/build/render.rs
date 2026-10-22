@@ -115,14 +115,14 @@ fn render_io(out: &mut String, spec: &ModelSpec, simple: bool) {
                     .map(|d| format!("{d:?}"))
                     .collect::<Vec<_>>()
                     .join(", ");
+                let name = name(d, fixed);
+                let dtype = match d.elem {
+                    Elem::F32 => "Fp32",
+                    Elem::I64 => "Int64",
+                    Elem::I32 => "Int32",
+                };
                 format!(
-                    "StaticIo {{ name: {:?}, dtype: DataType::{}, shape: &[{shape}] }}",
-                    name(d, fixed),
-                    match d.elem {
-                        Elem::F32 => "Fp32",
-                        Elem::I64 => "Int64",
-                        Elem::I32 => "Int32",
-                    },
+                    "StaticIo {{ name: {name:?}, dtype: DataType::{dtype}, shape: &[{shape}] }}"
                 )
             })
             .collect::<Vec<_>>()
