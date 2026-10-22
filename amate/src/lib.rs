@@ -55,7 +55,7 @@
 //! ```
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -139,6 +139,10 @@ pub struct Engine<I> {
     arriving: Arc<AtomicUsize>,
     /// Items queued and not yet received by a worker
     waiting: Arc<AtomicUsize>,
+    /// [`Config::capacity`], at least 1
+    capacity: Option<usize>,
+    /// A [`Message::Wake`] is queued and no worker has received it yet
+    wake_queued: Arc<AtomicBool>,
 }
 
 impl<I: Send + 'static> Engine<I> {
@@ -154,7 +158,9 @@ impl<I: Send + 'static> Engine<I> {
                 (Sender::Unbounded(sender), receiver)
             }
             Some(capacity) => {
-                let (sender, receiver) = mpsc::sync_channel(capacity.max(1));
+                // Room for the items and the one wake-up that may be queued with them, so a
+                // wake-up never takes an item's place
+                let (sender, receiver) = mpsc::sync_channel(capacity.max(1) + 1);
                 (Sender::Bounded(sender), receiver)
             }
         };
@@ -171,6 +177,7 @@ impl<I: Send + 'static> Engine<I> {
         let arriving = Arc::new(AtomicUsize::new(0));
         let waiting = Arc::new(AtomicUsize::new(0));
         let busy = Arc::new(AtomicUsize::new(0));
+        let wake_queued = Arc::new(AtomicBool::new(false));
         for i in 0..config.workers {
             let worker = Worker {
                 batching: batching.clone(),
@@ -179,6 +186,7 @@ impl<I: Send + 'static> Engine<I> {
                 arriving: arriving.clone(),
                 waiting: waiting.clone(),
                 busy: busy.clone(),
+                wake_queued: wake_queued.clone(),
             };
             std::thread::Builder::new()
                 .name(thread_name(i))
@@ -189,6 +197,8 @@ impl<I: Send + 'static> Engine<I> {
             sender,
             arriving,
             waiting,
+            capacity: config.capacity.map(|c| c.max(1)),
+            wake_queued,
         }
     }
 
@@ -215,6 +225,13 @@ impl<I: Send + 'static> Engine<I> {
     }
 
     fn send(&self, item: I, announced: bool) -> Result<(), I> {
+        // Counted before it is sent, so a worker never takes an item that is not counted; the
+        // count is also what bounds the queue
+        let before = self.waiting.fetch_add(1, Ordering::Relaxed);
+        if self.capacity.is_some_and(|capacity| before >= capacity) {
+            self.waiting.fetch_sub(1, Ordering::Relaxed);
+            return Err(item);
+        }
         let message = Message::Item {
             queued: Queued {
                 item,
@@ -222,8 +239,6 @@ impl<I: Send + 'static> Engine<I> {
             },
             announced,
         };
-        // Counted before it is sent, so a worker never takes an item that is not counted
-        self.waiting.fetch_add(1, Ordering::Relaxed);
         match self.sender.send(message) {
             Ok(()) => Ok(()),
             Err(Message::Item { queued, .. }) => {
@@ -250,7 +265,13 @@ impl<I> Drop for Arrival<'_, I> {
     fn drop(&mut self) {
         if !self.submitted {
             self.engine.arriving.fetch_sub(1, Ordering::SeqCst);
-            let _ = self.engine.sender.send(Message::Wake);
+            // One wake-up queued is enough: the worker that receives it looks at what is still
+            // arriving, this arrival's end included
+            if !self.engine.wake_queued.swap(true, Ordering::SeqCst)
+                && self.engine.sender.send(Message::Wake).is_err()
+            {
+                self.engine.wake_queued.store(false, Ordering::SeqCst);
+            }
         }
     }
 }
@@ -263,6 +284,8 @@ struct Worker<B: Batching> {
     waiting: Arc<AtomicUsize>,
     /// Workers running a batch
     busy: Arc<AtomicUsize>,
+    /// See [`Engine::wake_queued`]
+    wake_queued: Arc<AtomicBool>,
 }
 
 impl<B: Batching> Worker<B> {
@@ -319,7 +342,10 @@ impl<I> Queue<I> {
                 Some(queued) => queued,
                 None => match self.receiver.recv().ok()? {
                     Message::Item { queued, announced } => worker.received(queued, announced),
-                    Message::Wake => continue,
+                    Message::Wake => {
+                        worker.wake_queued.store(false, Ordering::SeqCst);
+                        continue;
+                    }
                 },
             };
             if worker.batching.wanted(&queued.item) {
@@ -355,6 +381,8 @@ impl<I> Queue<I> {
                 }
             };
             let Message::Item { queued, announced } = message else {
+                // A wake-up: received before what is arriving is looked at again
+                worker.wake_queued.store(false, Ordering::SeqCst);
                 continue;
             };
             let queued = worker.received(queued, announced);
@@ -494,5 +522,38 @@ mod tests {
         assert_eq!(s.batches.recv().unwrap(), vec![1]);
         assert_eq!(s.batches.recv().unwrap(), vec![2]);
         assert_eq!(s.engine.waiting(), 0);
+    }
+
+    #[test]
+    fn abandoned_arrivals_do_not_take_the_queue_s_room() {
+        let s = setup(
+            Config {
+                max_batch: 1,
+                capacity: Some(2),
+                ..ONE_WORKER
+            },
+            Duration::ZERO,
+        );
+        let held = s.hold.lock().unwrap();
+        s.engine.submit(None, 0).unwrap();
+        assert_eq!(s.batches.recv().unwrap(), vec![0]);
+        // While the worker is busy, more arrivals give up than the queue has room for; each
+        // would have queued a wake-up
+        for _ in 0..5 {
+            drop(s.engine.arrival());
+        }
+        // The queue still holds as many items as it was made for, and no more
+        assert_eq!(s.engine.submit(None, 1), Ok(()));
+        let arrival = s.engine.arrival();
+        assert_eq!(s.engine.submit(Some(arrival), 2), Ok(()));
+        assert_eq!(s.engine.submit(None, 3), Err(3));
+        assert_eq!(s.engine.waiting(), 2);
+        drop(held);
+        assert_eq!(s.batches.recv().unwrap(), vec![1]);
+        assert_eq!(s.batches.recv().unwrap(), vec![2]);
+        // A worker that received the wake-up lets the next one be queued
+        drop(s.engine.arrival());
+        s.engine.submit(None, 4).unwrap();
+        assert_eq!(s.batches.recv().unwrap(), vec![4]);
     }
 }

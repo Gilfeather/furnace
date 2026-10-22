@@ -443,3 +443,107 @@ async fn the_motor_side_can_run_on_a_runtime_of_ones_own() {
     drop(fabric);
     tokio::task::yield_now().await;
 }
+
+/// A brain that hangs: each firing tells the test it started, then blocks until the test opens
+/// the gate
+struct Stuck {
+    entered: Mutex<std::sync::mpsc::Sender<()>>,
+    open: Mutex<bool>,
+    opened: std::sync::Condvar,
+}
+
+impl Stuck {
+    fn new() -> (Arc<Self>, std::sync::mpsc::Receiver<()>) {
+        let (entered, receiver) = std::sync::mpsc::channel();
+        let stuck = Arc::new(Self {
+            entered: Mutex::new(entered),
+            open: Mutex::new(false),
+            opened: std::sync::Condvar::new(),
+        });
+        (stuck, receiver)
+    }
+
+    fn open(&self) {
+        *self.open.lock().unwrap() = true;
+        self.opened.notify_all();
+    }
+}
+
+impl Neuron for Stuck {
+    fn name(&self) -> &str {
+        "brain"
+    }
+    fn kind(&self) -> NeuronKind {
+        NeuronKind::Brain
+    }
+    fn stimulate(&self, _: Signal, _: &Cx<'_>) -> Firing {
+        let _ = self.entered.lock().unwrap().send(());
+        let mut open = self.open.lock().unwrap();
+        while !*open {
+            open = self.opened.wait(open).unwrap();
+        }
+        Firing::Quiet
+    }
+}
+
+/// Wait for the next firing of a [`Stuck`] brain; fails the test after 10 seconds
+fn entered(firings: &std::sync::mpsc::Receiver<()>) {
+    firings
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the brain fired within 10 s");
+}
+
+#[test]
+fn a_hung_brain_overflows_its_queue_while_deadlines_take_the_reflex() {
+    let mut b = Fabric::builder();
+    let r = b.neuron(pass("in"));
+    let (stuck, firings) = Stuck::new();
+    let brain = b.add(stuck.clone());
+    let reflex = Sink::new("reflex", NeuronKind::Effector);
+    let fallback = b.add(reflex.clone());
+    b.deliberative(r, brain)
+        .weight(2.0)
+        .summation(Summation::none().capacity(2));
+    b.reflex(r, fallback).weight(1.0);
+    let fabric = b.build().unwrap();
+
+    // The brain takes the first signal and hangs on it
+    assert_eq!(fabric.stimulate(r, signal(b"first")).queued, 1);
+    entered(&firings);
+    // It was measured slow before: ten seconds, far more than the deadlines below allow
+    fabric.seed_latency(0, Duration::from_secs(10));
+
+    // Signals with a deadline take the reflex at once, however long the brain hangs
+    let urgent = || {
+        signal(b"urgent").with_urgency(super::super::signal::Urgency::within(Duration::from_secs(
+            1,
+        )))
+    };
+    for _ in 0..10 {
+        let outcome = fabric.stimulate(r, urgent());
+        assert_eq!((outcome.queued, outcome.dropped), (0, 0));
+    }
+    assert_eq!(reflex.hits(), 10);
+
+    // Signals without one queue for the brain up to the capacity; the rest are dropped and
+    // counted rather than queued without bound
+    let mut dropped = 0;
+    for i in 0..50u8 {
+        dropped += fabric.stimulate(r, signal(&[i])).dropped;
+        assert!(fabric.waiting() <= 2, "{} waiting", fabric.waiting());
+    }
+    assert_eq!(dropped, 48);
+    let pathway = &fabric.metrics().pathways[0];
+    assert_eq!((pathway.overflow, pathway.ineligible), (48, 10));
+    assert_eq!(fabric.waiting(), 2);
+    // The reflex still answers while the queue is full
+    fabric.stimulate(r, urgent());
+    assert_eq!(reflex.hits(), 11);
+
+    // Released, the brain works through what was kept, and nothing more
+    stuck.open();
+    entered(&firings);
+    entered(&firings);
+    drop(fabric);
+    assert!(firings.try_recv().is_err());
+}

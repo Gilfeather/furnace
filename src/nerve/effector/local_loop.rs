@@ -453,4 +453,103 @@ mod tests {
         clocked.at(t0 + Duration::from_secs(5), serde_json::json!(5));
         assert_eq!(receiver.try_iter().count(), 1);
     }
+
+    /// A target that is down: retries, then the breaker opens, then, once it is back, the rate
+    /// limit paces what comes after the trial; the fabric in front keeps taking signals all
+    /// along. The motor side runs on this test's runtime with its clock paused, so the backoffs
+    /// pass at once and in order; the loop's own clock is the times the test hands it.
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_target_is_retried_then_cut_off_then_paced() {
+        /// Fails, retryably, its first `down` tries, and counts them all
+        struct Down {
+            down: usize,
+            tries: Arc<AtomicUsize>,
+        }
+        impl Act for Down {
+            fn name(&self) -> &str {
+                "down"
+            }
+            fn act(&self, _: &Command, _: &Signal) -> Action {
+                if self.tries.fetch_add(1, Ordering::SeqCst) < self.down {
+                    Action::Done(Err(ActError::Unreachable("connection refused".into())))
+                } else {
+                    Action::ok()
+                }
+            }
+        }
+        let tries = Arc::new(AtomicUsize::new(0));
+        let effector = Effector::new(Down {
+            down: 6,
+            tries: tries.clone(),
+        })
+        .retry(Retry {
+            attempts: 3,
+            backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(1),
+        })
+        .breaker(Breaker {
+            failures: 2,
+            cooldown: HOUR,
+        })
+        .rate_limit(ActRateLimit::new(1.0, 1).max_wait(Duration::ZERO));
+        let mut b = Fabric::builder().efferent(tokio::runtime::Handle::current());
+        let upstream = b.neuron(crate::nerve::testing::pass("in"));
+        let target = b.neuron(effector.clone());
+        let fabric = b.build().unwrap();
+        let at = |now: Instant| {
+            let cx = Cx {
+                now,
+                id: target,
+                fabric: &fabric,
+            };
+            Neuron::stimulate(&effector, command("down", serde_json::Value::Null), &cx)
+        };
+        // Lets the retries on the motor side run to their end: an hour of paused time
+        let settle = || tokio::time::sleep(HOUR);
+        let attempts = || tries.load(Ordering::SeqCst);
+        let t0 = Instant::now();
+
+        // 1. Retried: three tries, then one failure in a row
+        assert!(!at(t0).is_quiet());
+        settle().await;
+        let m = effector.metrics();
+        assert_eq!((attempts(), m.retries, m.failed), (3, 2, 1));
+        assert_eq!(m.breaker, BreakerState::Closed);
+
+        // 2. The second command fails the same way, and the circuit opens
+        assert!(!at(t0 + Duration::from_secs(1)).is_quiet());
+        settle().await;
+        let m = effector.metrics();
+        assert_eq!((attempts(), m.retries, m.failed), (6, 4, 2));
+        assert_eq!(m.breaker, BreakerState::Open);
+
+        // 3. Open: commands are dropped without a try, and the fabric in front of the
+        // effector keeps taking signals
+        for i in 0..100 {
+            assert!(at(t0 + Duration::from_secs(2) + Duration::from_millis(i)).is_quiet());
+            fabric.stimulate(upstream, command("down", serde_json::Value::Null));
+        }
+        settle().await;
+        let m = effector.metrics();
+        // Half of them dropped here, half on their way through the fabric
+        assert_eq!((attempts(), m.dropped_open), (6, 200));
+        assert_eq!(fabric.metrics().received, 100);
+
+        // 4. The cooldown over and the target back: the trial succeeds and closes the circuit,
+        // and the rate limit drops the burst that follows it within the same second
+        let back = Instant::now() + 2 * HOUR;
+        assert!(!at(back).is_quiet());
+        assert_eq!(effector.metrics().breaker, BreakerState::Closed);
+        for _ in 0..3 {
+            assert!(at(back).is_quiet());
+        }
+        assert!(!at(back + Duration::from_secs(1)).is_quiet());
+        settle().await;
+        let m = effector.metrics();
+        assert_eq!(
+            (m.acted, m.failed, m.retries, m.dropped_open, m.dropped_rate),
+            (2, 2, 4, 200, 3)
+        );
+        assert_eq!(m.inflight, 0);
+    }
 }

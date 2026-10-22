@@ -1,0 +1,70 @@
+name: Soak
+
+# The server and the nervous system under a steady load for hours (tests/soak.rs): they keep
+# answering, without errors, and their resident memory levels off. By hand, or weekly; never on
+# pull requests. The per-interval numbers are kept as an artifact, for the record only.
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: 'How long to run, in hours'
+        default: '3'
+        required: true
+      rate:
+        description: 'Requests a second on each route'
+        default: '200'
+        required: true
+  schedule:
+    # Sundays, 02:41 UTC
+    - cron: '41 2 * * 0'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    name: Soak
+    runs-on: ubuntu-latest
+    # The run itself, plus building
+    timeout-minutes: 360
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: stable
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+
+    - name: Build
+      run: cargo test --profile ci --test soak --no-run
+
+    - name: Soak
+      shell: bash
+      env:
+        HOURS: ${{ github.event.inputs.hours || '3' }}
+        FURNACE_SOAK_RATE: ${{ github.event.inputs.rate || '200' }}
+        FURNACE_SOAK_OUT: soak.jsonl
+      run: |
+        set -euo pipefail
+        # Whole minutes, at most five and a half hours so the job ends within its timeout
+        export FURNACE_SOAK_SECS=$(awk -v h="$HOURS" 'BEGIN { s = int(h * 3600); if (s > 19800) s = 19800; if (s < 60) s = 60; print s }')
+        export FURNACE_SOAK_INTERVALS=$(( FURNACE_SOAK_SECS / 300 > 10 ? FURNACE_SOAK_SECS / 300 : 10 ))
+        echo "Soaking for $FURNACE_SOAK_SECS s in $FURNACE_SOAK_INTERVALS intervals at $FURNACE_SOAK_RATE requests/s per route"
+        cargo test --profile ci --test soak -- --ignored --nocapture
+
+    - name: Keep the numbers
+      if: always()
+      uses: actions/upload-artifact@v5
+      with:
+        name: soak-${{ github.run_id }}
+        path: soak.jsonl
+        if-no-files-found: ignore

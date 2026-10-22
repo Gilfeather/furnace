@@ -129,6 +129,10 @@ cargo test --release
 # Integration tests
 cargo test --release --test integration_tests
 
+# Soak run: the server and the nervous system under a steady load (here for 10 minutes);
+# .github/workflows/soak.yml runs it for hours, by hand and weekly
+FURNACE_SOAK_SECS=600 cargo test --profile ci --test soak -- --ignored --nocapture
+
 # Benchmarks (furnace-burn's criterion bench; `onnx` builds in furnace-burn/models/*.onnx)
 cargo bench -p furnace-burn --features onnx
 ```
