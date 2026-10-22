@@ -130,6 +130,9 @@ protox = { version = "0.10", optional = true }
 tonic-prost-build = { version = "0.14", optional = true }
 
 [dev-dependencies]
+# Paused time (`#[tokio::test(start_paused = true)]`): the overload and failure tests wait out
+# timeouts and backoffs without waiting in real time
+tokio = { version = "1.53", features = ["test-util"] }
 tempfile = "3.12"
 # The examples in the documentation install a log subscriber, as a program would
 tracing-subscriber = "0.3"

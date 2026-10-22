@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The README lists what Furnace cannot do yet; docs/FAQ.md answers how it differs from a
   cache, Ray Serve, Triton, BentoML, actors and message queues; docs/ROADMAP-1.0.md says what
   1.0 will freeze and what must happen first.
+- Overload and failure tests (tests/overload.rs, and in the nerve's effector loop and fabric)
+  and a soak run (tests/soak.rs, `.github/workflows/soak.yml`, by hand and weekly).
+
+### Fixed
+- amate: an announced item that gave up (`Arrival` dropped without a submit) no longer takes
+  room in a bounded queue. While the workers were busy, requests that failed after being
+  announced (a malformed body, say) filled the batching queue with wake-ups, and requests
+  under `--max-concurrent-requests` got `503 SERVER_BUSY`.
 
 ## [0.13.0] - 2026-10-21
 
