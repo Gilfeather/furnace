@@ -275,7 +275,12 @@ fn nerve_app(wait: Duration) -> (Router, Arc<Gate>, mpsc::UnboundedReceiver<()>)
             serde_json::json!({ "status": 200, "body": "pong" }),
         )
     }));
-    b.effector(Respond::new("respond"));
+    let respond = b.effector(Respond::new("respond"));
+    b.spine(brain).action(
+        respond,
+        "Answer the request.",
+        serde_json::json!({"status": 200, "body": "text"}),
+    );
     b.deliberative(ask, brain)
         .summation(Summation::none().workers(1));
     b.reflex(ping, reflex);
