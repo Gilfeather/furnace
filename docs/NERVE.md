@@ -5,8 +5,11 @@ models is the bottleneck. Furnace is that layer: not a server that
 loads models and answers requests, but the nervous system between sensors, models and
 actuators. Text, images, tensors and model outputs are one kind of signal. Signals run through
 any number of junctions, and at each one they act now or pass on; a brain (an LLM, any large
-model, a remote server) is one possible end, and most signals never reach it. The receptive
-side and the motor side are separate systems. The mechanisms are a neuron's.
+model, a remote server) is one possible end, and most signals never reach it. The motor side
+has junctions too: the brain says "get dressed", and motor junctions break that down into
+commands for the arm, the hand and the fingers, retry a slipped grip themselves and report
+back up. The receptive side and the motor side are separate systems. The mechanisms are a
+neuron's.
 
 ```toml
 [dependencies]
@@ -58,7 +61,7 @@ everything, and the body waits for the brain's reply.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-dark.svg">
-  <img alt="Receptors feed a network of junctions of any depth that branches and merges; at every junction a signal acts now through an effector or passes on to the next junction; an optional brain is one possible end" src="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-light.svg" width="900">
+  <img alt="Receptors feed a network of junctions of any depth that branches and merges; at every junction a signal acts now through an effector or passes on to the next junction; an optional brain is one possible end. Below, the motor side: the brain names an action, motor junctions break it down into commands for the junctions and effectors below them, and outcomes, senses and answers come back up" src="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-light.svg" width="900">
 </picture>
 
 A fabric is any number of junctions (neurons) wired as you like: a chain, a tree or a net,
@@ -82,8 +85,9 @@ no copy between neurons.
 
 **Neuron.** Anything that takes a signal and may fire: `fn stimulate(&self, Signal, &Cx) ->
 Firing`, where `Firing` is `Quiet`, `Fire(Vec<Signal>)` or `Compute(closure)` for blocking
-work. Four kinds: receptors (world → signal), reflexes (feature → command, in process), brains
-(an optional slow model; its output is commands) and effectors (command → world).
+work. Five kinds: receptors (world → signal), reflexes (feature → command, in process), brains
+(an optional slow model; its output is commands), motor neurons (command → commands below
+them, see [the motor side](#the-motor-side)) and effectors (command → world).
 
 **Mechanisms.** A neuron has none until you give it some with `b.gate(id, Mechanisms)`. Each
 is optional and a few words of state, run by the fabric before `stimulate`:
@@ -113,7 +117,7 @@ pathway is eligible. Latencies are measured as signals flow, so when the pathway
 slow it drops out and the reflex takes over. Give the deliberative pathway the heavier weight
 (the builder does: reflex 1, deliberative 2) and the reflex is what happens when there is no
 time to pass on, like the fly's short-mode escape. A command (`Payload::Command`) names its
-effector and goes there, from any junction.
+effector or motor neuron and goes there, from any junction.
 
 **Preparation.** A signal with time to spare that takes a deliberative pathway calls
 `prepare()` on the neurons it will probably reach (the brain, and the effectors after it), at
@@ -124,7 +128,111 @@ the motor side. Effectors act on their own, on the fabric's efferent runtime, wi
 loops: retry with backoff, a circuit breaker, a rate limit, a refractory period. The brain is
 never in a retry loop. Acting on the world is the point: an HTTP response is one effector
 among the webhook, the local command, the journal file, the in-process channel and the
-Server-Sent-Events push.
+Server-Sent-Events push. Between the brain and the effectors sit the motor neurons, described
+next.
+
+## The motor side
+
+The receptive side is many junctions deep; so is the motor side. A brain should not have to
+say "turn the right shoulder to 40°, then the elbow to 90°, then close the thumb": it says
+"get dressed", and the junctions below it know how.
+
+**Motor neuron.** `b.motor(name, program)` adds one. A command addressed to its name (from a
+brain, a reflex, or another motor neuron) starts its program, an async closure, on the motor
+side's runtime, so the receptive side never waits for it. The program gets a `Motion` and
+carries the command out:
+
+- `m.command(name, args).await` commands a motor neuron or an effector below and waits for its
+  outcome: the value the effector's act returned (what a device measured, a service's JSON
+  answer) or why it failed after the effector's own retries; for a motor neuron, what its
+  program returned. One after the other is `.await` in turn; `m.together([...]).await` sends
+  several at once and waits for all, the first failure stopping the others. Any depth, any
+  branching.
+- `m.sense(name)` receives a copy of every signal that passes a neuron's gate from then on:
+  wait until the eye sees the coat, or adjust a grip by the pressure the fingertips report.
+  Together with the outcomes, that is the local loop: retry a slipped grip, squeeze harder, all
+  without the brain.
+- `m.ask(payload).await` fires a small question along the motor neuron's own pathways and
+  waits for what the neuron there fires in answer. The pathway is selected as any signal's: by
+  the deadline and the measured latencies, so with no time for the brain a quick reflex
+  answers, and with no pathway in time the question fails and the program does without.
+- The command's deadline bounds the program and everything it commands
+  (`MotionError::TimedOut`); `m.within(duration, step)` bounds one step.
+
+**Outcomes go up.** What a program returns goes back to the program that commanded it. When a
+brain or a reflex sent the command, nobody waits for it: the outcome is fired along the motor
+neuron's pathways as `{"action": "get_dressed", "status": "done", "result": ...}` (or
+`"failed"`, `"timed_out"`, `"cancelled"` with a `"reason"`). Wire one back to the brain
+(`b.deliberative(motor, brain)`, which also carries the questions) and the brain hears how its
+action ended.
+
+**Stopping.** One program runs per motor neuron, as one body part does one thing at a time: a
+new command preempts the program running. `fabric.stop(name)` (or `m.stop(name)` from another
+program, a `stop` action say) stops it. A stopped program stops everything it commanded and
+still waits for, all the way down, and an effector whose commander stopped waiting gives up
+its retries.
+
+**Actions: what the brain sees.** `b.action(id, description, args)` offers a motor neuron or an
+effector to brains, with what it does and the shape of its arguments. An LLM brain's prompt
+lists the actions and nothing else, so the joints and fingers below them stay out of its sight
+and out of its answers. A brain with effectors it should call directly declares those as
+actions too.
+
+```rust,no_run
+use furnace::nerve::prelude::*;
+use serde_json::{Value, json};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let mut b = Fabric::builder();
+// What the brain may call: the hand, not its fingers
+let hand = b.motor("grasp", |m| async move {
+    let mut force = 0.4;
+    for _ in 0..3 {
+        // Three fingers at once, then the grip
+        let fingers = ["thumb", "index", "middle"]
+            .map(|f| Command::new(&format!("finger:{f}"), json!({"curl": 70})));
+        m.together(fingers).await?;
+        match m.command("grip", json!({"force": force})).await {
+            // The fingertips' pressure, as the grip effector measured it
+            Ok(felt) if felt["pressure"].as_f64() >= Some(0.6) => return Ok(felt),
+            // Too light: squeeze harder, without asking anyone
+            Ok(_) => force += 0.3,
+            // Slipped: try again
+            Err(_) => {}
+        }
+    }
+    Err(MotionError::failed("could not get a grip"))
+});
+b.action(hand, "Grasp what is in front of the hand.", Value::Null);
+for finger in ["thumb", "index", "middle"] {
+    b.motor(&format!("finger:{finger}"), move |m| async move {
+        let curl = m.args()["curl"].clone();
+        m.command(&format!("knuckle:{finger}"), json!({"angle": curl})).await
+    });
+    b.effector(Webhook::new(&format!("knuckle:{finger}"), "http://127.0.0.1:9000/joint")?);
+}
+b.effector(Webhook::new("grip", "http://127.0.0.1:9000/grip")?); // answers {"pressure": ...}
+let fabric = b.build()?;
+# let _ = fabric;
+# Ok(())
+# }
+```
+
+[`examples/get_dressed.rs`](../examples/get_dressed.rs) runs the whole story with stand-ins for
+the eyes, the joints and the brain, and prints it as it happens:
+
+```bash
+cargo run --example get_dressed
+```
+
+The thermometer reads 4 °C and the brain, which knows only `get_dressed` and `stop`, answers
+`get_dressed`. `get_dressed` looks for a coat in what the eyes stream for 300 ms; there is
+none, so it asks the brain what to wear instead and waits for "the jacket, on the hook". It
+commands `reach` (the right shoulder, then the elbow) and `grasp` (three fingers at once, then
+the grip); the first grip slips and the hand tries again, then squeezes harder by the pressure
+the fingertips report. Both sleeves go on at once, and the brain hears
+`{"action": "get_dressed", "status": "done", "result": {"wearing": "jacket"}}`. The brain is
+reached three times: the cold, the question and the report.
 
 ## The API
 
@@ -162,6 +270,7 @@ The other common shape sends what comes in to the brain, which decides what to d
 use furnace::Server;
 use furnace::llm::mock::MockEngine;
 use furnace::nerve::prelude::*;
+use serde_json::json;
 
 #[tokio::main]
 async fn main() -> furnace::Result<()> {
@@ -175,8 +284,11 @@ async fn main() -> furnace::Result<()> {
     let events = b.receptor(Http::new("events", "/events").text());
     let brain = b.neuron(Llm::new("brain", engine));
     b.deliberative(events, brain);
-    b.effector(Webhook::new("page", "http://127.0.0.1:9000/page")?);
-    b.effector(FileAppend::new("log", "journal.log"));
+    let page = b.effector(Webhook::new("page", "http://127.0.0.1:9000/page")?);
+    let log = b.effector(FileAppend::new("log", "journal.log"));
+    // What the brain is told it may call
+    b.action(page, "Page the operator.", json!({"text": "why"}));
+    b.action(log, "Write a line to the journal.", json!({"line": "text"}));
     Server::new().port(3000).nerve(b).serve().await
 }
 ```
@@ -187,8 +299,11 @@ What the builder does for you:
   act (`Webhook`, `Process`, `FileAppend`, `Respond`, `ChannelOut`, `SseOut`, or your own
   `Act`) with the default local loop, or an `Effector` you configured
   (`Effector::new(act).refractory(..)`).
-- A command reaches the effector it names from any neuron, with or without a pathway to it:
-  `reflex` and `deliberative` are for signals that are not commands yet.
+- `motor` adds a motor neuron with its program ([the motor side](#the-motor-side)), and
+  `action` offers a motor neuron or an effector to brains, with a description and the shape of
+  its arguments: an LLM brain is told about these and nothing else.
+- A command reaches the effector or motor neuron it names from any neuron, with or without a
+  pathway to it: `reflex` and `deliberative` are for signals that are not commands yet.
 - Neurons have no mechanisms until `b.gate(id, Mechanisms::NONE.threshold(..).habituation(..))`
   gives them some, so nothing is dropped that you did not ask to drop. Habituation attenuates
   a repeat; the threshold is where it dies.
@@ -249,9 +364,12 @@ async fn main() -> furnace::Result<()> {
         Effector::new(Webhook::new("alarm", "http://127.0.0.1:9000/alarm")?)
             .refractory(Duration::from_millis(100)),
     );
-    b.effector(Webhook::new("webhook", "http://127.0.0.1:9000/hook")?);
-    b.effector(FileAppend::new("log", "journal.log"));
+    let webhook = b.effector(Webhook::new("webhook", "http://127.0.0.1:9000/hook")?);
+    let log = b.effector(FileAppend::new("log", "journal.log"));
     b.effector(Respond::new("respond"));
+    // What the brain may call; the alarm and the response are the reflex's
+    b.action(webhook, "Ask the operations service to look.", json!({"action": "investigate"}));
+    b.action(log, "Write a line to the journal.", json!({"line": "text"}));
 
     // Pathways: the brain's weighs more, so it wins whenever the deadline allows it. The
     // reflex pathway to the alarm is optional (the command would find it); declared, it has
@@ -312,7 +430,10 @@ rate and stamps it on the signal.
 An `Effector` wraps an `Act` and supplies the loop: `Retry` (3 attempts from 100 ms backoff by
 default), `Breaker` (open after 5 consecutive failures for 10 s, then one trial), `ActRateLimit`
 (a token bucket that paces or drops) and `refractory`. Acts that finish at once run inline on
-the reflex arc; the rest run on the efferent runtime. Implement `Act` for your own device.
+the reflex arc; the rest run on the efferent runtime. Implement `Act` for your own device: an
+act returns `Ok(value)`, what it measured or was answered (`Action::value`, or `Action::ok()`
+for nothing to say), which goes back to the motor program that sent the command; the webhook
+returns its target's JSON answer.
 
 | Act | Does |
 |---|---|
@@ -325,10 +446,12 @@ the reflex arc; the rest run on the efferent runtime. Implement `Act` for your o
 
 ### Brains (`furnace::nerve::brain`)
 
-`Llm::new(name, engine)` takes any `LlmEngine` (feature `llm`): the effectors' names go into
-the system prompt (`{effectors}` in your own prompt), the signal's payload is the user message,
-and the answer is parsed as commands wherever JSON appears in it: `{"effector": "...", "args":
-...}`, `{"name": ..., "arguments": ...}`, `{"tool_calls": [...]}`, or arrays of those. The
+`Llm::new(name, engine)` takes any `LlmEngine` (feature `llm`): the actions declared with
+`b.action` go into the system prompt, one a line with their description and arguments
+(`{actions}` in your own prompt), the signal's payload is the user message (a question from a
+motor neuron, or an action's outcome, are signals too), and the answer is parsed as commands
+wherever JSON appears in it: `{"name": ..., "args": ...}`, `{"effector": "...", "args": ...}`,
+`{"name": ..., "arguments": ...}`, `{"tool_calls": [...]}`, or arrays of those. The
 signals of one summation window are generated at once, so an engine with a scheduler batches
 them. `ModelNeuron::brain(name, model, input, output)` does the same for any `Model`, with
 your functions from signal to input tensors and from outputs to commands, one forward pass per
@@ -343,7 +466,8 @@ In `/metrics` (`nerve` in the JSON, `furnace_nerve_*` in Prometheus) and `GET /n
   in; `reason="not_interested"` in Prometheus), `computed` (firings from blocking work, every
   firing of a brain); effectors add `acted`, `failed`, `retries`,
   `dropped_open`, `dropped_rate`, `quiet_refractory`, commands in flight, the breaker's state
-  and the latency to the world; brains add generations, commands and the generation latency
+  and the latency to the world; brains add generations, commands and the generation latency;
+  motor neurons add `started`, `done`, `failed`, `timed_out`, `cancelled` and `running`
 - per pathway: signals, the latency from signal-in to signal-out (`latency_ms`), how many
   signals it was too slow for, and the current summation window
 - `brain_fraction`: signals that reached a brain over signals received
@@ -361,7 +485,8 @@ neuron's counters (`kind` and `reason` labels), each pathway's signals (`kind="r
 `"deliberative"`), the pathway and arc latencies as histograms in seconds
 (`furnace_nerve_pathway_latency_seconds_bucket`, `_sum`, `_count`, and the same for
 `arc`), and each effector's counters, `inflight` and `circuit_open`. What a
-brain adds, and an effector's latency, are in the JSON only.
+brain or a motor neuron adds, and an effector's latency, are in the JSON only. `GET /nerve`
+also shows each action's description and arguments, as a brain is told them.
 
 ## The demo
 
@@ -477,9 +602,12 @@ Notes on the numbers:
 
 ## What it is not, and limits
 
-- Not a workflow engine or a DAG DSL: pathways and neurons are code.
-- Not an agent framework: the brain's commands go to effectors; planning loops belong to the
-  brain.
+- Not a workflow engine or a DAG DSL: pathways and neurons are code, and a motor neuron's
+  program is an async closure; nothing is persisted, and a program that the process loses is
+  lost.
+- Not an agent framework: the brain names actions, and motor neurons carry them out with the
+  loops a body has (retry, adjust, ask a small question, give up and report); planning belongs
+  to the brain.
 - Not a new engine: reflex models and brains are Burn, candle or anything behind `Model` or
   `LlmEngine`.
 - A deliberative pathway is the server's dynamic batching (`src/batching`): a queue, workers

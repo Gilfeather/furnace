@@ -82,7 +82,9 @@ fn build() -> Result<Demo, BuildError> {
     .piece_delay(Duration::from_millis(30));
     let brain = b.neuron(Llm::new("brain", engine));
     let (actuator, deliveries) = ChannelOut::new("actuator", 64);
-    b.effector(actuator);
+    let actuator = b.effector(actuator);
+    // The one action the brain is told it may call
+    b.action(actuator, "Act on the machine.", json!({"do": "what to do"}));
 
     b.reflex(logs_id, triage);
     b.reflex(smoke_id, triage);

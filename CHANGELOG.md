@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The nervous system's motor side is a hierarchy: a brain names an action ("get dressed")
+  and motor neurons carry it out. `FabricBuilder::motor(name, program)` adds one; a command
+  addressed to its name starts its program (an async closure over a `Motion`) on the motor
+  side's runtime. The program commands the motor neurons and effectors below it and waits for
+  each outcome (`Motion::command`, several at once with `Motion::together`), waits for what a
+  receptor senses (`Motion::sense`), asks a small question along its own pathways, selected by
+  deadline and measured latency as any signal's (`Motion::ask`), and retries or adjusts
+  locally. Its outcome goes back to the program that commanded it, or, for a brain's command,
+  up the motor neuron's pathways as `{"action", "status", "result" | "reason"}`. The command's
+  deadline bounds it; a newer command to the same motor neuron preempts it; `Fabric::stop`
+  stops it and everything below it. `NeuronKind::Motor`, `MotionError`, `Sense`.
+- `FabricBuilder::action(id, description, args)` declares what a brain may call: an LLM
+  brain's prompt lists these actions, with their descriptions and arguments, and nothing
+  below them. `GET /nerve` shows them.
+- `examples/get_dressed.rs`: "it is cold, get dressed", from the thermometer through the
+  eyes, a question to the brain, the arm, the hand and the knuckles, and back.
+
 ### Changed
+- An act returns a value (`ActResult`, `Action::value`): what it measured or was answered,
+  which goes back to the motor program that sent the command; the webhook returns its target's
+  JSON answer. An effector whose commander stopped waiting gives up its retries.
+- An LLM brain is told the actions declared with `FabricBuilder::action` instead of every
+  effector's name: `{actions}` replaces `{effectors}` in a system prompt of your own,
+  `Cx::actions` replaces `Cx::effectors`, and the default prompt asks for
+  `{"name": ..., "args": ...}`. A brain with no actions declared is told none.
+- A command may name a motor neuron as well as an effector; `Command::effector` holds either.
 - `rustls-pure` has a version of its own and is released when it changes, apart from the
   other crates; its history is in [rustls-pure/CHANGELOG.md](rustls-pure/CHANGELOG.md).
   furnace-server depends on `rustls-pure` 0.15.

@@ -146,8 +146,10 @@ impl Fabric {
     }
 
     /// Fire `signal` from `from` as if `from` had fired it: a motor program's commands,
-    /// questions and reports leave its motor neuron this way
-    pub(crate) fn emit(&self, from: NeuronId, signal: Signal) -> Outcome {
+    /// questions and reports leave its motor neuron this way. They left the stimulus's
+    /// synchronous chain, so they are no reflex arc.
+    pub(crate) fn emit(&self, from: NeuronId, mut signal: Signal) -> Outcome {
+        signal.trace.mark_queued();
         self.route(from, signal, 1, &mut None)
     }
 
