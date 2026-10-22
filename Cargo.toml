@@ -83,9 +83,11 @@ kuebiko = { path = "kuebiko", version = "0.14.0", features = ["serde"] }
 
 bytes = "1.9"
 
-# Web Framework. axum without `form` and `query` (furnace extracts neither) and without
-# `tower-log` (logs go through tracing only); tokio with the parts the server uses.
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "matched-path", "original-uri", "tokio", "tracing"] }
+# Web Framework. axum without `form` and `query` (furnace extracts neither), without
+# `matched-path` and `original-uri` (each adds an extension to every request; furnace reads
+# neither) and without `tower-log` (logs go through tracing only); tokio with the parts the
+# server uses.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tracing"] }
 tokio = { version = "1.53", features = ["rt-multi-thread", "net", "sync", "time", "macros", "signal", "process", "io-util"] }
 
 # Serialization

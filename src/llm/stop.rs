@@ -20,11 +20,11 @@ impl StopStrings {
 
     /// Add the next piece. Returns the text that is safe to emit, and whether a stop string was
     /// found; the text then ends where the match began, and nothing after it counts.
-    pub fn push(&mut self, piece: &str) -> (String, bool) {
+    pub fn push(&mut self, piece: String) -> (String, bool) {
         if self.stops.is_empty() {
-            return (piece.to_string(), false);
+            return (piece, false);
         }
-        self.held.push_str(piece);
+        self.held.push_str(&piece);
         // What was held matched nothing, so the earliest match ends in the new piece
         if let Some(start) = self
             .stops
@@ -64,7 +64,7 @@ mod tests {
         let mut matcher = StopStrings::new(&stops);
         let mut out = Vec::new();
         for piece in pieces {
-            let (text, hit) = matcher.push(piece);
+            let (text, hit) = matcher.push(piece.to_string());
             out.push(text);
             if hit {
                 return (out, true, String::new());

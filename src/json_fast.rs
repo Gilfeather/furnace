@@ -179,11 +179,17 @@ fn numbers(spans: &[&[u8]]) -> Option<Vec<Vec<f32>>> {
         Some(parsed)
     })?;
 
-    // Join each array's pieces back together, in order
+    // Join each array's pieces back together, in order, each array grown once to its length
+    let mut lens = vec![0; spans.len()];
+    for (&(array, _, _), numbers) in pieces.iter().zip(&parsed) {
+        lens[array] += numbers.len();
+    }
     let mut arrays = vec![Vec::new(); spans.len()];
     for (&(array, _, _), numbers) in pieces.iter().zip(parsed) {
         if arrays[array].is_empty() {
             arrays[array] = numbers;
+            let rest = lens[array] - arrays[array].len();
+            arrays[array].reserve_exact(rest);
         } else {
             arrays[array].extend(numbers);
         }

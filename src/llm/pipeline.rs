@@ -194,11 +194,10 @@ impl TextPipeline {
     /// The prompt tokens of a request: a chat through the chat template, raw text as it is.
     /// See [`encode`](Self::encode) for the special tokens.
     pub fn encode_input(&self, input: &Prompt) -> Result<Vec<u32>, EngineError> {
-        let (text, add_special_tokens) = match input {
-            Prompt::Chat(messages) => (self.apply_chat_template(messages)?, false),
-            Prompt::Text(text) => (text.clone(), true),
-        };
-        self.encode(&text, add_special_tokens)
+        match input {
+            Prompt::Chat(messages) => self.encode(&self.apply_chat_template(messages)?, false),
+            Prompt::Text(text) => self.encode(text, true),
+        }
     }
 
     /// The tokens of `text`.

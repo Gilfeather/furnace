@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - kamui: a reallocation that stays under its 256 KiB threshold goes straight to the system
   allocator's `realloc`, which may resize in place, instead of allocating, copying and freeing.
 - furnace-cli builds tokio with only the features it uses, not `full`.
+- `llm::StopStrings::push` takes the piece as a `String`, which it hands back as it is when
+  there are no stop strings, instead of copying a `&str`.
+- Less work per request: request IDs, binary Open Inference Protocol responses, streamed LLM
+  chunks and the JSON fast path copy and allocate less; axum's `matched-path` and
+  `original-uri` features, which added an extension to every request, are off. Responses are
+  byte for byte the same.
 
 ## [0.14.0] - 2026-10-22
 

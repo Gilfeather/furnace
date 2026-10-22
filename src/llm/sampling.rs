@@ -54,7 +54,10 @@ impl Sampler {
         } else {
             self.sample_random(logits)
         };
-        *self.counts.entry(token).or_insert(0) += 1;
+        // The counts only feed the penalties
+        if self.presence_penalty != 0.0 || self.frequency_penalty != 0.0 {
+            *self.counts.entry(token).or_insert(0) += 1;
+        }
         token
     }
 

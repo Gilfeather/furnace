@@ -188,8 +188,7 @@ impl ServerState {
         let start = Instant::now();
         let permit = self
             .inference_slots
-            .clone()
-            .try_acquire_owned()
+            .try_acquire()
             .map_err(|_| InferError::Busy)?;
         let task = self
             .serving
@@ -267,11 +266,17 @@ pub(crate) fn f32s_from_le(bytes: &[u8]) -> Vec<f32> {
 
 /// `f32` values as raw little-endian bytes
 pub(crate) fn f32s_to_le(values: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(size_of_val(values));
-    for value in values {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
+    let mut bytes = Vec::new();
+    f32s_to_le_into(values, &mut bytes);
     bytes
+}
+
+/// [`f32s_to_le`], appended to `out`
+pub(crate) fn f32s_to_le_into(values: &[f32], out: &mut Vec<u8>) {
+    out.reserve(size_of_val(values));
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
 }
 
 /// Raw little-endian tensor bytes as values: `INT32` widens to `i64`
@@ -298,10 +303,31 @@ pub(crate) fn decode_raw(datatype: DataType, bytes: &[u8]) -> Values {
 }
 
 /// Values as raw little-endian bytes
+#[cfg(feature = "grpc")]
 pub(crate) fn encode_raw(values: &Values) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    encode_raw_into(values, &mut bytes);
+    bytes
+}
+
+/// [`encode_raw`], appended to `out`
+pub(crate) fn encode_raw_into(values: &Values, out: &mut Vec<u8>) {
     match values {
-        Values::F32(v) => f32s_to_le(v),
-        Values::I64(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+        Values::F32(v) => f32s_to_le_into(v, out),
+        Values::I64(v) => {
+            out.reserve(size_of_val(v.as_slice()));
+            for value in v {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+}
+
+/// How many bytes [`encode_raw`] makes of `values`
+pub(crate) fn raw_len(values: &Values) -> usize {
+    match values {
+        Values::F32(v) => size_of_val(v.as_slice()),
+        Values::I64(v) => size_of_val(v.as_slice()),
     }
 }
 
