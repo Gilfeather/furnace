@@ -127,6 +127,24 @@ unsafe impl GlobalAlloc for BlockCache {
         }
         unsafe { System.dealloc(ptr, layout) }
     }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // Small to small never touches the cache: `System` may grow or shrink the block in
+        // place, where the default would allocate, copy and free
+        if layout.size() < MIN_SIZE && new_size < MIN_SIZE {
+            return unsafe { System.realloc(ptr, layout, new_size) };
+        }
+        // SAFETY: as the caller promised for `realloc`; `new_layout` is valid by its contract
+        let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+        let new_ptr = unsafe { self.alloc(new_layout) };
+        if !new_ptr.is_null() {
+            unsafe {
+                std::ptr::copy_nonoverlapping(ptr, new_ptr, layout.size().min(new_size));
+                self.dealloc(ptr, layout);
+            }
+        }
+        new_ptr
+    }
 }
 
 #[cfg(test)]
@@ -216,6 +234,32 @@ mod tests {
         let a = alloc(&cache, layout);
         unsafe { cache.dealloc(a.as_ptr(), layout) };
         assert_eq!(cache.cache.lock().unwrap().bytes, 0);
+    }
+
+    #[test]
+    fn realloc_keeps_the_contents_across_the_size_limit() {
+        let cache = BlockCache::new();
+        let small = Layout::from_size_align(1024, 8).unwrap();
+        let ptr = alloc(&cache, small);
+        unsafe { ptr.as_ptr().write_bytes(5, small.size()) };
+        // Small to small, small to large, large to large, large to small
+        let mut layout = small;
+        let mut ptr = ptr.as_ptr();
+        for new_size in [4096, MIN_SIZE + 4096, 2 * MIN_SIZE, 2048] {
+            ptr = unsafe { cache.realloc(ptr, layout, new_size) };
+            assert!(!ptr.is_null());
+            let kept = unsafe { std::slice::from_raw_parts(ptr, small.size()) };
+            assert!(kept.iter().all(|&b| b == 5), "realloc to {new_size}");
+            layout = Layout::from_size_align(new_size, 8).unwrap();
+        }
+        unsafe { cache.dealloc(ptr, layout) };
+        // The large blocks freed on the way were kept
+        assert_eq!(cached(&cache), (2, MIN_SIZE + 4096 + 2 * MIN_SIZE));
+        let mut kept = cache.cache.lock().unwrap();
+        for block in kept.blocks.iter_mut().filter_map(Option::take) {
+            let layout = Layout::from_size_align(block.size, block.align).unwrap();
+            unsafe { System.dealloc(block.ptr as *mut u8, layout) };
+        }
     }
 
     mod properties {

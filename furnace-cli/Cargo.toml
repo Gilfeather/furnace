@@ -59,7 +59,8 @@ furnace-burn = { path = "../furnace-burn", version = "0.14.0" }
 burn = { version = "0.22", default-features = false, features = ["std"] }
 clap = { version = "4.5", features = ["derive"] }
 kamui = { path = "../kamui", version = "0.14.0" }
-tokio = { version = "1.53", features = ["full"] }
+# `#[tokio::main]` and `spawn_blocking`; the server enables the rest it needs itself
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
 # Log lines with RFC 3339 timestamps, in UTC (JSON) or the local time zone
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "chrono"] }

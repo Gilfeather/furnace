@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   furnace-server depends on `rustls-pure` 0.15.
 - TLS (`--features tls`) offers the post-quantum key exchange X25519MLKEM768 first, from
   rustls-pure 0.15; clients without it get X25519, P-256 or P-384 as before.
+- kuebiko: `render_value` takes `impl Display` rather than `impl ToString`, and no longer
+  formats the value into a `String` of its own first. The histogram series, `_sum`, `_count`
+  and `label` allocate less, and `percentiles_ms` reads the counters once for all three.
+- amate asks a batch's `Batching::window` only when the worker would wait for more items, and
+  weighs each item once per batch rather than twice.
+- kamui: a reallocation that stays under its 256 KiB threshold goes straight to the system
+  allocator's `realloc`, which may resize in place, instead of allocating, copying and freeing.
+- furnace-cli builds tokio with only the features it uses, not `full`.
 
 ## [0.14.0] - 2026-10-22
 

@@ -151,7 +151,11 @@ impl Histogram {
     /// The `q` quantile (0..=1) in seconds, interpolated linearly within its bucket. Values in
     /// the `+Inf` bucket are reported as the largest finite bound.
     pub fn quantile(&self, q: f64) -> Option<f64> {
-        let (counts, _) = self.snapshot();
+        self.quantile_of(&self.snapshot().0, q)
+    }
+
+    /// [`quantile`](Self::quantile) over counts read already
+    fn quantile_of(&self, counts: &[u64], q: f64) -> Option<f64> {
         let total: u64 = counts.iter().sum();
         if total == 0 {
             return None;
@@ -173,9 +177,10 @@ impl Histogram {
     }
 
     /// The median, 95th and 99th percentiles in milliseconds, as [`quantile`](Self::quantile)
-    /// estimates them
+    /// estimates them, all three from one reading of the counters
     pub fn percentiles_ms(&self) -> Percentiles {
-        let ms = |q| self.quantile(q).map(|s| s * 1000.0);
+        let (counts, _) = self.snapshot();
+        let ms = |q| self.quantile_of(&counts, q).map(|s| s * 1000.0);
         Percentiles {
             p50: ms(0.50),
             p95: ms(0.95),
@@ -197,24 +202,26 @@ impl Histogram {
         let mut cumulative = 0;
         for (i, count) in counts.iter().enumerate() {
             cumulative += count;
-            let le = self
-                .bounds
-                .get(i)
-                .map_or_else(|| "+Inf".to_string(), |b| b.to_string());
-            let _ = writeln!(
-                out,
-                "{name}_bucket{{{labels}{sep}le=\"{le}\"}} {cumulative}"
-            );
+            let _ = match self.bounds.get(i) {
+                Some(le) => writeln!(
+                    out,
+                    "{name}_bucket{{{labels}{sep}le=\"{le}\"}} {cumulative}"
+                ),
+                None => writeln!(
+                    out,
+                    "{name}_bucket{{{labels}{sep}le=\"+Inf\"}} {cumulative}"
+                ),
+            };
         }
-        render_labelled(out, &format!("{name}_sum"), labels, sum);
-        render_labelled(out, &format!("{name}_count"), labels, cumulative);
+        sample(out, name, "_sum", labels, sum);
+        sample(out, name, "_count", labels, cumulative);
     }
 }
 
 /// Append one counter or gauge in the Prometheus text format
-pub fn render_value(out: &mut String, name: &str, kind: &str, help: &str, value: impl ToString) {
+pub fn render_value(out: &mut String, name: &str, kind: &str, help: &str, value: impl Display) {
     render_family(out, name, kind, help);
-    render_labelled(out, name, "", value.to_string());
+    render_labelled(out, name, "", value);
 }
 
 /// Append the `HELP` and `TYPE` lines of a family (`kind` is `counter`, `gauge`, ...), for
@@ -227,19 +234,30 @@ pub fn render_family(out: &mut String, name: &str, kind: &str, help: &str) {
 /// Append one sample, `name{labels} value`; `labels` is written as given (`a="x",b="y"`,
 /// values escaped with [`label`]), and an empty one leaves out the braces
 pub fn render_labelled(out: &mut String, name: &str, labels: &str, value: impl Display) {
+    sample(out, name, "", labels, value);
+}
+
+/// [`render_labelled`] with `suffix` after the name, such as `_sum`
+fn sample(out: &mut String, name: &str, suffix: &str, labels: &str, value: impl Display) {
     if labels.is_empty() {
-        let _ = writeln!(out, "{name} {value}");
+        let _ = writeln!(out, "{name}{suffix} {value}");
     } else {
-        let _ = writeln!(out, "{name}{{{labels}}} {value}");
+        let _ = writeln!(out, "{name}{suffix}{{{labels}}} {value}");
     }
 }
 
 /// Escape a Prometheus label value
 pub fn label(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
+    let mut escaped = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            c => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 #[cfg(test)]
