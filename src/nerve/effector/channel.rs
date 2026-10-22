@@ -46,7 +46,11 @@ impl Act for ChannelOut {
             self.sender
                 .try_send(Delivery {
                     command: command.clone(),
-                    signal: signal.clone(),
+                    // Waiting in the channel does not hold a nerve's place
+                    signal: Signal {
+                        ticket: None,
+                        ..signal.clone()
+                    },
                 })
                 .map(|()| serde_json::Value::Null)
                 .map_err(|e| match e {

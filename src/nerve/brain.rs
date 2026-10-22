@@ -641,7 +641,8 @@ mod tests {
         let r = b.neuron(pass("in"));
         let brain = b.neuron(brain);
         let (channel, receiver) = ChannelOut::new("out", 64);
-        b.effector(channel);
+        let out = b.effector(channel);
+        b.action(out, "Send it out.", serde_json::Value::Null);
         b.deliberative(r, brain)
             .summation(Summation::default().window(Duration::from_millis(5)));
         (b.build().unwrap(), r, receiver)

@@ -21,7 +21,8 @@ pub struct NerveMetrics {
     pub reached_brain: u64,
     /// `reached_brain / received`
     pub brain_fraction: f64,
-    /// Commands addressed to a name no effector has
+    /// Commands addressed to a name no effector or motor neuron has, or by a brain to one
+    /// that is not an action
     pub unrouted: u64,
     /// Signals with no pathway fast enough for their deadline
     pub no_eligible_pathway: u64,
@@ -33,6 +34,8 @@ pub struct NerveMetrics {
     pub pathways: Vec<PathwayMetrics>,
     /// Stimulus-to-action latency of each reflex arc (receptor → effector, never queued)
     pub arcs: Vec<ArcMetrics>,
+    /// Each nerve's lane
+    pub nerves: Vec<super::NerveLaneMetrics>,
 }
 
 /// One neuron's counters (in `GET /metrics` and `GET /nerve`)
@@ -108,6 +111,8 @@ pub(crate) struct Description {
     pub pathways: Vec<PathwayMetrics>,
     /// Stimulus-to-action latency of each reflex arc
     pub arcs: Vec<ArcMetrics>,
+    /// Each nerve's lane
+    pub nerves: Vec<super::NerveLaneMetrics>,
     /// Signals that reached a brain over signals received
     pub brain_fraction: f64,
 }
@@ -133,6 +138,9 @@ pub(crate) struct NeuronDescription {
     /// What a brain is told about it, for an action
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<super::motor::ActionSpec>,
+    /// The nerve it belongs to
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nerve: Option<String>,
 }
 
 impl Fabric {
@@ -151,6 +159,7 @@ impl Fabric {
                 .collect(),
             pathways: self.pathway_metrics(),
             arcs: self.arc_metrics(),
+            nerves: inner.nerves.iter().map(|n| n.metrics()).collect(),
         }
     }
 
@@ -175,10 +184,12 @@ impl Fabric {
                         .iter()
                         .find(|a| a.name == cell.neuron.name())
                         .cloned(),
+                    nerve: cell.nerve.map(|n| inner.nerves[n].name.clone()),
                 })
                 .collect(),
             pathways: self.pathway_metrics(),
             arcs: self.arc_metrics(),
+            nerves: inner.nerves.iter().map(|n| n.metrics()).collect(),
             brain_fraction: self.brain_fraction(),
         }
     }
@@ -474,6 +485,7 @@ mod tests {
                 to: "brain".into(),
                 latency_ms: latency(3),
             }],
+            nerves: Vec::new(),
         };
         let mut out = String::new();
         render_fabric(&metrics, &mut out);

@@ -657,6 +657,8 @@ pub struct Signal {
     pub reply: Option<ReplyHandle>,
     /// The way back to the motor program that sent the command or asked the question, if any
     pub(crate) feedback: Option<Feedback>,
+    /// The place in a nerve's lane that this signal, or the one it derives from, took
+    pub(crate) ticket: Option<crate::nerve::fabric::Ticket>,
 }
 
 impl Signal {
@@ -678,6 +680,7 @@ impl Signal {
             trace: Trace::default(),
             reply: None,
             feedback: None,
+            ticket: None,
         }
     }
 
@@ -719,6 +722,7 @@ impl Signal {
             trace: self.trace,
             reply: self.reply.clone(),
             feedback: self.feedback.clone(),
+            ticket: self.ticket.clone(),
         }
     }
 
@@ -767,12 +771,13 @@ impl Signal {
         true
     }
 
-    /// A copy to look at, without the ways back to a request or a motor program: holding it
-    /// keeps nobody waiting
+    /// A copy to look at, without the ways back to a request or a motor program and without
+    /// a nerve's place: holding it keeps nobody waiting
     pub(crate) fn observed(&self) -> Self {
         Self {
             reply: None,
             feedback: None,
+            ticket: None,
             ..self.clone()
         }
     }

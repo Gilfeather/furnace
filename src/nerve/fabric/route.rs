@@ -50,6 +50,11 @@ impl Fabric {
         Some(self.stimulate(self.neuron(receptor)?, signal))
     }
 
+    /// Carry on a signal that waited in a nerve's lane
+    pub(super) fn deliver(&self, to: NeuronId, signal: Signal) -> Outcome {
+        self.drive(to, signal, 1, &mut None, Instant::now())
+    }
+
     /// Run `id`'s gate and `stimulate`, then propagate what it fires; `now` is when the
     /// signal arrived, which the caller has read already
     fn drive(
@@ -184,6 +189,21 @@ impl Fabric {
             // A command names its effector or motor neuron; the pathway to it is the one
             // (declared or not)
             Some(command) => match self.0.by_name.get(&command.effector) {
+                // A brain commands the actions it was given, never the parts below them
+                Some(&target)
+                    if cell.kind == NeuronKind::Brain && !self.0.cells[target.index()].action =>
+                {
+                    self.0.unrouted.fetch_add(1, Ordering::Relaxed);
+                    debug!(
+                        "nerve: '{}' is not an action, and brain {} commanded it",
+                        command.effector,
+                        cell.neuron.name()
+                    );
+                    return Outcome {
+                        unrouted: 1,
+                        ..Outcome::default()
+                    };
+                }
                 Some(&target)
                     if matches!(
                         self.0.cells[target.index()].kind,
@@ -199,7 +219,10 @@ impl Fabric {
                         Some(pathway) => Some(pathway),
                         None => {
                             self.0.commands_direct.fetch_add(1, Ordering::Relaxed);
-                            return self.drive(target, signal, depth, announced, now);
+                            return match self.enter(from, target, signal) {
+                                Ok(signal) => self.drive(target, signal, depth, announced, now),
+                                Err(outcome) => outcome,
+                            };
                         }
                     }
                 }
@@ -233,6 +256,10 @@ impl Fabric {
         pathway.signals.fetch_add(1, Ordering::Relaxed);
         match &pathway.queue {
             None => {
+                let signal = match self.enter(from, pathway.to, signal) {
+                    Ok(signal) => signal,
+                    Err(outcome) => return outcome,
+                };
                 let outcome = self.drive(pathway.to, signal, depth, announced, now);
                 pathway.latency.observe(now.elapsed());
                 outcome

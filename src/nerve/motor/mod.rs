@@ -312,7 +312,10 @@ impl Started {
                     report["reason"] = e.to_string().into();
                 }
             }
-            Fabric(fabric).emit(self.id, signal.derive(Payload::json(report)));
+            // The report waits for the brain without holding the nerve
+            let mut report = signal.derive(Payload::json(report));
+            report.ticket = None;
+            Fabric(fabric).emit(self.id, report);
         }
     }
 }
