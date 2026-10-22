@@ -10,7 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `rustls-pure` has a version of its own and is released when it changes, apart from the
   other crates; its history is in [rustls-pure/CHANGELOG.md](rustls-pure/CHANGELOG.md).
-  furnace-server depends on `rustls-pure` 0.14.
+  furnace-server depends on `rustls-pure` 0.15.
+- TLS (`--features tls`) offers the post-quantum key exchange X25519MLKEM768 first, from
+  rustls-pure 0.15; clients without it get X25519, P-256 or P-384 as before.
 
 ## [0.14.0] - 2026-10-22
 

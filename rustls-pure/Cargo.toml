@@ -2,12 +2,12 @@
 name = "rustls-pure"
 # A version of its own, not Furnace's: raised only when rustls-pure changes (DEVELOPMENT.md,
 # "Releasing rustls-pure"; CHANGELOG.md)
-version = "0.14.1"
+version = "0.15.0"
 edition = "2024"
 # Tested weekly (.github/workflows/rustls-pure.yml), as is the newest rustls in the range below
 rust-version = "1.89"
 authors = ["Furnace Contributors"]
-description = "A pure-Rust crypto provider for rustls: TLS 1.3 only, RustCrypto primitives with no C or assembly, checked against Wycheproof and strict about malformed input"
+description = "A pure-Rust crypto provider for rustls: TLS 1.3 only, post-quantum X25519MLKEM768, RustCrypto primitives with no C or assembly, checked against Wycheproof and OpenSSL and strict about malformed input"
 documentation = "https://docs.rs/rustls-pure"
 homepage = "https://github.com/Gilfeather/furnace/tree/main/rustls-pure"
 repository = "https://github.com/Gilfeather/furnace"
@@ -15,8 +15,9 @@ license = "MIT"
 keywords = ["rustls", "tls", "crypto", "pure-rust", "rustcrypto"]
 categories = ["cryptography", "network-programming"]
 readme = "README.md"
-# Wycheproof's test vectors (3 MB) and the interoperability script stay in the repository
-exclude = ["/wycheproof/", "/interop/"]
+# Wycheproof's test vectors (5.5 MB), the test certificates, the handshake tests that read them and
+# the interoperability script stay in the repository
+exclude = ["/wycheproof/", "/testdata/", "/tests/", "/interop/"]
 
 [dependencies]
 # 0.23.46 or any later 0.23, without its default providers (ring, aws-lc-rs) and without TLS 1.2
@@ -31,7 +32,11 @@ x25519-dalek = { version = "3", features = ["static_secrets"] }
 sha2 = "0.11"
 hmac = { version = "0.13", features = ["zeroize"] }
 getrandom = "0.4"
+# X25519MLKEM768; `zeroize`: the decapsulation key is wiped when dropped
+ml-kem = { version = "0.3.3", features = ["zeroize"] }
 
 [dev-dependencies]
 # Reads the Wycheproof vectors
 serde_json = "1.0"
+# Random and broken input (src/tests/properties.rs), in place of fuzzing: pure Rust
+proptest = { version = "1.12", default-features = false, features = ["std"] }

@@ -6,7 +6,9 @@
 # an RSA certificate or an unknown CA must be refused.
 #
 # Usage, from the repository root: bash rustls-pure/interop/run.sh
-# OPENSSL picks the openssl binary (it needs TLS 1.3 and Ed25519: OpenSSL 1.1.1 or later).
+# OPENSSL picks the openssl binary (it needs TLS 1.3 and Ed25519: OpenSSL 1.1.1 or later). The
+# post-quantum X25519MLKEM768 is checked with OpenSSL 3.5 or later, and skipped with an older
+# one unless REQUIRE_MLKEM=1, as CI sets it.
 set -euo pipefail
 
 # Git Bash on Windows would rewrite arguments such as /CN=localhost into Windows paths
@@ -14,6 +16,16 @@ export MSYS2_ARG_CONV_EXCL='*'
 
 openssl=${OPENSSL:-openssl}
 echo "OpenSSL: $("$openssl" version)"
+kems=$("$openssl" list -kem-algorithms 2>/dev/null || true)
+if [[ $kems == *X25519MLKEM768* ]]; then
+  mlkem=yes
+elif [ "${REQUIRE_MLKEM:-}" = 1 ]; then
+  echo "this OpenSSL has no X25519MLKEM768 (it needs 3.5 or later)"
+  exit 1
+else
+  mlkem=no
+  echo "this OpenSSL has no X25519MLKEM768: the post-quantum checks are skipped"
+fi
 cargo build --quiet -p rustls-pure --examples
 examples=${CARGO_TARGET_DIR:-target}/debug/examples
 exe=""
@@ -112,6 +124,11 @@ gnutls_suites=(AES-128-GCM AES-256-GCM CHACHA20-POLY1305)
 kx=(X25519 secp256r1 secp384r1)
 openssl_kx=(X25519 P-256 P-384)
 gnutls_kx=(GROUP-X25519 GROUP-SECP256R1 GROUP-SECP384R1)
+# With OpenSSL only: GnuTLS has X25519MLKEM768 only in some builds
+if [ "$mlkem" = yes ]; then
+  kx+=(X25519MLKEM768)
+  openssl_kx+=(X25519MLKEM768)
+fi
 request=$'GET / HTTP/1.0\r\nHost: localhost\r\n\r\n'
 
 openssl_client() { # openssl_client <ca> <extra s_client flags...>
@@ -126,12 +143,17 @@ echo "== OpenSSL client, rustls-pure server"
 for kind in p256 p384 ed25519; do
   start "$server" "$work/$kind-server.crt" "$work/$kind-server.key" "$port"
   for i in 0 1 2; do
-    for j in 0 1 2; do
+    for j in "${!kx[@]}"; do
       out=$(openssl_client "$work/$kind-ca.crt" -ciphersuites "${openssl_suites[i]}" \
         -groups "${openssl_kx[j]}")
       check "$out" "rustls-pure ${suites[i]} ${kx[j]}" "$kind certificate, ${suites[i]}, ${kx[j]}"
     done
   done
+  if [ "$mlkem" = yes ]; then
+    # OpenSSL's own preference: 3.5 and later put X25519MLKEM768 first, as rustls-pure does
+    out=$(openssl_client "$work/$kind-ca.crt")
+    check "$out" "X25519MLKEM768" "$kind certificate, OpenSSL's default groups agree on X25519MLKEM768"
+  fi
   other=p384
   [ "$kind" = p384 ] && other=p256
   out=$(openssl_client "$work/$other-ca.crt")
@@ -141,10 +163,11 @@ done
 
 echo "== rustls-pure client, OpenSSL server"
 for kind in p256 p384 ed25519; do
+  groups=$(IFS=:; echo "${openssl_kx[*]}")
   start "$openssl" s_server -accept "$port" -cert "$work/$kind-server.crt" \
-    -key "$work/$kind-server.key" -www -tls1_3 -groups X25519:P-256:P-384
+    -key "$work/$kind-server.key" -www -tls1_3 -groups "$groups"
   for i in 0 1 2; do
-    for j in 0 1 2; do
+    for j in "${!kx[@]}"; do
       out=$("$client" "$work/$kind-ca.crt" "$port" --suite "${suites[i]}" --group "${kx[j]}" \
         2>&1 || true)
       check "$out" "negotiated ${suites[i]} ${kx[j]}" "$kind certificate, ${suites[i]}, ${kx[j]}"
