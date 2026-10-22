@@ -163,7 +163,7 @@ checksum = "c880a97d28a3681c0267bd29cff89621202715b065127cd445fa0f0fe0aa2880"
 
 [[package]]
 name = "amate"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "proptest",
 ]
@@ -3320,7 +3320,7 @@ checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
 name = "furnace-burn"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "axum",
  "burn",
@@ -3359,7 +3359,7 @@ dependencies = [
 
 [[package]]
 name = "furnace-cli"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "axum",
  "burn",
@@ -3382,7 +3382,7 @@ dependencies = [
 
 [[package]]
 name = "furnace-demo"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "furnace-server",
  "serde_json",
@@ -3390,7 +3390,7 @@ dependencies = [
 
 [[package]]
 name = "furnace-server"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "amate",
  "axum",
@@ -4484,7 +4484,7 @@ dependencies = [
 
 [[package]]
 name = "kamui"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "proptest",
 ]
@@ -4508,7 +4508,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kuebiko"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "proptest",
  "serde",
@@ -6645,7 +6645,7 @@ dependencies = [
 
 [[package]]
 name = "rustls-pure"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "chacha20poly1305",

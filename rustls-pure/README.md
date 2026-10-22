@@ -37,7 +37,7 @@ cert-manager and Let's Encrypt can issue ECDSA certificates.
 ```toml
 [dependencies]
 rustls = { version = "0.23", default-features = false, features = ["std"] }
-rustls-pure = "0.13"
+rustls-pure = "0.14"
 ```
 
 Pass the provider to rustls's config builders, with TLS 1.3 as the protocol version. A server:
@@ -81,7 +81,7 @@ organization, has the same aim and a wider reach. As of October 2026:
 
 | | rustls-pure | rustls-rustcrypto |
 |---|---|---|
-| Release | 0.13 | 0.0.2-alpha (April 2024); its README says not to use it in production |
+| Release | 0.14 | 0.0.2-alpha (April 2024); its README says not to use it in production |
 | Outside audit | none | none |
 | Wycheproof tests | yes, every algorithm offered | none in the repository |
 | TLS versions | 1.3 | 1.2 and 1.3 |

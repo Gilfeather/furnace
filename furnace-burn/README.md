@@ -16,8 +16,8 @@ nervous system) and runs no model itself; this crate runs Burn models in it:
 
 ```toml
 [dependencies]
-furnace-server = "0.13"
-furnace-burn = "0.13"
+furnace-server = "0.14"
+furnace-burn = "0.14"
 burn = "0.22"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```

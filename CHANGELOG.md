@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-22
+
+A one-minute demo, the limits and the road to 1.0 written down, overload, failure, soak and
+property tests and the bugs they found, and the TLS crypto provider as a crate of its own,
+`rustls-pure`, checked against Wycheproof.
+
 ### Added
 - `furnace-demo`: the nervous system in one process, in the terminal, with a mock LLM as the
   brain and no model file or port. `cargo install --locked --git

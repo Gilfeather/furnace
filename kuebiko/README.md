@@ -17,7 +17,7 @@ dependencies.
 
 ```toml
 [dependencies]
-kuebiko = "0.13"
+kuebiko = "0.14"
 ```
 
 ```rust
