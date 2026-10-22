@@ -14,3 +14,7 @@ categories = ["memory-management"]
 readme = "README.md"
 
 [dependencies]
+
+[dev-dependencies]
+# Property tests only; the crate itself has no dependencies
+proptest = { version = "1.12", default-features = false, features = ["std"] }

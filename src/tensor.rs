@@ -124,6 +124,12 @@ impl From<&IoSpec> for TensorInfo {
     }
 }
 
+/// The number of elements of a tensor of `shape`; `None` when it does not fit in a `usize`,
+/// as a client's shape may not
+pub(crate) fn element_count(shape: &[usize]) -> Option<usize> {
+    shape.iter().try_fold(1usize, |n, &d| n.checked_mul(d))
+}
+
 /// Tensor elements in host memory
 #[derive(Debug, Clone, PartialEq)]
 pub enum Values {

@@ -12,7 +12,7 @@
 //! concurrency limit, the timeout and the metrics. Any other model takes its graph's inputs by
 //! name and returns its outputs (all, or those requested), one request per forward pass.
 
-use crate::tensor::{DataType, HostTensor, Values};
+use crate::tensor::{DataType, HostTensor, Values, element_count};
 
 use std::fmt;
 
@@ -446,16 +446,23 @@ pub(super) fn assemble_inputs<'a>(
             return Err(format!("Input '{name}' is given twice"));
         }
         let shape = request_shape(model, index, tensor.shape)?;
-        let elements: usize = shape.iter().product();
+        // A shape is the client's: its count may not fit in a `usize`
+        let too_large = || {
+            format!(
+                "Input '{name}' has shape {:?}: too many elements",
+                tensor.shape
+            )
+        };
+        let elements = element_count(&shape).ok_or_else(too_large)?;
         let values = match tensor.source {
             Source::Raw(bytes) => {
-                if bytes.len() != elements * wire.size() {
+                let needed = elements.checked_mul(wire.size()).ok_or_else(too_large)?;
+                if bytes.len() != needed {
                     return Err(format!(
-                        "Input '{name}' has {} bytes of raw data; shape {:?} of {} needs {}",
+                        "Input '{name}' has {} bytes of raw data; shape {:?} of {} needs {needed}",
                         bytes.len(),
                         tensor.shape,
                         wire.v2_name(),
-                        elements * wire.size()
                     ));
                 }
                 decode_raw(wire, bytes)

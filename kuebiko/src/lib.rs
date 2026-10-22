@@ -288,4 +288,145 @@ mod tests {
     fn labels_are_escaped() {
         assert_eq!(label("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
     }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Latencies up to a minute, most of them within the buckets
+        fn latencies() -> impl Strategy<Value = Vec<Duration>> {
+            prop::collection::vec(
+                prop_oneof![
+                    (0u64..20_000_000_000).prop_map(Duration::from_nanos),
+                    (0u64..60_000_000_000).prop_map(Duration::from_nanos),
+                    prop::sample::select(LATENCY_BUCKETS.to_vec())
+                        .prop_map(Duration::from_secs_f64),
+                ],
+                0..200,
+            )
+        }
+
+        /// The value of `name{labels} value` in `out`
+        fn sample(out: &str, series: &str) -> f64 {
+            out.lines()
+                .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+                .unwrap_or_else(|| panic!("no {series} in {out}"))
+                .parse()
+                .unwrap()
+        }
+
+        proptest! {
+            /// Each bucket counts the observations at or under its bound, the series are
+            /// cumulative and end at the count, and the sum is the observations' sum
+            #[test]
+            fn the_buckets_and_the_sum_add_up(latencies in latencies(), fine in any::<bool>()) {
+                let bounds = if fine { FINE_LATENCY_BUCKETS } else { LATENCY_BUCKETS };
+                let h = Histogram::with_buckets(bounds);
+                for &latency in &latencies {
+                    h.observe(latency);
+                }
+                prop_assert_eq!(h.count(), latencies.len() as u64);
+                let mut out = String::new();
+                h.render_series(&mut out, "x", "m=\"a\"");
+                let mut previous = 0.0;
+                for &bound in bounds {
+                    let expected = latencies.iter().filter(|l| l.as_secs_f64() <= bound).count();
+                    let got = sample(&out, &format!("x_bucket{{m=\"a\",le=\"{bound}\"}}"));
+                    prop_assert_eq!(got, expected as f64, "le={}", bound);
+                    prop_assert!(got >= previous);
+                    previous = got;
+                }
+                let count = latencies.len() as f64;
+                prop_assert_eq!(sample(&out, "x_bucket{m=\"a\",le=\"+Inf\"}"), count);
+                prop_assert_eq!(sample(&out, "x_count{m=\"a\"}"), count);
+                let sum: u64 = latencies.iter().map(|l| l.as_nanos() as u64).sum();
+                let rendered = sample(&out, "x_sum{m=\"a\"}");
+                prop_assert!(
+                    (rendered - sum as f64 / 1e9).abs() <= 1e-9 * (1.0 + rendered),
+                    "{} vs {}", rendered, sum
+                );
+            }
+
+            /// Quantiles exist once there is an observation, grow with `q`, and stay within the
+            /// buckets; the bucket of each quantile holds at least that share of observations
+            #[test]
+            fn quantiles_are_ordered_and_within_the_buckets(
+                latencies in latencies(),
+                mut qs in prop::collection::vec(0.0f64..=1.0, 1..8),
+            ) {
+                let h = Histogram::new();
+                for &latency in &latencies {
+                    h.observe(latency);
+                }
+                qs.sort_by(f64::total_cmp);
+                let values: Vec<Option<f64>> = qs.iter().map(|&q| h.quantile(q)).collect();
+                if latencies.is_empty() {
+                    prop_assert!(values.iter().all(Option::is_none));
+                    prop_assert_eq!(h.percentiles_ms(), Percentiles::default());
+                    return Ok(());
+                }
+                let values: Vec<f64> = values.into_iter().map(Option::unwrap).collect();
+                let top = *LATENCY_BUCKETS.last().unwrap();
+                for (&q, &value) in qs.iter().zip(&values) {
+                    prop_assert!((0.0..=top).contains(&value), "q={} gives {}", q, value);
+                    // Under the top bound, at least a `q` share of the observations is at or
+                    // under the bucket's upper bound; the top bound stands for `+Inf` too
+                    if value < top {
+                        let bound = LATENCY_BUCKETS.iter().copied().find(|&b| value <= b);
+                        let bound = bound.unwrap_or(top);
+                        let under = latencies.iter().filter(|l| l.as_secs_f64() <= bound);
+                        prop_assert!(
+                            under.count() as f64 >= q * latencies.len() as f64 - 1e-9,
+                            "q={} value={} bound={}", q, value, bound
+                        );
+                    }
+                }
+                prop_assert!(values.windows(2).all(|w| w[0] <= w[1]), "{:?} for {:?}", values, qs);
+                // Out-of-range and NaN quantiles are answered too
+                prop_assert!(h.quantile(-1.0).is_some() && h.quantile(2.0).is_some());
+                prop_assert!(h.quantile(f64::NAN).is_some());
+            }
+
+            /// Observations from several threads at once are all counted
+            #[test]
+            fn concurrent_observations_are_all_counted(
+                per_thread in prop::collection::vec(latencies(), 1..5)
+            ) {
+                let h = Histogram::new();
+                std::thread::scope(|scope| {
+                    for latencies in &per_thread {
+                        let h = &h;
+                        scope.spawn(move || latencies.iter().for_each(|&l| h.observe(l)));
+                    }
+                });
+                let total: usize = per_thread.iter().map(Vec::len).sum();
+                prop_assert_eq!(h.count(), total as u64);
+            }
+
+            /// An escaped label has no raw quote or newline left, and reads back as it was
+            #[test]
+            fn labels_read_back_as_they_were(value in "[ -~\n\"\\\\é]{0,40}") {
+                let escaped = label(&value);
+                prop_assert!(!escaped.contains('\n'));
+                let mut unescaped = String::new();
+                let mut chars = escaped.chars();
+                while let Some(c) = chars.next() {
+                    if c == '"' {
+                        prop_assert!(false, "an unescaped quote in {}", escaped);
+                    }
+                    if c != '\\' {
+                        unescaped.push(c);
+                        continue;
+                    }
+                    match chars.next() {
+                        Some('\\') => unescaped.push('\\'),
+                        Some('"') => unescaped.push('"'),
+                        Some('n') => unescaped.push('\n'),
+                        other => prop_assert!(false, "a bad escape {:?} in {}", other, escaped),
+                    }
+                }
+                prop_assert_eq!(unescaped, value);
+            }
+        }
+    }
 }
