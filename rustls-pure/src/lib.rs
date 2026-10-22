@@ -54,6 +54,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use aes_gcm::aead::consts::{U12, U16};
 use aes_gcm::aead::{AeadCore, AeadInOut, KeyInit, KeySizeUser};
 use ed25519_dalek::pkcs8::DecodePrivateKey as _;
 use ed25519_dalek::pkcs8::{ObjectIdentifier, PrivateKeyInfoRef};
@@ -261,8 +262,11 @@ static TLS13_CHACHA20_POLY1305_SHA256: SupportedCipherSuite =
 /// A TLS 1.3 AEAD: 12-byte nonces and 16-byte tags, as all three suites have
 struct Aead<C>(std::marker::PhantomData<fn() -> C>);
 
-/// What the AEAD must provide; the key, nonce and tag sizes are checked below, at compile time
-trait Cipher: AeadInOut + KeyInit + Send + Sync + 'static {
+/// What the AEAD must provide: 12-byte nonces and 16-byte tags, as types, so building a nonce
+/// needs no check at run time; the key sizes are checked below, at compile time
+trait Cipher:
+    AeadInOut + AeadCore<NonceSize = U12, TagSize = U16> + KeyInit + Send + Sync + 'static
+{
     /// The key length rustls is told, so the keys it derives always fit `new_from_slice`
     const KEY_LEN: usize =
         <<Self as KeySizeUser>::KeySize as aes_gcm::aead::array::typenum::Unsigned>::USIZE;
@@ -327,8 +331,7 @@ impl<C: Cipher> Crypter<C> {
     /// The record's nonce: the IV XORed with its sequence number (RFC 8446 section 5.3), so no
     /// two records under one key share one
     fn nonce(&self, seq: u64) -> aes_gcm::aead::Nonce<C> {
-        let nonce = Nonce::new(&self.iv, seq).0;
-        aes_gcm::aead::Nonce::<C>::try_from(&nonce[..]).expect("12-byte nonces")
+        Nonce::new(&self.iv, seq).0.into()
     }
 
     /// Encrypts record `seq` in place and returns its tag
@@ -359,7 +362,6 @@ impl<C: Cipher> MessageEncrypter for Crypter<C> {
         // TLSInnerPlaintext: the content, then its real type (RFC 8446 section 5.2)
         payload.extend_from_slice(&msg.typ.to_array());
         let tag = self.seal(seq, &make_tls13_aad(total_len), payload.as_mut())?;
-        debug_assert_eq!(tag.len(), TAG_LEN);
         payload.extend_from_slice(&tag);
         Ok(OutboundOpaqueMessage::new(
             ContentType::ApplicationData,
@@ -392,15 +394,14 @@ impl<C: Cipher> MessageDecrypter for Crypter<C> {
     }
 }
 
-// The sizes the code above relies on, for every suite: the nonce and tag, and the key that
-// RFC 8446 gives the suite (rustls derives keys of `KEY_LEN`, so the `expect`s on
+// The sizes the code above relies on, for every suite: the tag `TAG_LEN` stands for, and the
+// key that RFC 8446 gives the suite (rustls derives keys of `KEY_LEN`, so the `expect`s on
 // `new_from_slice` cannot fail)
 const _: () = {
     use aes_gcm::aead::array::typenum::Unsigned;
     macro_rules! check {
         ($($cipher:ty => $key:expr),*) => {$(
             assert!(<$cipher as Cipher>::KEY_LEN == $key);
-            assert!(<<$cipher as AeadCore>::NonceSize as Unsigned>::USIZE == 12);
             assert!(<<$cipher as AeadCore>::TagSize as Unsigned>::USIZE == TAG_LEN);
         )*};
     }
@@ -713,11 +714,11 @@ impl KeyProvider for Keys {
             PrivateKeyDer::Pkcs8(der) => {
                 let der = der.secret_pkcs8_der();
                 if let Ok(key) = p256::ecdsa::SigningKey::from_pkcs8_der(der) {
-                    Arc::new(EcdsaKey::P256(key))
+                    Arc::new(EcdsaKey::P256(Arc::new(key)))
                 } else if let Ok(key) = p384::ecdsa::SigningKey::from_pkcs8_der(der) {
-                    Arc::new(EcdsaKey::P384(key))
+                    Arc::new(EcdsaKey::P384(Arc::new(key)))
                 } else if let Ok(key) = ed25519_dalek::SigningKey::from_pkcs8_der(der) {
-                    Arc::new(Ed25519Key(key))
+                    Arc::new(Ed25519Key(Arc::new(key)))
                 } else {
                     return Err(unsupported(&unsupported_pkcs8(der)));
                 }
@@ -725,9 +726,9 @@ impl KeyProvider for Keys {
             PrivateKeyDer::Sec1(der) => {
                 let der = der.secret_sec1_der();
                 if let Ok(key) = p256::SecretKey::from_sec1_der(der) {
-                    Arc::new(EcdsaKey::P256(key.into()))
+                    Arc::new(EcdsaKey::P256(Arc::new(key.into())))
                 } else if let Ok(key) = p384::SecretKey::from_sec1_der(der) {
-                    Arc::new(EcdsaKey::P384(key.into()))
+                    Arc::new(EcdsaKey::P384(Arc::new(key.into())))
                 } else {
                     return Err(unsupported("unsupported EC key curve"));
                 }
@@ -759,9 +760,12 @@ fn unsupported_pkcs8(der: &[u8]) -> String {
     }
 }
 
+/// The key, shared with the signer rustls asks for in each handshake rather than copied into it,
+/// so the secret is in memory once
+#[derive(Clone)]
 enum EcdsaKey {
-    P256(p256::ecdsa::SigningKey),
-    P384(p384::ecdsa::SigningKey),
+    P256(Arc<p256::ecdsa::SigningKey>),
+    P384(Arc<p384::ecdsa::SigningKey>),
 }
 
 impl fmt::Debug for EcdsaKey {
@@ -785,12 +789,9 @@ impl EcdsaKey {
 
 impl SigningKey for EcdsaKey {
     fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
-        offered.contains(&self.scheme()).then(|| {
-            Box::new(EcdsaSigner(match self {
-                Self::P256(key) => Self::P256(key.clone()),
-                Self::P384(key) => Self::P384(key.clone()),
-            })) as Box<dyn Signer>
-        })
+        offered
+            .contains(&self.scheme())
+            .then(|| Box::new(EcdsaSigner(self.clone())) as Box<dyn Signer>)
     }
 
     fn algorithm(&self) -> SignatureAlgorithm {
@@ -827,7 +828,8 @@ impl Signer for EcdsaSigner {
     }
 }
 
-struct Ed25519Key(ed25519_dalek::SigningKey);
+/// Shared with each handshake's signer, as [`EcdsaKey`] is
+struct Ed25519Key(Arc<ed25519_dalek::SigningKey>);
 
 impl fmt::Debug for Ed25519Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -881,6 +883,16 @@ enum Prehash {
     Sha384,
 }
 
+impl Prehash {
+    /// The message's digest, kept on the stack
+    fn digest(self, message: &[u8]) -> hash::Output {
+        match self {
+            Self::Sha256 => hash::Output::new(&sha2::Sha256::digest(message)),
+            Self::Sha384 => hash::Output::new(&sha2::Sha384::digest(message)),
+        }
+    }
+}
+
 static ECDSA_P256_SHA256: EcdsaVerify = EcdsaVerify {
     curve: Curve::P256,
     hash: Prehash::Sha256,
@@ -905,17 +917,15 @@ impl SignatureVerificationAlgorithm for EcdsaVerify {
         message: &[u8],
         signature: &[u8],
     ) -> Result<(), InvalidSignature> {
-        let digest = match self.hash {
-            Prehash::Sha256 => sha2::Sha256::digest(message).to_vec(),
-            Prehash::Sha384 => sha2::Sha384::digest(message).to_vec(),
-        };
+        // The key and the signature are parsed first: a malformed one is refused before the
+        // message is hashed
         match self.curve {
             Curve::P256 => {
                 let key = p256::ecdsa::VerifyingKey::from_sec1_bytes(public_key)
                     .map_err(|_| InvalidSignature)?;
                 let signature =
                     p256::ecdsa::Signature::from_der(signature).map_err(|_| InvalidSignature)?;
-                key.verify_prehash(&digest, &signature)
+                key.verify_prehash(self.hash.digest(message).as_ref(), &signature)
                     .map_err(|_| InvalidSignature)
             }
             Curve::P384 => {
@@ -923,7 +933,7 @@ impl SignatureVerificationAlgorithm for EcdsaVerify {
                     .map_err(|_| InvalidSignature)?;
                 let signature =
                     p384::ecdsa::Signature::from_der(signature).map_err(|_| InvalidSignature)?;
-                key.verify_prehash(&digest, &signature)
+                key.verify_prehash(self.hash.digest(message).as_ref(), &signature)
                     .map_err(|_| InvalidSignature)
             }
         }

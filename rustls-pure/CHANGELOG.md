@@ -6,7 +6,24 @@ the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 a breaking change, a new minimum Rust version or a new rustls minor version is a new minor
 version.
 
-## [0.15.0] - Unreleased
+## [0.15.1] - Unreleased
+
+Less work and fewer dependencies for the same behaviour; nothing measured, all found by reading
+the code.
+
+### Changed
+- Dependencies without the default features rustls-pure does not use: `aes-gcm` and
+  `chacha20poly1305` without OS randomness for nonces and the allocating API, `p256` and
+  `p384` without PEM, `sha2` without allocation and OIDs. Every RustCrypto crate still picks
+  AES-NI / ARMv8 AES, CLMUL / PMULL, AVX2 and SHA-NI / ARMv8 SHA at run time by itself.
+- Nonces are built without a length check at run time: the 12-byte nonce and 16-byte tag
+  are now type bounds on the AEADs, checked at compile time.
+- ECDSA signature verification hashes the message on the stack instead of into a `Vec`, and
+  only after the key and the signature have parsed.
+- The server's private key is shared with each handshake's signer instead of copied into it,
+  so the secret exists once in memory.
+
+## [0.15.0] - 2026-10-22
 
 ### Added
 - Post-quantum key exchange: X25519MLKEM768 (ML-KEM-768 from FIPS 203, with X25519), as
