@@ -25,6 +25,8 @@ use tokio::signal;
 use tokio::sync::Semaphore;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
+#[cfg(test)]
+mod decode_tests;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 mod infer;

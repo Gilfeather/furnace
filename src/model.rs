@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::time::{Instant, SystemTime};
 
 use crate::error::{FurnaceError, ModelError, Result};
-use crate::tensor::{DataType, HostTensor, IoSpec, TensorInfo, TensorSpec, Values};
+use crate::tensor::{DataType, HostTensor, IoSpec, TensorInfo, TensorSpec, Values, element_count};
 
 #[cfg(any(test, feature = "test-models"))]
 mod testing;
@@ -491,7 +491,13 @@ impl Model {
                     spec.v2_shape()
                 )));
             }
-            let expected_len: usize = tensor.shape.iter().product();
+            // The shape may be a client's, with dimensions of any size
+            let Some(expected_len) = element_count(&tensor.shape) else {
+                return Err(invalid(format!(
+                    "'{name}' has shape {:?}: too many elements",
+                    tensor.shape
+                )));
+            };
             if tensor.values.len() != expected_len {
                 return Err(invalid(format!(
                     "'{name}' has shape {:?} ({expected_len} values) but {} values",

@@ -395,4 +395,152 @@ mod tests {
         assert!(matches!(parse(rows.as_bytes()), Some(FastInput::Batch(b)) if b.len() == 2001));
         agree(&rows);
     }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// A JSON number this parser takes, written one of several ways
+        fn number() -> impl Strategy<Value = String> {
+            prop_oneof![
+                any::<i32>().prop_map(|n| n.to_string()),
+                (-1e6f64..1e6).prop_map(|x| x.to_string()),
+                (-1e30f32..1e30).prop_map(|x| format!("{x:e}")),
+                (-1e30f32..1e30).prop_map(|x| format!("{x:E}")),
+                (0u32..100_000_000, any::<bool>())
+                    .prop_map(|(n, neg)| format!("{}0.{n:08}", if neg { "-" } else { "" })),
+                (1u32..1000, -30i32..30).prop_map(|(m, e)| format!("{m}e{e:+}")),
+                Just("-0".to_string()),
+                Just("0".to_string()),
+            ]
+        }
+
+        /// JSON whitespace, usually none
+        fn ws() -> impl Strategy<Value = String> {
+            prop::collection::vec(prop::sample::select(vec![" ", "\n", "\r", "\t"]), 0..3)
+                .prop_map(|parts| parts.concat())
+        }
+
+        fn array(len: usize) -> impl Strategy<Value = String> {
+            prop::collection::vec((ws(), number(), ws()), 0..len).prop_map(|items| {
+                let items: Vec<String> = items
+                    .into_iter()
+                    .map(|(before, n, after)| format!("{before}{n}{after}"))
+                    .collect();
+                format!("[{}]", items.join(","))
+            })
+        }
+
+        /// `{"input": [...]}` or `{"inputs": [[...], ...]}`, with whitespace around the parts
+        fn body() -> impl Strategy<Value = String> {
+            let single = (ws(), ws(), array(40))
+                .prop_map(|(a, b, array)| format!("{a}{{{b}\"input\"{a}:{b}{array}{a}}}{b}"));
+            let batch = (ws(), prop::collection::vec(array(12), 0..6)).prop_map(|(w, arrays)| {
+                format!(
+                    "{{\"inputs\"{w}:{w}[{w}{}{w}]}}",
+                    arrays.join(&format!("{w},{w}"))
+                )
+            });
+            prop_oneof![single, batch]
+        }
+
+        /// A byte of the kind JSON is made of, to break a body with
+        fn json_byte() -> impl Strategy<Value = u8> {
+            prop_oneof![
+                prop::sample::select(b"[]{},:\" -+.eE0123456789 \n".to_vec()),
+                any::<u8>(),
+            ]
+        }
+
+        /// `body` broken at random places: bytes removed, replaced or inserted, or cut short
+        fn broken() -> impl Strategy<Value = Vec<u8>> {
+            (
+                body(),
+                prop::collection::vec((any::<prop::sample::Index>(), 0u8..3, json_byte()), 1..4),
+                any::<Option<prop::sample::Index>>(),
+            )
+                .prop_map(|(body, edits, cut)| {
+                    let mut bytes = body.into_bytes();
+                    for (at, kind, byte) in edits {
+                        let i = at.index(bytes.len() + 1);
+                        match kind {
+                            0 if i < bytes.len() => {
+                                bytes.remove(i);
+                            }
+                            1 if i < bytes.len() => bytes[i] = byte,
+                            _ => bytes.insert(i, byte),
+                        }
+                    }
+                    if let Some(cut) = cut {
+                        bytes.truncate(cut.index(bytes.len() + 1));
+                    }
+                    bytes
+                })
+        }
+
+        /// The fast path took `body`: serde_json reads the same numbers from it
+        fn agree_bytes(body: &[u8]) {
+            if parse(body).is_some() {
+                let text = std::str::from_utf8(body).expect("an accepted body is UTF-8");
+                agree(text);
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn valid_bodies_parse_as_serde_json_does(body in body()) {
+                // Every number generated fits an f32, so the fast path takes them all
+                prop_assert!(parse(body.as_bytes()).is_some(), "{}", body);
+                agree(&body);
+            }
+
+            #[test]
+            fn broken_bodies_never_panic_and_never_disagree(body in broken()) {
+                agree_bytes(&body);
+            }
+
+            #[test]
+            fn any_bytes_never_panic(body in prop::collection::vec(json_byte(), 0..64)) {
+                agree_bytes(&body);
+            }
+        }
+
+        proptest! {
+            // Bodies past the parallel threshold, each well past it: at most 16 cases;
+            // PROPTEST_CASES lowers it
+            #![proptest_config(ProptestConfig::with_cases(
+                ProptestConfig::default().cases.min(16)
+            ))]
+
+            #[test]
+            fn large_bodies_cut_into_pieces_parse_as_serde_json_does(
+                values in prop::collection::vec(number(), 1..64),
+                rows in 1usize..6,
+                edit in any::<Option<(prop::sample::Index, u8)>>(),
+            ) {
+                // About 160 KB: the values repeated, split into `rows` arrays
+                let row_bytes: usize = values.iter().map(|v| v.len() + 2).sum();
+                let per_row = (160 * 1024 / rows) / row_bytes + 1;
+                let row = vec![values.join(", "); per_row].join(",\n");
+                let body = if rows == 1 {
+                    format!("{{\"input\": [{row}]}}")
+                } else {
+                    format!("{{\"inputs\": [{}]}}", vec![format!("[{row}]"); rows].join(","))
+                };
+                prop_assert!(body.len() > PARALLEL_MIN_BYTES);
+                let mut bytes = body.into_bytes();
+                match edit {
+                    None => {
+                        prop_assert!(parse(&bytes).is_some());
+                    }
+                    // One byte replaced somewhere, maybe a piece's cut point
+                    Some((at, byte)) => {
+                        let i = at.index(bytes.len());
+                        bytes[i] = byte;
+                    }
+                }
+                agree_bytes(&bytes);
+            }
+        }
+    }
 }

@@ -217,4 +217,133 @@ mod tests {
         unsafe { cache.dealloc(a.as_ptr(), layout) };
         assert_eq!(cache.cache.lock().unwrap().bytes, 0);
     }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// A block in use: where, its layout, and the byte it was filled with
+        struct Live {
+            ptr: NonNull<u8>,
+            layout: Layout,
+            fill: u8,
+        }
+
+        #[derive(Clone, Debug)]
+        enum Op {
+            /// Allocate the size of this index among a few large and small ones, at an
+            /// alignment, zeroed or not
+            Alloc(prop::sample::Index, usize, bool),
+            /// Free the live block of this index
+            Free(prop::sample::Index),
+        }
+
+        /// A few sizes, most of them large enough to be kept, so blocks are reused often
+        const SIZES: [usize; 6] = [
+            1024,
+            MIN_SIZE - 1,
+            MIN_SIZE,
+            MIN_SIZE + 4096,
+            3 * MIN_SIZE,
+            MAX_CACHED / 16,
+        ];
+
+        fn ops() -> impl Strategy<Value = Vec<Op>> {
+            prop::collection::vec(
+                prop_oneof![
+                    (
+                        any::<prop::sample::Index>(),
+                        prop::sample::select(vec![8usize, 64, 4096]),
+                        any::<bool>()
+                    )
+                        .prop_map(|(size, align, zeroed)| Op::Alloc(size, align, zeroed)),
+                    any::<prop::sample::Index>().prop_map(Op::Free),
+                ],
+                1..60,
+            )
+        }
+
+        /// A block filled with one byte, checked at both ends and in the middle (a whole check
+        /// of every byte would make each case slow)
+        fn intact(live: &Live) -> bool {
+            let size = live.layout.size();
+            [0, size / 2, size - 1]
+                .iter()
+                .all(|&i| unsafe { *live.ptr.as_ptr().add(i) } == live.fill)
+        }
+
+        fn check_cache(cache: &BlockCache) -> Result<(), TestCaseError> {
+            let cache = cache.cache.lock().unwrap();
+            let kept: usize = cache.blocks.iter().flatten().map(|b| b.size).sum();
+            prop_assert_eq!(kept, cache.bytes);
+            prop_assert!(cache.bytes <= MAX_CACHED);
+            Ok(())
+        }
+
+        proptest! {
+            // At most 64 cases; PROPTEST_CASES lowers it
+            #![proptest_config(ProptestConfig::with_cases(
+                ProptestConfig::default().cases.min(64)
+            ))]
+
+            /// Blocks in use never overlap and keep what was written to them, a zeroed one is
+            /// all zeros even when it is a reused block, and the cache's count of bytes is
+            /// what it holds, within its limit
+            #[test]
+            fn blocks_in_use_never_overlap(ops in ops()) {
+                let cache = BlockCache::new();
+                let mut live: Vec<Live> = Vec::new();
+                let mut next_fill = 1u8;
+                for op in ops {
+                    match op {
+                        Op::Alloc(size, align, zeroed) => {
+                            let layout = Layout::from_size_align(*size.get(&SIZES), align).unwrap();
+                            let ptr = if zeroed {
+                                alloc_zeroed(&cache, layout)
+                            } else {
+                                alloc(&cache, layout)
+                            };
+                            prop_assert_eq!(ptr.as_ptr() as usize % align, 0);
+                            if zeroed {
+                                let bytes = unsafe {
+                                    std::slice::from_raw_parts(ptr.as_ptr(), layout.size())
+                                };
+                                prop_assert!(bytes.iter().all(|&b| b == 0));
+                            }
+                            let start = ptr.as_ptr() as usize;
+                            let end = start + layout.size();
+                            for other in &live {
+                                let other_start = other.ptr.as_ptr() as usize;
+                                let other_end = other_start + other.layout.size();
+                                prop_assert!(end <= other_start || other_end <= start, "overlap");
+                            }
+                            unsafe { ptr.as_ptr().write_bytes(next_fill, layout.size()) };
+                            live.push(Live { ptr, layout, fill: next_fill });
+                            next_fill = next_fill.wrapping_add(1).max(1);
+                        }
+                        Op::Free(index) => {
+                            if live.is_empty() {
+                                continue;
+                            }
+                            let block = live.swap_remove(index.index(live.len()));
+                            prop_assert!(intact(&block));
+                            unsafe { cache.dealloc(block.ptr.as_ptr(), block.layout) };
+                        }
+                    }
+                    prop_assert!(live.iter().all(intact));
+                    check_cache(&cache)?;
+                }
+                // Give everything back: the blocks in use, then the ones the cache kept
+                for block in live {
+                    unsafe { cache.dealloc(block.ptr.as_ptr(), block.layout) };
+                }
+                let mut cache = cache.cache.lock().unwrap();
+                for block in cache.blocks.iter_mut().filter_map(Option::take) {
+                    let layout = Layout::from_size_align(block.size, block.align).unwrap();
+                    unsafe { System.dealloc(block.ptr as *mut u8, layout) };
+                }
+                cache.bytes = 0;
+            }
+        }
+    }
 }

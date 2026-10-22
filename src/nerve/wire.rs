@@ -12,13 +12,15 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// Largest response head (status line and headers) accepted
 const MAX_HEAD: usize = 64 * 1024;
 /// Largest response body collected by [`Client::request`]
 const MAX_BODY: usize = 16 << 20;
+/// Most trailer bytes read after a chunked body
+const MAX_TRAILERS: usize = MAX_HEAD;
 
 /// Why a call through the client failed
 #[derive(Debug)]
@@ -157,13 +159,14 @@ enum Framing {
     Close,
 }
 
-/// A response whose body is still being read, chunk by chunk (an event stream)
-pub struct Streaming {
+/// A response whose body is still being read, chunk by chunk (an event stream), from a
+/// connection (or, in the tests, any byte source)
+pub struct Streaming<S = TcpStream> {
     /// The HTTP status code
     pub status: u16,
     /// Name and value, in the order received
     pub headers: Vec<(String, String)>,
-    stream: TcpStream,
+    stream: S,
     framing: Framing,
     /// Bytes read past the head, not yet handed out
     buffered: Vec<u8>,
@@ -172,7 +175,7 @@ pub struct Streaming {
     done: bool,
 }
 
-impl Streaming {
+impl<S: AsyncRead + Unpin> Streaming<S> {
     /// The next piece of the body; `None` at its end
     pub async fn next(&mut self) -> Result<Option<Bytes>> {
         loop {
@@ -233,19 +236,35 @@ impl Streaming {
             None => {
                 let line = self.read_line().await?;
                 let size = line.split(';').next().unwrap_or("").trim();
-                let size = usize::from_str_radix(size, 16)
-                    .map_err(|_| Error::Protocol(format!("bad chunk size '{size}'")))?;
+                // Hex digits only: `from_str_radix` alone would take a sign
+                let size = Some(size)
+                    .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                    .and_then(|s| usize::from_str_radix(s, 16).ok())
+                    .ok_or_else(|| Error::Protocol(format!("bad chunk size '{size}'")))?;
                 if size == 0 {
-                    // Trailers up to the empty line
-                    while !self.read_line().await?.is_empty() {}
-                    return Ok(None);
+                    // Trailers up to the empty line, within a bound
+                    let mut trailers = 0;
+                    loop {
+                        let line = self.read_line().await?;
+                        if line.is_empty() {
+                            return Ok(None);
+                        }
+                        trailers += line.len();
+                        if trailers > MAX_TRAILERS {
+                            return Err(Error::Protocol("trailers too large".to_string()));
+                        }
+                    }
                 }
                 self.chunk_left = Some(size);
                 Ok(Some(Bytes::new()))
             }
             Some(0) => {
-                // The CRLF after a chunk
-                self.read_line().await?;
+                // The CRLF after a chunk: anything else means the size was wrong
+                if !self.read_line().await?.is_empty() {
+                    return Err(Error::Protocol(
+                        "chunk data longer than its size".to_string(),
+                    ));
+                }
                 self.chunk_left = None;
                 Ok(Some(Bytes::new()))
             }
@@ -292,6 +311,23 @@ impl Streaming {
             && !self.headers.iter().any(|(n, v)| {
                 n.eq_ignore_ascii_case("connection") && v.eq_ignore_ascii_case("close")
             })
+    }
+
+    /// The whole body, refused past [`MAX_BODY`]
+    async fn collect(&mut self) -> Result<Bytes> {
+        if let Framing::Length(length) = self.framing
+            && length > MAX_BODY
+        {
+            return Err(Error::TooLarge);
+        }
+        let mut collected = Vec::new();
+        while let Some(piece) = self.next().await? {
+            collected.extend_from_slice(&piece);
+            if collected.len() > MAX_BODY {
+                return Err(Error::TooLarge);
+            }
+        }
+        Ok(Bytes::from(collected))
     }
 }
 
@@ -373,20 +409,14 @@ impl Client {
         body: &[u8],
     ) -> Result<Response> {
         let mut streaming = self.send_inner(method, url, headers, body).await?;
-        let mut collected = Vec::new();
-        while let Some(piece) = streaming.next().await? {
-            collected.extend_from_slice(&piece);
-            if collected.len() > MAX_BODY {
-                return Err(Error::TooLarge);
-            }
-        }
+        let body = streaming.collect().await?;
         if streaming.keep_alive() {
             self.put_back(url, streaming.stream);
         }
         Ok(Response {
             status: streaming.status,
             headers: streaming.headers,
-            body: Bytes::from(collected),
+            body,
         })
     }
 
@@ -443,6 +473,11 @@ impl Client {
 
 async fn write_and_read_head(mut stream: TcpStream, request: &[u8]) -> Result<Streaming> {
     stream.write_all(request).await?;
+    read_head(stream).await
+}
+
+/// Read the response head from `stream`; the body is left to [`Streaming::next`]
+async fn read_head<S: AsyncRead + Unpin>(mut stream: S) -> Result<Streaming<S>> {
     let mut buffered = Vec::with_capacity(4096);
     let head_end = loop {
         if let Some(i) = find_head_end(&buffered) {
@@ -458,14 +493,30 @@ async fn write_and_read_head(mut stream: TcpStream, request: &[u8]) -> Result<St
         }
         buffered.extend_from_slice(&buf[..n]);
     };
-    let head = String::from_utf8_lossy(&buffered[..head_end]).to_string();
+    if head_end > MAX_HEAD {
+        return Err(Error::Protocol("response head too large".to_string()));
+    }
     let rest = buffered.split_off(head_end + 4);
+    parse_head(
+        &String::from_utf8_lossy(&buffered[..head_end]),
+        stream,
+        rest,
+    )
+}
+
+/// The response whose head (without its blank line) is `head`, its body to come from `rest`
+/// and then `stream`
+fn parse_head<S>(head: &str, stream: S, rest: Vec<u8>) -> Result<Streaming<S>> {
     let mut lines = head.split("\r\n");
     let status_line = lines.next().unwrap_or("");
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse::<u16>().ok())
+    let mut parts = status_line.split_whitespace();
+    let status = parts
+        .next()
+        .filter(|version| version.starts_with("HTTP/1."))
+        .and(parts.next())
+        .filter(|code| code.len() == 3)
+        .and_then(|code| code.parse::<u16>().ok())
+        .filter(|code| (100..600).contains(code))
         .ok_or_else(|| Error::Protocol(format!("bad status line '{status_line}'")))?;
     let headers: Vec<(String, String)> = lines
         .filter_map(|line| {
@@ -473,17 +524,22 @@ async fn write_and_read_head(mut stream: TcpStream, request: &[u8]) -> Result<St
             Some((name.trim().to_string(), value.trim().to_string()))
         })
         .collect();
-    let header = |name: &str| {
+    let all = |name: &'static str| {
         headers
             .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .filter(move |(n, _)| n.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
     };
-    let framing = if header("transfer-encoding")
-        .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"))
-    {
+    let framing = if all("transfer-encoding").any(|v| v.to_ascii_lowercase().contains("chunked")) {
         Framing::Chunked
-    } else if let Some(length) = header("content-length").and_then(|v| v.parse::<usize>().ok()) {
+    } else if let Some(first) = all("content-length").next() {
+        // Digits only, and the same in every copy of the header: a body whose length is in
+        // doubt is not read at all
+        let length = Some(first)
+            .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|_| all("content-length").all(|v| v == first))
+            .ok_or_else(|| Error::Protocol(format!("bad content-length '{first}'")))?;
         Framing::Length(length)
     } else if status == 204 || status == 304 || (100..200).contains(&status) {
         Framing::Length(0)
@@ -665,5 +721,273 @@ mod tests {
     fn futures_util_free_stream()
     -> impl tokio_stream::Stream<Item = Result<Bytes, std::convert::Infallible>> {
         tokio_stream::iter((0..3).map(|i| Ok(Bytes::from(format!("data: {i}\n\n")))))
+    }
+
+    /// Read a whole response from `bytes` as [`Client::request`] does after sending
+    fn read(bytes: &[u8]) -> Result<(u16, Bytes)> {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut streaming = read_head(bytes).await?;
+                let body = streaming.collect().await?;
+                Ok((streaming.status, body))
+            })
+    }
+
+    /// Whether the response ended before its body did
+    fn ended_early(result: Result<(u16, Bytes)>) -> bool {
+        matches!(result, Err(Error::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof)
+    }
+
+    fn protocol_error(bytes: &[u8]) -> String {
+        match read(bytes) {
+            Err(Error::Protocol(message)) => message,
+            other => panic!("{:?}", other.map(|(status, body)| (status, body.len()))),
+        }
+    }
+
+    #[test]
+    fn a_length_in_doubt_is_refused() {
+        for length in ["-1", "+5", "5 5", "0x10", "", "99999999999999999999999"] {
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\nhello");
+            assert!(
+                protocol_error(response.as_bytes()).contains("content-length"),
+                "{length}"
+            );
+        }
+        // Two copies that disagree
+        let two = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\ncontent-length: 4\r\n\r\nhello";
+        assert!(protocol_error(two).contains("content-length"));
+        // Two that agree are one length
+        let same = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\ncontent-length: 5\r\n\r\nhello";
+        assert_eq!(read(same).unwrap().1, Bytes::from_static(b"hello"));
+    }
+
+    #[test]
+    fn a_length_past_the_limit_is_refused_before_reading() {
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", usize::MAX);
+        assert!(matches!(read(response.as_bytes()), Err(Error::TooLarge)));
+        // A length the body never reaches is an early end
+        let short = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhalf";
+        assert!(ended_early(read(short)));
+    }
+
+    #[test]
+    fn broken_chunked_bodies_are_refused() {
+        let chunked =
+            |body: &str| format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{body}");
+        for size in ["+5", "-5", "", "g", "ffffffffffffffffffffffff", "5 5"] {
+            let response = chunked(&format!("{size}\r\nhello\r\n0\r\n\r\n"));
+            assert!(
+                protocol_error(response.as_bytes()).contains("chunk size"),
+                "{size}"
+            );
+        }
+        // More data than the size says
+        let long = chunked("3\r\nhello\r\n0\r\n\r\n");
+        assert!(protocol_error(long.as_bytes()).contains("longer than its size"));
+        // Less data than the size says, then the end
+        let short = chunked("10\r\nhello");
+        assert!(ended_early(read(short.as_bytes())));
+        // A size near the limit of usize, and the data runs out
+        let huge = chunked(&format!("{:x}\r\nhello", usize::MAX / 2));
+        assert!(ended_early(read(huge.as_bytes())));
+        // Trailers without end
+        let trailers = chunked(&format!(
+            "0\r\n{}",
+            "x-trailer: 1\r\n".repeat(MAX_TRAILERS / 8)
+        ));
+        assert!(protocol_error(trailers.as_bytes()).contains("trailers"));
+    }
+
+    #[test]
+    fn chunks_past_the_limit_are_refused() {
+        let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        let chunk = vec![b'x'; 1 << 20];
+        for _ in 0..=MAX_BODY >> 20 {
+            response.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+            response.extend_from_slice(&chunk);
+            response.extend_from_slice(b"\r\n");
+        }
+        response.extend_from_slice(b"0\r\n\r\n");
+        assert!(matches!(read(&response), Err(Error::TooLarge)));
+    }
+
+    #[test]
+    fn heads_without_end_or_status_are_refused() {
+        let endless = format!("HTTP/1.1 200 OK\r\nx: {}", "a".repeat(MAX_HEAD + 10));
+        assert!(protocol_error(endless.as_bytes()).contains("head too large"));
+        // One that ends, but past the limit
+        let long = format!(
+            "HTTP/1.1 200 OK\r\nx: {}\r\n\r\n",
+            "a".repeat(MAX_HEAD + 10)
+        );
+        assert!(protocol_error(long.as_bytes()).contains("head too large"));
+        for status_line in [
+            "",
+            "HTTP/1.1",
+            "HTTP/1.1 abc OK",
+            "HTTP/1.1 2000 OK",
+            "SSH-2.0 200",
+            "HTTP/1.1 099",
+        ] {
+            let response = format!("{status_line}\r\nContent-Length: 0\r\n\r\n");
+            assert!(
+                protocol_error(response.as_bytes()).contains("status line"),
+                "{status_line}"
+            );
+        }
+    }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// How a generated response frames its body
+        #[derive(Clone, Debug)]
+        enum Frame {
+            Length,
+            /// Chunk sizes (the last one takes the rest), upper-case hex, an extension on
+            /// each size line, trailers
+            Chunked(Vec<usize>, bool, bool, bool),
+            Close,
+        }
+
+        fn frame() -> impl Strategy<Value = Frame> {
+            prop_oneof![
+                Just(Frame::Length),
+                (
+                    prop::collection::vec(1usize..300, 0..8),
+                    any::<bool>(),
+                    any::<bool>(),
+                    any::<bool>()
+                )
+                    .prop_map(|(sizes, upper, extension, trailers)| {
+                        Frame::Chunked(sizes, upper, extension, trailers)
+                    }),
+                Just(Frame::Close),
+            ]
+        }
+
+        /// A well-formed response carrying `body`
+        fn response(
+            status: u16,
+            body: &[u8],
+            frame: &Frame,
+            extra: &[(String, String)],
+        ) -> Vec<u8> {
+            let mut out = format!("HTTP/1.1 {status} Whatever\r\n").into_bytes();
+            for (name, value) in extra {
+                out.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+            }
+            match frame {
+                Frame::Length => {
+                    out.extend_from_slice(
+                        format!("content-LENGTH: {}\r\n\r\n", body.len()).as_bytes(),
+                    );
+                    out.extend_from_slice(body);
+                }
+                Frame::Chunked(sizes, upper, extension, trailers) => {
+                    out.extend_from_slice(b"Transfer-Encoding: chunked\r\n\r\n");
+                    let mut rest = body;
+                    let mut sizes = sizes.iter();
+                    while !rest.is_empty() {
+                        let size = sizes.next().map_or(rest.len(), |&n| n.min(rest.len()));
+                        let (chunk, after) = rest.split_at(size);
+                        let mut line = if *upper {
+                            format!("{size:X}")
+                        } else {
+                            format!("{size:x}")
+                        };
+                        if *extension {
+                            line.push_str(";name=value");
+                        }
+                        out.extend_from_slice(format!("{line}\r\n").as_bytes());
+                        out.extend_from_slice(chunk);
+                        out.extend_from_slice(b"\r\n");
+                        rest = after;
+                    }
+                    out.extend_from_slice(b"0\r\n");
+                    if *trailers {
+                        out.extend_from_slice(b"x-checksum: 1\r\n");
+                    }
+                    out.extend_from_slice(b"\r\n");
+                }
+                Frame::Close => {
+                    out.extend_from_slice(b"\r\n");
+                    out.extend_from_slice(body);
+                }
+            }
+            out
+        }
+
+        fn header() -> impl Strategy<Value = (String, String)> {
+            ("x-[a-z]{1,8}", "[ -~]{0,20}")
+                .prop_map(|(name, value)| (name, value.trim().to_string()))
+        }
+
+        fn generated() -> impl Strategy<Value = (u16, Vec<u8>, Frame, Vec<(String, String)>)> {
+            (
+                prop::sample::select(vec![200u16, 201, 400, 404, 500, 503]),
+                prop::collection::vec(any::<u8>(), 0..1500),
+                frame(),
+                prop::collection::vec(header(), 0..4),
+            )
+        }
+
+        proptest! {
+            #[test]
+            fn well_formed_responses_are_read_whole(
+                (status, body, frame, extra) in generated()
+            ) {
+                let bytes = response(status, &body, &frame, &extra);
+                let (read_status, read_body) = read(&bytes).unwrap();
+                prop_assert_eq!(read_status, status);
+                prop_assert_eq!(&read_body[..], &body[..]);
+            }
+
+            #[test]
+            fn broken_responses_never_panic(
+                (status, body, frame, extra) in generated(),
+                edits in prop::collection::vec(
+                    (
+                        any::<prop::sample::Index>(),
+                        0u8..3,
+                        prop::sample::select(b"\r\n:;0123456789abcdefxX -".to_vec()),
+                    ),
+                    1..5,
+                ),
+                cut in any::<Option<prop::sample::Index>>(),
+            ) {
+                let mut bytes = response(status, &body, &frame, &extra);
+                for (at, kind, byte) in edits {
+                    let i = at.index(bytes.len() + 1);
+                    match kind {
+                        0 if i < bytes.len() => {
+                            bytes.remove(i);
+                        }
+                        1 if i < bytes.len() => bytes[i] = byte,
+                        _ => bytes.insert(i, byte),
+                    }
+                }
+                if let Some(cut) = cut {
+                    bytes.truncate(cut.index(bytes.len() + 1));
+                }
+                // An answer, or an error: never a panic, never more than the limit
+                if let Ok((_, read_body)) = read(&bytes) {
+                    prop_assert!(read_body.len() <= MAX_BODY);
+                    prop_assert!(read_body.len() <= bytes.len());
+                }
+            }
+
+            #[test]
+            fn any_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
+                let mut response = b"HTTP/1.1 200 OK\r\n".to_vec();
+                response.extend_from_slice(&bytes);
+                let _ = read(&bytes);
+                let _ = read(&response);
+            }
+        }
     }
 }

@@ -148,6 +148,9 @@ tokio-stream = { version = "0.1", features = ["net"] }
 # Connects the gRPC-over-TLS test's client through the test's own TLS stream
 hyper-util = { version = "0.1", features = ["tokio"] }
 rand = "0.10"
+# Property tests of the parsers and decoders: random valid and broken inputs. Without the
+# `fork` and `timeout` features, which the tests do not use
+proptest = { version = "1.12", default-features = false, features = ["std"] }
 
 [[test]]
 name = "llm"

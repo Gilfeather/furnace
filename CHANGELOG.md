@@ -17,12 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.0 will freeze and what must happen first.
 - Overload and failure tests (tests/overload.rs, and in the nerve's effector loop and fabric)
   and a soak run (tests/soak.rs, `.github/workflows/soak.yml`, by hand and weekly).
+- Property tests (proptest, a dev-dependency) of the JSON fast path against serde_json, the
+  nerve client's response parsing, the `/predict` and Open Inference Protocol decoders, and
+  amate, kuebiko and kamui.
 
 ### Fixed
 - amate: an announced item that gave up (`Arrival` dropped without a submit) no longer takes
   room in a bounded queue. While the workers were busy, requests that failed after being
   announced (a malformed body, say) filled the batching queue with wake-ups, and requests
   under `--max-concurrent-requests` got `503 SERVER_BUSY`.
+- A request of named tensors whose shape has more elements than a `usize` counts (such as
+  `[1, 8589934592, 8589934592]`, over HTTP or gRPC) is a `400`. It panicked in debug builds,
+  and in release builds the count wrapped around, so the tensor could reach the model.
+- The nervous system's HTTP client refuses responses it cannot read safely instead of
+  guessing: a `Content-Length` that is not a plain number (`-1`, `+5`, two that disagree)
+  was read as "until the connection closes", a chunk with more data than its size was cut
+  silently, a chunk size with a sign was taken, trailers had no limit, and a status line that
+  is not `HTTP/1.x` was accepted. A `Content-Length` past the body limit is refused before
+  anything is read.
 
 ## [0.13.0] - 2026-10-21
 

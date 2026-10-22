@@ -556,4 +556,180 @@ mod tests {
         s.engine.submit(None, 4).unwrap();
         assert_eq!(s.batches.recv().unwrap(), vec![4]);
     }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// An item: its id, its weight, whether it is still wanted, and whether its batch
+        /// panics
+        #[derive(Clone, Copy, Debug)]
+        struct Item {
+            id: usize,
+            weight: usize,
+            wanted: bool,
+            poison: bool,
+        }
+
+        /// What a batch ran with, and whether it panicked
+        enum Ran {
+            Batch(Vec<Item>),
+            Panicked(usize),
+        }
+
+        /// Sends every batch it runs; a batch with a poisoned item panics after that
+        struct Record(mpsc::Sender<Ran>);
+
+        impl Batching for Record {
+            type Item = Item;
+
+            fn weight(&self, item: &Item) -> usize {
+                item.weight
+            }
+
+            fn wanted(&self, item: &Item) -> bool {
+                item.wanted
+            }
+
+            fn window(&self) -> Duration {
+                Duration::ZERO
+            }
+
+            fn run(&self, batch: Vec<Queued<Item>>) {
+                let items: Vec<Item> = batch.into_iter().map(|q| q.item).collect();
+                let poisoned = items.iter().any(|item| item.poison);
+                let _ = self.0.send(Ran::Batch(items));
+                assert!(!poisoned, "a poisoned batch");
+            }
+
+            fn panicked(&self, weight: usize) {
+                let _ = self.0.send(Ran::Panicked(weight));
+            }
+        }
+
+        /// How each item is handed in
+        #[derive(Clone, Copy, Debug)]
+        enum Handed {
+            Plain,
+            /// Announced first, then submitted
+            Announced,
+            /// Announced, then given up on before it is submitted, then submitted plainly
+            GivenUp,
+        }
+
+        fn items() -> impl Strategy<Value = Vec<(Item, Handed)>> {
+            prop::collection::vec(
+                (
+                    1usize..6,
+                    prop::bool::weighted(0.85),
+                    prop::bool::weighted(0.05),
+                    prop::sample::select(vec![Handed::Plain, Handed::Announced, Handed::GivenUp]),
+                ),
+                0..120,
+            )
+            .prop_map(|items| {
+                items
+                    .into_iter()
+                    .enumerate()
+                    .map(|(id, (weight, wanted, poison, handed))| {
+                        let item = Item {
+                            id,
+                            weight,
+                            wanted,
+                            poison,
+                        };
+                        (item, handed)
+                    })
+                    .collect()
+            })
+        }
+
+        fn config() -> impl Strategy<Value = Config> {
+            (1usize..10, 1usize..4, prop::option::of(1usize..40)).prop_map(
+                |(max_batch, workers, capacity)| Config {
+                    max_batch,
+                    workers,
+                    capacity,
+                    waits_unannounced: false,
+                },
+            )
+        }
+
+        proptest! {
+            // At most 64 cases; PROPTEST_CASES lowers it
+            #![proptest_config(ProptestConfig::with_cases(
+                ProptestConfig::default().cases.min(64)
+            ))]
+
+            /// Every wanted item that was accepted runs in exactly one batch, unwanted ones
+            /// never run, a batch stays within the maximum weight unless it is one heavy item,
+            /// and a panicking batch costs only itself
+            #[test]
+            fn batches_lose_and_repeat_nothing(items in items(), config in config()) {
+                let (sender, received) = mpsc::channel();
+                let engine = Engine::start(Record(sender), config, |i| format!("prop-{i}"));
+                let mut refused = Vec::new();
+                for &(item, handed) in &items {
+                    let result = match handed {
+                        Handed::Plain => engine.submit(None, item),
+                        Handed::Announced => engine.submit(Some(engine.arrival()), item),
+                        Handed::GivenUp => {
+                            drop(engine.arrival());
+                            engine.submit(None, item)
+                        }
+                    };
+                    if let Err(item) = result {
+                        refused.push(item.id);
+                    }
+                }
+                prop_assert!(engine.waiting() <= config.capacity.unwrap_or(usize::MAX));
+                if config.capacity.is_none() {
+                    prop_assert!(refused.is_empty());
+                }
+                // The workers run what was queued, then stop, and the recorder with them
+                drop(engine);
+                let mut ran = Vec::new();
+                let mut batches = Vec::new();
+                let mut panicked = Vec::new();
+                for record in received {
+                    match record {
+                        Ran::Batch(batch) => {
+                            ran.extend(batch.iter().map(|item| item.id));
+                            batches.push(batch);
+                        }
+                        Ran::Panicked(weight) => panicked.push(weight),
+                    }
+                }
+                for batch in &batches {
+                    let weight: usize = batch.iter().map(|item| item.weight).sum();
+                    prop_assert!(
+                        weight <= config.max_batch || batch.len() == 1,
+                        "{} > {}", weight, config.max_batch
+                    );
+                    prop_assert!(batch.iter().all(|item| item.wanted));
+                }
+                let mut poisoned: Vec<usize> = batches
+                    .iter()
+                    .filter(|batch| batch.iter().any(|item| item.poison))
+                    .map(|batch| batch.iter().map(|item| item.weight).sum())
+                    .collect();
+                poisoned.sort_unstable();
+                panicked.sort_unstable();
+                prop_assert_eq!(poisoned, panicked);
+
+                let mut expected: Vec<usize> = items
+                    .iter()
+                    .filter(|(item, _)| item.wanted && !refused.contains(&item.id))
+                    .map(|(item, _)| item.id)
+                    .collect();
+                // One worker runs them in the order they came
+                if config.workers == 1 {
+                    prop_assert_eq!(&ran, &expected);
+                }
+                ran.sort_unstable();
+                expected.sort_unstable();
+                prop_assert_eq!(ran, expected);
+            }
+        }
+    }
 }
