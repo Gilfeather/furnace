@@ -9,6 +9,7 @@ use serde::Serialize;
 use tracing::{debug, warn};
 
 use super::{ActError, ActFuture, Action, EffectorInner};
+use crate::nerve::motor::MotionError;
 use crate::nerve::nanos_since;
 use crate::nerve::signal::{Command, Signal};
 
@@ -172,6 +173,15 @@ impl EffectorInner {
         }
     }
 
+    /// The motor program that sent the command stopped waiting: no more tries
+    fn abandoned(&self) {
+        self.counters.inflight.fetch_sub(1, Ordering::Relaxed);
+        debug!(
+            "nerve: effector '{}': nobody waits for the command any more",
+            self.act.name()
+        );
+    }
+
     pub(super) fn backoff(&self, attempt: u32) -> Duration {
         let factor = 2u32.saturating_pow(attempt.saturating_sub(1));
         self.retry
@@ -188,7 +198,8 @@ pub(super) enum Admission {
     RateLimited,
 }
 
-/// The attempts after the first, or a delayed first one, on the motor side's runtime
+/// The attempts after the first, or a delayed first one, on the motor side's runtime; the
+/// outcome goes back to the motor program that sent the command, if one did
 pub(super) async fn run(
     inner: Arc<EffectorInner>,
     command: Command,
@@ -204,17 +215,25 @@ pub(super) async fn run(
     loop {
         let result = match pending.take() {
             Some(future) => future.await,
+            None if signal.abandoned() => return inner.abandoned(),
             None => match inner.act.act(&command, &signal) {
                 Action::Done(result) => result,
                 Action::Pending(future) => future.await,
             },
         };
         match result {
-            Ok(()) => return inner.succeeded(started),
+            Ok(value) => {
+                inner.succeeded(started);
+                return signal.report(Ok(value));
+            }
             Err(error) => {
                 attempt += 1;
                 if !error.retryable() || attempt >= inner.retry.attempts {
-                    return inner.failed(&error);
+                    inner.failed(&error);
+                    return signal.report(Err(MotionError::failed(format!(
+                        "{}: {error}",
+                        inner.act.name()
+                    ))));
                 }
                 inner.counters.retries.fetch_add(1, Ordering::Relaxed);
                 tokio::time::sleep(inner.backoff(attempt)).await;

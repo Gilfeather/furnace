@@ -69,6 +69,7 @@ mod fabric;
 pub(crate) mod http;
 mod latency;
 mod metrics;
+pub mod motor;
 mod neuron;
 pub mod receptor;
 pub(crate) mod serve;
@@ -92,10 +93,11 @@ pub mod prelude {
     pub use super::effector::{
         ChannelOut, Effector, FileAppend, Process, Respond, SseOut, Webhook,
     };
+    pub use super::motor::{Motion, MotionError};
     pub use super::receptor::{ChannelIn, Http, Lines, SseIn, Timer};
     pub use super::{
-        BuildError, Fabric, Firing, FnNeuron, Habituation, Mechanisms, NeuronKind, Payload, Signal,
-        Summation, Urgency,
+        BuildError, Command, Fabric, Firing, FnNeuron, Habituation, Mechanisms, NeuronKind,
+        Payload, Signal, Summation, Urgency,
     };
 }
 

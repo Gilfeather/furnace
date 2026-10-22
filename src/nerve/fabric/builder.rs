@@ -10,6 +10,7 @@ use super::summing::Summing;
 use super::{Cell, Counters, Fabric, Inner};
 use crate::nerve::effector::Effector;
 use crate::nerve::latency::LatencyEstimate;
+use crate::nerve::motor::{ActionSpec, Motion, MotionError, Motor, Taps};
 use crate::nerve::neuron::{Gate, Mechanisms, Neuron, NeuronKind};
 use crate::nerve::receptor::{Receptor, Stop};
 use crate::nerve::signal::{NeuronId, PathwayId};
@@ -19,8 +20,11 @@ use amate::Engine;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum BuildError {
-    /// Two neurons have the same name; effectors are addressed by name
+    /// Two neurons have the same name; effectors and motor neurons are addressed by name
     DuplicateName(String),
+    /// An action was declared on a neuron that takes no commands: only motor neurons and
+    /// effectors do
+    NotAnAction(String),
     /// A pathway names a neuron that was not added to this builder
     UnknownNeuron {
         /// The pathway's source
@@ -44,6 +48,10 @@ impl std::fmt::Display for BuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DuplicateName(name) => write!(f, "two neurons are named '{name}'"),
+            Self::NotAnAction(name) => write!(
+                f,
+                "'{name}' is declared an action, but only motor neurons and effectors take commands"
+            ),
             Self::UnknownNeuron { from, to } => {
                 write!(
                     f,
@@ -70,6 +78,7 @@ pub struct FabricBuilder {
     neurons: Vec<(Arc<dyn Neuron>, Mechanisms)>,
     receptors: Vec<(NeuronId, Arc<dyn Receptor>)>,
     pathways: Vec<(NeuronId, NeuronId, PathwayKind, f32, Option<Summation>)>,
+    actions: Vec<(NeuronId, String, serde_json::Value)>,
     efferent_threads: usize,
     efferent: Option<tokio::runtime::Handle>,
 }
@@ -87,6 +96,7 @@ impl FabricBuilder {
             neurons: Vec::new(),
             receptors: Vec::new(),
             pathways: Vec::new(),
+            actions: Vec::new(),
             efferent_threads: 2,
             efferent: None,
         }
@@ -135,6 +145,39 @@ impl FabricBuilder {
     /// reach it by its name from any neuron, with or without a pathway to it.
     pub fn effector(&mut self, effector: impl Into<Effector>) -> NeuronId {
         self.neuron(effector.into())
+    }
+
+    /// Add a motor neuron: commands addressed to `name` start `program` on the motor side,
+    /// which carries them out by commanding the motor neurons and effectors below it (see
+    /// [`Motor`]). Commands reach it by its name from any neuron, as they reach effectors.
+    pub fn motor<F, Fut>(&mut self, name: &str, program: F) -> NeuronId
+    where
+        F: Fn(Motion) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<serde_json::Value, MotionError>> + Send + 'static,
+    {
+        self.neuron(Motor::new(name, program))
+    }
+
+    /// Offer the motor neuron or effector `id` to brains as an action: what it does and the
+    /// shape of its arguments (a JSON Schema, or an example), for the prompt. A brain sees
+    /// these and nothing else, so the parts below an action (the fingers under a hand) stay
+    /// out of its sight. [`build`](Self::build) refuses a neuron that takes no commands.
+    ///
+    /// # Panics
+    ///
+    /// For an id this builder did not hand out.
+    pub fn action(
+        &mut self,
+        id: NeuronId,
+        description: &str,
+        args: serde_json::Value,
+    ) -> &mut Self {
+        assert!(
+            id.index() < self.neurons.len(),
+            "{id} is not in this builder"
+        );
+        self.actions.push((id, description.to_string(), args));
+        self
     }
 
     /// Put `mechanisms` (threshold, habituation, refractory period) in front of neuron `id`
@@ -186,8 +229,8 @@ impl FabricBuilder {
     }
 
     /// Wire the fabric and start its runtimes and its deliberative workers. An error for two
-    /// neurons of the same name, a pathway to a neuron of another builder, or a runtime that
-    /// cannot be started.
+    /// neurons of the same name, a pathway to a neuron of another builder, an action that
+    /// takes no commands, or a runtime that cannot be started.
     pub fn build(self) -> Result<Fabric, BuildError> {
         let count = self.neurons.len();
         let mut names = std::collections::HashSet::new();
@@ -201,6 +244,18 @@ impl FabricBuilder {
             if from.index() >= count || to.index() >= count {
                 return Err(BuildError::UnknownNeuron { from, to });
             }
+        }
+        let mut actions = Vec::with_capacity(self.actions.len());
+        for (id, description, args) in self.actions {
+            let neuron = &self.neurons[id.index()].0;
+            if !matches!(neuron.kind(), NeuronKind::Motor | NeuronKind::Effector) {
+                return Err(BuildError::NotAnAction(neuron.name().to_string()));
+            }
+            actions.push(ActionSpec {
+                name: neuron.name().to_string(),
+                description,
+                args,
+            });
         }
         let (efferent, efferent_handle) = match self.efferent {
             Some(handle) => (None, handle),
@@ -241,6 +296,7 @@ impl FabricBuilder {
                     counters: Counters::default(),
                     out: Vec::new(),
                     last_prepared: AtomicU64::new(0),
+                    taps: Taps::default(),
                 }
             })
             .collect();
@@ -288,6 +344,7 @@ impl FabricBuilder {
                 pathways,
                 by_name,
                 receptors: self.receptors,
+                actions,
                 started: AtomicBool::new(false),
                 received: AtomicU64::new(0),
                 reached_brain: AtomicU64::new(0),

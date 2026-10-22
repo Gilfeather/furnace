@@ -130,6 +130,9 @@ pub(crate) struct NeuronDescription {
     /// Whatever the neuron adds about itself ([`Neuron::describe`](super::Neuron::describe))
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub describe: serde_json::Value,
+    /// What a brain is told about it, for an action
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<super::motor::ActionSpec>,
 }
 
 impl Fabric {
@@ -167,6 +170,11 @@ impl Fabric {
                     out: cell.out.iter().map(|p| p.index()).collect(),
                     counters: self.neuron_metrics(i),
                     describe: cell.neuron.describe(),
+                    action: self
+                        .actions()
+                        .iter()
+                        .find(|a| a.name == cell.neuron.name())
+                        .cloned(),
                 })
                 .collect(),
             pathways: self.pathway_metrics(),

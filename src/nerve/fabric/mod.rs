@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use super::latency::Latency;
+use super::motor::{ActionSpec, Taps};
 use super::neuron::{Gate, Neuron, NeuronKind, Quiet};
 use super::receptor::{Afferent, Receptor, Stop};
 use super::signal::{NeuronId, PathwayId};
@@ -68,6 +69,8 @@ pub(crate) struct Cell {
     /// For effectors: stimulus-to-action latency per origin (reflex arcs only), by the
     /// origin's index
     pub arcs: Vec<OnceLock<Latency>>,
+    /// The motor programs sensing this neuron
+    pub taps: Taps,
 }
 
 pub(crate) struct Inner {
@@ -76,12 +79,14 @@ pub(crate) struct Inner {
     pub pathways: Vec<Pathway>,
     pub by_name: HashMap<String, NeuronId>,
     receptors: Vec<(NeuronId, Arc<dyn Receptor>)>,
+    /// What a brain may call, in the order declared
+    actions: Vec<ActionSpec>,
     started: AtomicBool,
     /// Signals that entered through a receptor
     pub received: AtomicU64,
     /// Signals a brain neuron saw
     pub reached_brain: AtomicU64,
-    /// Commands addressed to a name no effector has
+    /// Commands addressed to a name no effector or motor neuron has
     pub unrouted: AtomicU64,
     /// Signals with no eligible pathway (all too slow for the deadline)
     pub no_eligible: AtomicU64,
@@ -124,9 +129,9 @@ pub struct Outcome {
     pub hops: usize,
     /// Signals now waiting on a deliberative pathway
     pub queued: usize,
-    /// Effectors stimulated synchronously
+    /// Effectors and motor neurons stimulated synchronously
     pub acted: usize,
-    /// Commands with no effector of that name
+    /// Commands with no effector or motor neuron of that name
     pub unrouted: usize,
     /// Signals with no pathway fast enough for their deadline
     pub no_pathway: usize,
@@ -194,14 +199,17 @@ impl Fabric {
         self.0.cells[id.index()].neuron.name()
     }
 
-    /// The names effectors were registered under
-    pub(crate) fn effector_names(&self) -> Vec<String> {
-        self.0
-            .cells
-            .iter()
-            .filter(|c| c.kind == NeuronKind::Effector)
-            .map(|c| c.neuron.name().to_string())
-            .collect()
+    /// The actions a brain may call: the motor neurons and effectors declared with
+    /// [`FabricBuilder::action`], in that order
+    pub fn actions(&self) -> &[ActionSpec] {
+        &self.0.actions
+    }
+
+    /// Stop the program running at the motor neuron named `name`, and everything it
+    /// commanded; whether one was running
+    pub fn stop(&self, name: &str) -> bool {
+        self.neuron(name)
+            .is_some_and(|id| self.0.cells[id.index()].neuron.stop())
     }
 
     /// Subscribe to a neuron that publishes events (an SSE effector)

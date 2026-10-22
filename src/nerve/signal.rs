@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
+use super::motor::MotionError;
 use crate::tensor::HostTensor;
 
 /// A neuron's index in its [`Fabric`](super::Fabric)
@@ -167,10 +168,11 @@ impl Urgency {
     }
 }
 
-/// An effector and its arguments: what a brain or a reflex tells the motor side to do
+/// An effector or a motor neuron and its arguments: what a brain, a reflex or a motor
+/// neuron's program tells the motor side to do
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Command {
-    /// The name an effector was registered under
+    /// The name an effector or a [`Motor`](super::motor::Motor) neuron was registered under
     pub effector: String,
     /// Whatever that effector takes: a JSON body for a webhook, `args` for a process, a line
     /// for a journal
@@ -179,7 +181,7 @@ pub struct Command {
 }
 
 impl Command {
-    /// A command for the effector registered as `effector`
+    /// A command for the effector or motor neuron registered as `effector`
     pub fn new(effector: &str, args: serde_json::Value) -> Self {
         Self {
             effector: effector.to_string(),
@@ -552,6 +554,80 @@ impl ReplyHandle {
     }
 }
 
+/// What a command's outcome is, for the motor program that sent it
+pub(crate) type Reported = Result<serde_json::Value, MotionError>;
+
+enum FeedbackInner {
+    /// A command's outcome, for the program that sent it: the first report wins, and a
+    /// command that ends without one was carried out with nothing to say
+    Outcome(Mutex<Option<oneshot::Sender<Reported>>>),
+    /// A question's answers: whatever the asked neuron fires goes back to `asker`, until no
+    /// signal carries the question any more
+    Answers {
+        asker: NeuronId,
+        sender: mpsc::UnboundedSender<Signal>,
+    },
+}
+
+/// The way back up to the motor program that sent a command or asked a question, carried by
+/// the signal and every signal derived from it
+#[derive(Clone)]
+pub(crate) struct Feedback(Arc<FeedbackInner>);
+
+impl fmt::Debug for Feedback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &*self.0 {
+            FeedbackInner::Outcome(_) => f.write_str("Feedback::Outcome"),
+            FeedbackInner::Answers { asker, .. } => write!(f, "Feedback::Answers({asker})"),
+        }
+    }
+}
+
+impl Feedback {
+    /// For a command: its outcome comes back on the receiver
+    pub(crate) fn outcome() -> (Self, oneshot::Receiver<Reported>) {
+        let (sender, receiver) = oneshot::channel();
+        let inner = FeedbackInner::Outcome(Mutex::new(Some(sender)));
+        (Self(Arc::new(inner)), receiver)
+    }
+
+    /// For a question from `asker`: the answers come back on the receiver, which closes once
+    /// no signal carries the question any more
+    pub(crate) fn answers(asker: NeuronId) -> (Self, mpsc::UnboundedReceiver<Signal>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let inner = FeedbackInner::Answers { asker, sender };
+        (Self(Arc::new(inner)), receiver)
+    }
+
+    fn sender(&self) -> Option<std::sync::MutexGuard<'_, Option<oneshot::Sender<Reported>>>> {
+        match &*self.0 {
+            FeedbackInner::Outcome(sender) => {
+                Some(sender.lock().unwrap_or_else(|e| e.into_inner()))
+            }
+            FeedbackInner::Answers { .. } => None,
+        }
+    }
+
+    /// The sender of a command's outcome, for the motor neuron that carries it out
+    pub(crate) fn take_outcome(&self) -> Option<oneshot::Sender<Reported>> {
+        self.sender()?.take()
+    }
+
+    /// Report a command's outcome; the first report wins
+    fn report(&self, result: Reported) {
+        if let Some(sender) = self.sender().and_then(|mut s| s.take()) {
+            // The program may have stopped waiting
+            let _ = sender.send(result);
+        }
+    }
+
+    /// Whether the program that sent the command stopped waiting for its outcome
+    fn abandoned(&self) -> bool {
+        self.sender()
+            .is_some_and(|s| s.as_ref().is_some_and(oneshot::Sender::is_closed))
+    }
+}
+
 /// One thing that moves: a feature, an urgency, an intensity and a lazily shared payload.
 ///
 /// Receptors make signals ([`Signal::new`]); neurons that fire make derived ones
@@ -577,6 +653,8 @@ pub struct Signal {
     pub trace: Trace,
     /// The way back to the request that started the chain, if any
     pub reply: Option<ReplyHandle>,
+    /// The way back to the motor program that sent the command or asked the question, if any
+    pub(crate) feedback: Option<Feedback>,
 }
 
 impl Signal {
@@ -597,6 +675,7 @@ impl Signal {
             payload,
             trace: Trace::default(),
             reply: None,
+            feedback: None,
         }
     }
 
@@ -637,6 +716,7 @@ impl Signal {
             payload,
             trace: self.trace,
             reply: self.reply.clone(),
+            feedback: self.feedback.clone(),
         }
     }
 
@@ -653,6 +733,46 @@ impl Signal {
     /// Answer the request that started the chain, if there is one waiting
     pub fn answer(&self, answer: Answer) -> bool {
         self.reply.as_ref().is_some_and(|r| r.answer(answer))
+    }
+
+    /// Report the outcome of the command this signal carries to the motor program that sent
+    /// it, if one did
+    pub(crate) fn report(&self, result: Reported) {
+        if let Some(feedback) = &self.feedback {
+            feedback.report(result);
+        }
+    }
+
+    /// Whether a motor program sent this command and stopped waiting for its outcome
+    pub(crate) fn abandoned(&self) -> bool {
+        self.feedback.as_ref().is_some_and(Feedback::abandoned)
+    }
+
+    /// If this signal answers a question that a neuron other than `from` asked, send it back
+    /// to the asker (as an observation: without the ways back) and say so
+    pub(crate) fn answers_from(&self, from: NeuronId) -> bool {
+        let Some(feedback) = &self.feedback else {
+            return false;
+        };
+        let FeedbackInner::Answers { asker, sender } = &*feedback.0 else {
+            return false;
+        };
+        if *asker == from {
+            return false;
+        }
+        // The asker may have stopped waiting
+        let _ = sender.send(self.observed());
+        true
+    }
+
+    /// A copy to look at, without the ways back to a request or a motor program: holding it
+    /// keeps nobody waiting
+    pub(crate) fn observed(&self) -> Self {
+        Self {
+            reply: None,
+            feedback: None,
+            ..self.clone()
+        }
     }
 }
 

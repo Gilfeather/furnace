@@ -101,7 +101,7 @@ impl Act for FileAppend {
         }
         Action::pending(async move {
             match written.await {
-                Ok(Ok(())) => Ok(()),
+                Ok(Ok(())) => Ok(serde_json::Value::Null),
                 Ok(Err(e)) => Err(ActError::retry(format!("{path}: {e}"))),
                 Err(_) => Err(ActError::retry(format!(
                     "{path}: the writer thread is gone"

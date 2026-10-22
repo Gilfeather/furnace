@@ -21,6 +21,9 @@ pub enum NeuronKind {
     Reflex,
     /// The large slow model: its output is commands
     Brain,
+    /// Command → commands below it: carries a command out by commanding motor neurons and
+    /// effectors ([`Motor`](super::motor::Motor))
+    Motor,
     /// Command → world
     Effector,
 }
@@ -32,6 +35,7 @@ impl NeuronKind {
             Self::Receptor => "receptor",
             Self::Reflex => "reflex",
             Self::Brain => "brain",
+            Self::Motor => "motor",
             Self::Effector => "effector",
         }
     }
@@ -114,9 +118,10 @@ impl Cx<'_> {
         self.fabric.efferent()
     }
 
-    /// The names effectors are registered under, for a brain's prompt
-    pub fn effectors(&self) -> Vec<String> {
-        self.fabric.effector_names()
+    /// The actions a brain may call, for its prompt: the motor neurons and effectors
+    /// declared with [`FabricBuilder::action`](super::FabricBuilder::action)
+    pub fn actions(&self) -> &[super::motor::ActionSpec] {
+        self.fabric.actions()
     }
 }
 
@@ -124,7 +129,7 @@ impl Cx<'_> {
 /// (threshold, habituation, refractory) runs before `stimulate`, so a neuron only sees the
 /// signals that got through.
 pub trait Neuron: Send + Sync + 'static {
-    /// Unique in the fabric: effectors are addressed by it in commands
+    /// Unique in the fabric: effectors and motor neurons are addressed by it in commands
     fn name(&self) -> &str;
 
     /// What kind of neuron this is; a reflex unless overridden
@@ -162,6 +167,12 @@ pub trait Neuron: Send + Sync + 'static {
     /// For neurons that publish a stream of events (the SSE effector): subscribe to it
     fn events(&self) -> Option<tokio::sync::broadcast::Receiver<bytes::Bytes>> {
         None
+    }
+
+    /// Stop what the neuron is doing on the motor side (a motor neuron's program, and
+    /// everything it commanded); whether anything was running
+    fn stop(&self) -> bool {
+        false
     }
 }
 

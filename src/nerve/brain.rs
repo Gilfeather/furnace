@@ -3,9 +3,11 @@
 //!
 //! - `Llm` (feature `llm`) wraps an `LlmEngine`: the mock engines of
 //!   `furnace::llm::mock`, a `Scheduled` step model, the candle adapter. The signal's payload
-//!   becomes the user message, the effectors' names go into the system prompt, and the
-//!   model's answer is parsed as commands: a JSON command object
-//!   `{"effector": "...", "args": {...}}`, an array of them, or OpenAI-style tool calls.
+//!   becomes the user message, the actions declared with
+//!   [`FabricBuilder::action`](super::FabricBuilder::action) go into the system prompt (the
+//!   motor neurons and effectors a brain may call, not the parts below them), and the
+//!   model's answer is parsed as commands: a JSON object `{"name": "...", "args": {...}}`
+//!   (or `{"effector": ...}`), an array of them, or OpenAI-style tool calls.
 //! - [`ModelNeuron`] wraps a [`Model`]: a user function makes the input tensors from the
 //!   signal and another turns the outputs into commands (or any signals). As a reflex it runs
 //!   inline on the arc; as a brain, on a deliberative pathway, it batches the signals of a
@@ -194,12 +196,29 @@ pub use llm::Llm;
 mod llm {
     use super::*;
     use crate::llm::{Event, GenerateRequest, LlmEngine, Message, Prompt, SamplingParams};
+    use crate::nerve::motor::ActionSpec;
 
-    /// The default system prompt; `{effectors}` is replaced by the effectors' names
+    /// The default system prompt; `{actions}` is replaced by the actions, one per line
     pub const SYSTEM_PROMPT: &str = "You are the brain of a nervous system. You see one signal \
-        at a time and may act on the world only through these effectors: {effectors}. Answer \
-        with JSON only: one command object {\"effector\": \"<name>\", \"args\": {...}}, or a \
-        JSON array of command objects, or [] when no action is needed.";
+        at a time: something sensed, a question from a part of the body, or how an action \
+        you started ended. You may act on the world only through these actions:\n{actions}\n\
+        Answer with JSON only: one command {\"name\": \"<action>\", \"args\": {...}}, a JSON \
+        array of commands, or [] when no action is needed.";
+
+    /// The actions as the prompt lists them: `- name: description Args: {...}`, one a line
+    fn listed(actions: &[ActionSpec]) -> String {
+        actions
+            .iter()
+            .map(|a| {
+                if a.args.is_null() {
+                    format!("- {}: {}", a.name, a.description)
+                } else {
+                    format!("- {}: {} Args: {}", a.name, a.description, a.args)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     type UserFn = dyn Fn(&Signal) -> String + Send + Sync;
 
@@ -237,7 +256,7 @@ mod llm {
             }
         }
 
-        /// Your own system prompt; `{effectors}` is replaced by the effectors' names
+        /// Your own system prompt; `{actions}` is replaced by the actions, one per line
         pub fn system(mut self, prompt: &str) -> Self {
             self.system = prompt.to_string();
             self
@@ -261,8 +280,8 @@ mod llm {
             self
         }
 
-        fn request(&self, signal: &Signal, effectors: &[String]) -> GenerateRequest {
-            let system = self.system.replace("{effectors}", &effectors.join(", "));
+        fn request(&self, signal: &Signal, actions: &str) -> GenerateRequest {
+            let system = self.system.replace("{actions}", actions);
             let user = (self.user)(signal);
             let input = if self.completion {
                 Prompt::Text(format!("{system}\n\n{user}\n"))
@@ -395,7 +414,7 @@ mod llm {
         /// reflex pathway)
         fn stimulate(&self, signal: Signal, cx: &Cx<'_>) -> Firing {
             let started = std::time::Instant::now();
-            let request = self.request(&signal, &cx.effectors());
+            let request = self.request(&signal, &listed(cx.actions()));
             let result = generate_all(&*self.engine, cx.efferent(), vec![request])
                 .pop()
                 .unwrap_or_else(|| Err("no result".to_string()));
@@ -406,11 +425,8 @@ mod llm {
         /// a scheduler runs them as one batch; the window's signals wait for the slowest.
         fn stimulate_many(&self, signals: Vec<Signal>, cx: &Cx<'_>) -> Vec<Firing> {
             let started = std::time::Instant::now();
-            let effectors = cx.effectors();
-            let requests = signals
-                .iter()
-                .map(|s| self.request(s, &effectors))
-                .collect();
+            let actions = listed(cx.actions());
+            let requests = signals.iter().map(|s| self.request(s, &actions)).collect();
             let results = generate_all(&*self.engine, cx.efferent(), requests);
             signals
                 .iter()
@@ -647,7 +663,7 @@ mod tests {
                 r#""args": {"level": 2}}"#,
             ],
         );
-        let brain = Llm::new("brain", engine).system("Effectors: {effectors}.");
+        let brain = Llm::new("brain", engine).system("Actions: {actions}.");
         let (fabric, r, receiver) = fabric_with_brain(brain);
         let outcome = fabric.stimulate(r, signal("something new"));
         assert_eq!(outcome.queued, 1);

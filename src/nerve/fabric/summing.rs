@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use super::{Fabric, Inner};
+use crate::nerve::motor::MotionError;
 use crate::nerve::neuron::{Cx, Firing, NeuronKind};
 use crate::nerve::signal::{PathwayId, ReplyHandle, Signal};
 use amate::{Batching, Queued};
@@ -27,6 +28,7 @@ impl Fabric {
             match cell.gate.admit(&mut signal, nanos) {
                 Ok(()) => {
                     signal.trace.push(pathway.to);
+                    cell.taps.copy(&signal);
                     if cell.kind == NeuronKind::Brain {
                         signal.trace.mark_brain();
                         self.0.reached_brain.fetch_add(1, Ordering::Relaxed);
@@ -36,6 +38,11 @@ impl Fabric {
                 }
                 Err(reason) => {
                     cell.counters.quiet(reason);
+                    signal.report(Err(MotionError::failed(format!(
+                        "quiet at '{}': {}",
+                        cell.neuron.name(),
+                        reason.as_str()
+                    ))));
                     pathway.latency.observe(now.saturating_duration_since(at));
                 }
             }

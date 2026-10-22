@@ -48,6 +48,7 @@ impl Act for ChannelOut {
                     command: command.clone(),
                     signal: signal.clone(),
                 })
+                .map(|()| serde_json::Value::Null)
                 .map_err(|e| match e {
                     mpsc::TrySendError::Full(_) => ActError::retry("channel full"),
                     mpsc::TrySendError::Disconnected(_) => ActError::fatal("receiver gone"),
