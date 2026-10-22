@@ -5,11 +5,12 @@ models is the bottleneck. Furnace is that layer: not a server that
 loads models and answers requests, but the nervous system between sensors, models and
 actuators. Text, images, tensors and model outputs are one kind of signal. Signals run through
 any number of junctions, and at each one they act now or pass on; a brain (an LLM, any large
-model, a remote server) is one possible end, and most signals never reach it. The motor side
-has junctions too: the brain says "get dressed", and motor junctions break that down into
-commands for the arm, the hand and the fingers, retry a slipped grip themselves and report
-back up. The receptive side and the motor side are separate systems. The mechanisms are a
-neuron's.
+model, a remote server) is one possible end, and most signals never reach it. Between the
+brain and the body sits a spine: the brain says "get dressed" to it and nothing more, the
+spine's motor junctions break that down, and a nerve per body part (the right arm, the left
+arm) carries the commands to the hand and the fingers, which retry a slipped grip themselves
+and report back up. The receptive side and the motor side are separate systems. The
+mechanisms are a neuron's.
 
 ```toml
 [dependencies]
@@ -61,7 +62,7 @@ everything, and the body waits for the brain's reply.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-dark.svg">
-  <img alt="Receptors feed a network of junctions of any depth that branches and merges; at every junction a signal acts now through an effector or passes on to the next junction; an optional brain is one possible end. Below, the motor side: the brain names an action, motor junctions break it down into commands for the junctions and effectors below them, and outcomes, senses and answers come back up" src="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-light.svg" width="900">
+  <img alt="Receptors feed a network of junctions of any depth that branches and merges; at every junction a signal acts now through an effector or passes on to the next junction; an optional brain is one possible end. Below, the motor side: the brain talks to the spine only, in actions; the spine carries actions down and senses, questions and outcomes up; a nerve per body part carries its own load to its motor junctions and effectors, where retries and adjustments close" src="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-light.svg" width="900">
 </picture>
 
 A fabric is any number of junctions (neurons) wired as you like: a chain, a tree or a net,
@@ -135,7 +136,9 @@ next.
 
 The receptive side is many junctions deep; so is the motor side. A brain should not have to
 say "turn the right shoulder to 40°, then the elbow to 90°, then close the thumb": it says
-"get dressed", and the junctions below it know how.
+"get dressed", and the junctions below it know how. Two pieces of skeleton hold them: the
+spine between the brain and the body, and a nerve per body part
+([below](#the-skeleton-spine-and-nerves)); motor neurons are the junctions in them.
 
 **Motor neuron.** `b.motor(name, program)` adds one. A command addressed to its name (from a
 brain, a reflex, or another motor neuron) starts its program, an async closure, on the motor
@@ -218,8 +221,70 @@ let fabric = b.build()?;
 # }
 ```
 
-[`examples/get_dressed.rs`](../examples/get_dressed.rs) runs the whole story with stand-ins for
-the eyes, the joints and the brain, and prints it as it happens:
+### The skeleton: spine and nerves
+
+**Spine.** `b.spine(brain)` is the brain's only way to the body. `.ascend(receptor)` is the
+ascending tract: what passes the receptor's gate and reflexes goes up to the brain, summed
+into its firings (a deliberative pathway). `.action(id, description, args)` is the descending
+tract: the brain may call that motor neuron or effector and is told about it; a motor
+neuron's questions and how its programs ended ascend to the brain. A brain's commands reach
+its actions and nothing else: a command from a brain to a joint is unrouted, even if the
+model names one. The motor neurons that are not in a nerve, and the reflexes, run in the
+spine, never in the brain.
+
+**Nerve.** `b.nerve("right_arm", |b| { ... })` is the trunk to one part of the body: every
+neuron the closure adds (motor neurons, effectors, receptors, reflexes) belongs to it. What
+enters the nerve from outside it (an action's command, another part's) takes the nerve's lane:
+at most `Nerve::in_flight` of them are carried out at once (16 unless
+`b.nerve(Nerve::new("right_arm").in_flight(4), ..)`), each until its act or program ends, and
+the rest wait, the nearest deadline first. An idle lane costs nothing; a part that is flooded
+makes its own signals wait and no other part's, so a jam in the right arm does not stop the
+left. What stays inside the nerve never waits there: the hand commanding its fingers, the
+fingertip's pressure reaching the hand. That is where a part's own loops close. `GET /metrics`
+shows each nerve's lane (`in_flight`, `waiting`, `waited`, `dropped`); a lane holds up to 1,024
+waiting signals and then drops the least urgent.
+
+```rust,no_run
+use furnace::nerve::prelude::*;
+use serde_json::{Value, json};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let mut b = Fabric::builder();
+let thermometer = b.receptor(Http::new("thermometer", "/temperature").text());
+let brain = b.neuron(FnNeuron::reflex("brain", |signal, _| {
+    // Stands in for an LLM: it is told the actions and nothing below them
+    signal.command("get_dressed", json!({"warmth": 0.9}))
+}).with_kind(NeuronKind::Brain));
+let dress = b.motor("get_dressed", |m| async move {
+    m.command("grasp", json!({"item": "coat"})).await?;
+    m.together([Command::new("sleeve:left", Value::Null), Command::new("sleeve:right", Value::Null)])
+        .await?;
+    Ok(json!({"wearing": "coat"}))
+});
+b.spine(brain)
+    .ascend(thermometer)
+    .action(dress, "Put on something warm.", json!({"warmth": "0 to 1"}));
+b.nerve("right_arm", |b| -> Result<(), BuildError> {
+    b.motor("grasp", |m| async move { m.command("grip", json!({"force": 0.7})).await });
+    b.motor("sleeve:right", |m| async move { m.command("elbow:right", json!({"angle": 30})).await });
+    b.effector(Webhook::new("grip", "http://127.0.0.1:9000/grip")?);
+    b.effector(Webhook::new("elbow:right", "http://127.0.0.1:9000/elbow/right")?);
+    Ok(())
+})?;
+b.nerve("left_arm", |b| -> Result<(), BuildError> {
+    b.motor("sleeve:left", |m| async move { m.command("elbow:left", json!({"angle": 30})).await });
+    b.effector(Webhook::new("elbow:left", "http://127.0.0.1:9000/elbow/left")?);
+    Ok(())
+})?;
+let fabric = b.build()?;
+# let _ = fabric;
+# Ok(())
+# }
+```
+
+[`examples/get_dressed.rs`](../examples/get_dressed.rs) runs the whole story on this skeleton
+(the spine, a right-arm and a left-arm nerve) with stand-ins for the eyes, the joints and the
+brain, and prints it as it happens:
 
 ```bash
 cargo run --example get_dressed
@@ -301,7 +366,9 @@ What the builder does for you:
   (`Effector::new(act).refractory(..)`).
 - `motor` adds a motor neuron with its program ([the motor side](#the-motor-side)), and
   `action` offers a motor neuron or an effector to brains, with a description and the shape of
-  its arguments: an LLM brain is told about these and nothing else.
+  its arguments: an LLM brain is told about these and nothing else, and its commands reach
+  nothing else. `spine(brain)` and `nerve(name, ..)` build the skeleton between the brain and
+  the body ([spine and nerves](#the-skeleton-spine-and-nerves)).
 - A command reaches the effector or motor neuron it names from any neuron, with or without a
   pathway to it: `reflex` and `deliberative` are for signals that are not commands yet.
 - Neurons have no mechanisms until `b.gate(id, Mechanisms::NONE.threshold(..).habituation(..))`

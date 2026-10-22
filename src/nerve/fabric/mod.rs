@@ -22,13 +22,16 @@ use super::signal::{NeuronId, PathwayId};
 pub(crate) const MAX_HOPS: usize = 32;
 
 mod builder;
+mod nerve;
 mod pathway;
 mod route;
 mod summing;
 #[cfg(test)]
 mod tests;
 
-pub use builder::{BuildError, FabricBuilder, Link};
+pub use builder::{BuildError, FabricBuilder, Link, Spine};
+pub(crate) use nerve::{Lane, Ticket};
+pub use nerve::{Nerve, NerveLaneMetrics};
 use pathway::Pathway;
 pub use pathway::{PathwayKind, Summation};
 pub(crate) use route::Announced;
@@ -71,6 +74,10 @@ pub(crate) struct Cell {
     pub arcs: Vec<OnceLock<Latency>>,
     /// The motor programs sensing this neuron
     pub taps: Taps,
+    /// The nerve it belongs to, by index
+    pub nerve: Option<usize>,
+    /// Whether a brain may command it
+    pub action: bool,
 }
 
 pub(crate) struct Inner {
@@ -81,6 +88,8 @@ pub(crate) struct Inner {
     receptors: Vec<(NeuronId, Arc<dyn Receptor>)>,
     /// What a brain may call, in the order declared
     actions: Vec<ActionSpec>,
+    /// The nerves' lanes
+    pub nerves: Vec<Lane>,
     started: AtomicBool,
     /// Signals that entered through a receptor
     pub received: AtomicU64,

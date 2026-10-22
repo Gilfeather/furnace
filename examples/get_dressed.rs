@@ -2,6 +2,9 @@
 //! `cargo run --example get_dressed`. No hardware and no model file: the thermometer, the
 //! eyes, the joints and the brain are stand-ins that print what they do.
 //!
+//! The skeleton: the brain talks to the spine only; the spine carries the thermometer up and
+//! the actions down; a nerve per arm carries commands to its motor neurons and joints.
+//!
 //! 1. The thermometer reads 4 °C. The brain (a stand-in for an LLM) knows two actions,
 //!    `get_dressed` and `stop`, and nothing of arms or fingers: it answers `get_dressed`.
 //! 2. `get_dressed` looks for a coat in what the eyes stream. There is none, so it asks the
@@ -17,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use furnace::nerve::effector::{Act, ActError, Action};
 use furnace::nerve::prelude::*;
-use furnace::nerve::{Cx, Feature};
+use furnace::nerve::{Cx, FabricBuilder, Feature};
 use serde_json::{Value, json};
 
 /// A line of the story: milliseconds since the start, indented by how deep in the body
@@ -170,6 +173,19 @@ async fn grasp(m: Motion) -> Result<Value, MotionError> {
     Err(MotionError::failed("could not get a grip"))
 }
 
+/// An arm's sleeve: the shoulder, then the elbow
+fn sleeve(b: &mut FabricBuilder, side: &'static str) {
+    b.motor(&format!("sleeve:{side}"), move |m| async move {
+        log(2, format!("sleeve:{side}: arm in"));
+        m.command(&format!("shoulder:{side}"), json!({"angle": 120}))
+            .await?;
+        m.command(&format!("elbow:{side}"), json!({"angle": 30}))
+            .await
+    });
+    b.effector(Joint(format!("shoulder:{side}")));
+    b.effector(Joint(format!("elbow:{side}")));
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ms = Duration::from_millis;
     let mut b = Fabric::builder();
@@ -178,51 +194,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let thermometer = b.receptor(thermometer);
     b.receptor(eyes);
 
-    // The brain, behind deliberative pathways: from the thermometer, and from get_dressed,
-    // whose questions and report travel on it
+    // The brain: it talks to the spine, and knows nothing of arms or fingers
     let (done, finished) = std::sync::mpsc::channel();
     let brain = b.neuron(
         FnNeuron::reflex("brain", move |signal, cx| brain(signal, cx, &done))
             .with_kind(NeuronKind::Brain),
     );
-    b.deliberative(thermometer, brain);
     let dress = b.motor("get_dressed", get_dressed);
-    b.deliberative(dress, brain);
-
-    // What the brain may call, and nothing below it
-    b.action(
-        dress,
-        "Put on something warm, finding it first.",
-        json!({"warmth": "0 to 1"}),
-    );
     let stop = b.motor("stop", |m| async move {
         Ok(json!({"stopped": m.stop("get_dressed")}))
     });
-    b.action(stop, "Stop getting dressed.", Value::Null);
+    // The spine: the thermometer ascends to the brain (the eyes do not: get_dressed looks at
+    // them itself); the brain may call two actions, whose questions and outcomes ascend
+    b.spine(brain)
+        .ascend(thermometer)
+        .action(
+            dress,
+            "Put on something warm, finding it first.",
+            json!({"warmth": "0 to 1"}),
+        )
+        .action(stop, "Stop getting dressed.", Value::Null);
 
-    // The body: motor neurons for its parts, effectors for its joints and grip
-    b.motor("reach", reach);
-    b.motor("grasp", grasp);
-    for finger in ["thumb", "index", "middle"] {
-        b.motor(&format!("finger:{finger}"), move |m| async move {
-            let curl = m.args()["curl"].clone();
-            m.command(&format!("knuckle:{finger}"), json!({"angle": curl}))
-                .await
-        });
-        b.effector(Joint(format!("knuckle:{finger}")));
-    }
-    for side in ["left", "right"] {
-        b.motor(&format!("sleeve:{side}"), move |m| async move {
-            log(2, format!("sleeve:{side}: arm in"));
-            m.command(&format!("shoulder:{side}"), json!({"angle": 120}))
-                .await?;
-            m.command(&format!("elbow:{side}"), json!({"angle": 30}))
-                .await
-        });
-        b.effector(Joint(format!("shoulder:{side}")));
-        b.effector(Joint(format!("elbow:{side}")));
-    }
-    b.effector(Grip::default());
+    // The nerves: one trunk per arm, each with its motor neurons and effectors. What enters
+    // an arm waits only for that arm; the hand's loop with its grip closes inside it.
+    b.nerve("right_arm", |b| {
+        b.motor("reach", reach);
+        b.motor("grasp", grasp);
+        for finger in ["thumb", "index", "middle"] {
+            b.motor(&format!("finger:{finger}"), move |m| async move {
+                let curl = m.args()["curl"].clone();
+                m.command(&format!("knuckle:{finger}"), json!({"angle": curl}))
+                    .await
+            });
+            b.effector(Joint(format!("knuckle:{finger}")));
+        }
+        b.effector(Grip::default());
+        sleeve(b, "right");
+    });
+    b.nerve("left_arm", |b| sleeve(b, "left"));
 
     let fabric = b.build()?;
     fabric.start();
@@ -249,6 +258,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if neuron.kind == NeuronKind::Motor {
             println!("{:>14}: {}", neuron.name, neuron.extra);
         }
+    }
+    for nerve in fabric.metrics().nerves {
+        println!("{:>14}: waited {} in its lane", nerve.name, nerve.waited);
     }
     println!("Reached the brain: {}", fabric.metrics().reached_brain);
     Ok(())

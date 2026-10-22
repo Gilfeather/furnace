@@ -21,9 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stops it and everything below it. `NeuronKind::Motor`, `MotionError`, `Sense`.
 - `FabricBuilder::action(id, description, args)` declares what a brain may call: an LLM
   brain's prompt lists these actions, with their descriptions and arguments, and nothing
-  below them. `GET /nerve` shows them.
-- `examples/get_dressed.rs`: "it is cold, get dressed", from the thermometer through the
-  eyes, a question to the brain, the arm, the hand and the knuckles, and back.
+  below them, and a brain's commands reach nothing else. `GET /nerve` shows them.
+- The skeleton between the brain and the body. `FabricBuilder::spine(brain)` returns the
+  brain's `Spine`: `ascend(receptor)` takes what a receptor should tell the brain up (a
+  deliberative pathway), `action(id, description, args)` offers an action and takes a motor
+  neuron's questions and outcomes back up. `FabricBuilder::nerve(name, |b| ...)` is the trunk
+  to one body part (`Nerve`): what the closure adds belongs to it, what enters from outside
+  takes its lane (`Nerve::in_flight` at once, the nearest deadline first, 1,024 waiting at
+  most), and what stays inside never waits, so a part's loops close there and a jam in one
+  part holds up no other. `/metrics` has each nerve's lane (`NerveLaneMetrics`).
+- `examples/get_dressed.rs`: "it is cold, get dressed", on a spine and two arm nerves, from
+  the thermometer through the eyes, a question to the brain, the arm, the hand and the
+  knuckles, and back.
 
 ### Changed
 - An act returns a value (`ActResult`, `Action::value`): what it measured or was answered,
@@ -34,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Cx::actions` replaces `Cx::effectors`, and the default prompt asks for
   `{"name": ..., "args": ...}`. A brain with no actions declared is told none.
 - A command may name a motor neuron as well as an effector; `Command::effector` holds either.
+- A brain's commands reach only the actions declared for it (`FabricBuilder::action` or
+  `Spine::action`); the others are counted as unrouted.
 - `rustls-pure` has a version of its own and is released when it changes, apart from the
   other crates; its history is in [rustls-pure/CHANGELOG.md](rustls-pure/CHANGELOG.md).
   furnace-server depends on `rustls-pure` 0.15.

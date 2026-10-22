@@ -2,9 +2,9 @@
 //! large slow model (the brain, an LLM) and actuators.
 //!
 //! ![Receptors feed junctions of any depth that branch and merge; at every junction a signal
-//! acts now or passes on; an optional brain is one possible end. On the motor side the brain
-//! names an action and motor junctions break it
-//! down](https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-light.svg)
+//! acts now or passes on; an optional brain is one possible end. Below, the brain talks to
+//! the spine in actions, and a nerve per body part carries them to its motor junctions and
+//! effectors](https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-light.svg)
 //!
 //! Not a server that loads models and answers requests, but what moves signals between
 //! them: overwhelmingly light, so that the models are the only cost. Most signals must
@@ -29,7 +29,10 @@
 //!   an action ("get dressed"), and a motor neuron's program breaks it down into commands for
 //!   the motor neurons and effectors below it, waits for what a receptor senses, asks a small
 //!   question, retries locally and reports back up. The brain is told the actions declared
-//!   with [`FabricBuilder::action`], not the joints.
+//!   with [`FabricBuilder::action`], not the joints, and reaches nothing else.
+//! - **The skeleton**: [`FabricBuilder::spine`] is the brain's only way to the body (senses
+//!   up, actions down, outcomes and questions up), and [`FabricBuilder::nerve`] the trunk to
+//!   one part, which carries its own load, the urgent first, and closes the part's own loops.
 //!
 //! ```no_run
 //! use std::time::Duration;
@@ -102,13 +105,16 @@ pub mod prelude {
     pub use super::motor::{Motion, MotionError};
     pub use super::receptor::{ChannelIn, Http, Lines, SseIn, Timer};
     pub use super::{
-        BuildError, Command, Fabric, Firing, FnNeuron, Habituation, Mechanisms, NeuronKind,
+        BuildError, Command, Fabric, Firing, FnNeuron, Habituation, Mechanisms, Nerve, NeuronKind,
         Payload, Signal, Summation, Urgency,
     };
 }
 
 pub(crate) use fabric::Announced;
-pub use fabric::{BuildError, Fabric, FabricBuilder, Link, Outcome, PathwayKind, Summation};
+pub use fabric::{
+    BuildError, Fabric, FabricBuilder, Link, Nerve, NerveLaneMetrics, Outcome, PathwayKind, Spine,
+    Summation,
+};
 pub use http::{OUTCOME_HEADER, SIGNAL_HEADER};
 pub use latency::LatencySnapshot;
 pub use metrics::{ArcMetrics, NerveMetrics, NeuronMetrics, PathwayMetrics};

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="900" height="710" viewBox="0 0 900 710" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
   <title id="title">The Furnace nervous system</title>
-  <desc id="desc">Receptors on the afferent side feed a network of junctions (neurons) of any depth that branches and merges. At every junction a signal either acts now through an effector (reflex) or passes on to the next junction (deliberate). An optional brain is one possible end. On the motor side the brain names an action; motor junctions break it down into commands for the junctions and effectors below them, together or in turn, and outcomes, sensed signals and questions come back up, so that retries and adjustments stay local.</desc>
+  <desc id="desc">Receptors on the afferent side feed a network of junctions (neurons) of any depth that branches and merges. At every junction a signal either acts now through an effector (reflex) or passes on to the next junction (deliberate). An optional brain is one possible end. Below, the motor side: the brain talks to the spine only, in actions; the spine carries actions down and senses, questions and outcomes up, and runs the motor programs; a nerve per body part carries its own load to its motor junctions and effectors, where retries and adjustments close.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#1f2328"/>
@@ -83,56 +83,58 @@
     <text x="530" y="230" font-size="15" font-weight="bold" fill="#bc4c00">Efferent</text>
     <text x="530" y="249" font-size="12.5" fill="#59636e">effectors: webhook, command, file, response</text>
     <text x="530" y="266" font-size="12.5" fill="#59636e">own runtime: retry · circuit breaker · rate limit</text>
-    <!-- motor side -->
+    <!-- motor side: brain, spine, nerves, the ends -->
     <line x1="16" y1="290" x2="884" y2="290" stroke="#d1d9e0" stroke-width="1"/>
-    <text x="16" y="318" font-size="15" font-weight="bold" fill="#bc4c00">The motor side has junctions too</text>
-    <text x="16" y="337" font-size="12.5" fill="#59636e">The brain names an action, not a joint. Motor junctions break it down and keep the small loops to themselves.</text>
-    <text x="844" y="318" text-anchor="end" font-size="12.5" fill="#bc4c00">command</text>
-    <text x="844" y="337" text-anchor="end" font-size="12.5" fill="#0969da">questions · done / failed</text>
+    <text x="16" y="318" font-size="15" font-weight="bold" fill="#bc4c00">Brain ↔ spine ↔ nerves ↔ the ends</text>
+    <text x="16" y="337" font-size="12.5" fill="#59636e">The brain talks to the spine only, in actions. Each part's nerve carries its own load.</text>
+    <text x="844" y="318" text-anchor="end" font-size="12.5" fill="#bc4c00">actions</text>
+    <text x="844" y="337" text-anchor="end" font-size="12.5" fill="#0969da">outcomes · questions · senses</text>
     <line x1="852" y1="157" x2="852" y2="350" stroke="#bc4c00" stroke-width="2" marker-end="url(#arrow-act)"/>
     <line x1="876" y1="352" x2="876" y2="159" stroke="#0969da" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arrow-back)"/>
-    <rect x="690" y="352" width="194" height="42" rx="8" fill="#f6f8fa" stroke="#bc4c00" stroke-width="2"/>
-    <text x="772" y="370" text-anchor="middle" font-size="14" font-weight="bold" fill="#bc4c00">action</text>
-    <text x="772" y="387" text-anchor="middle" font-size="11.5" fill="#59636e">what the brain may call</text>
+    <rect x="40" y="352" width="844" height="36" rx="18" fill="#f6f8fa" stroke="#bc4c00" stroke-width="2.5"/>
+    <text x="64" y="375" font-size="15" font-weight="bold" fill="#bc4c00">Spine</text>
+    <text x="118" y="375" font-size="12.5" fill="#59636e">actions down, senses and outcomes up; motor programs and reflexes run here, not in the brain</text>
+    <line x1="200" y1="388" x2="200" y2="438" stroke="#bc4c00" stroke-width="7" stroke-linecap="round"/>
+    <text x="214" y="418" font-size="12.5" font-weight="bold" fill="#bc4c00">right arm nerve</text>
+    <circle cx="200" cy="456" r="16" fill="#f6f8fa" stroke="#bc4c00" stroke-width="2"/>
     <g stroke="#bc4c00" stroke-width="2" fill="none" marker-end="url(#arrow-act)">
-      <line x1="700" y1="394" x2="614" y2="428"/>
-      <line x1="690" y1="384" x2="398" y2="434"/>
-      <line x1="592" y1="456" x2="582" y2="484"/>
-      <line x1="608" y1="456" x2="628" y2="484"/>
-      <line x1="370" y1="454" x2="342" y2="484"/>
-      <line x1="390" y1="454" x2="418" y2="484"/>
-      <line x1="330" y1="512" x2="330" y2="536"/>
-      <line x1="430" y1="512" x2="430" y2="536"/>
+      <line x1="192" y1="471" x2="182" y2="494"/>
+      <line x1="208" y1="471" x2="218" y2="494"/>
     </g>
-    <!-- motor junctions -->
-    <g fill="#f6f8fa" stroke="#bc4c00" stroke-width="2">
-      <circle cx="600" cy="440" r="18"/>
-      <circle cx="380" cy="438" r="18"/>
-      <circle cx="330" cy="498" r="14"/>
-      <circle cx="430" cy="498" r="14"/>
+    <rect x="156" y="496" width="40" height="20" rx="10" fill="#f6f8fa" stroke="#bc4c00" stroke-width="1.5"/>
+    <rect x="204" y="496" width="40" height="20" rx="10" fill="#f6f8fa" stroke="#bc4c00" stroke-width="1.5"/>
+    <text x="176" y="510" text-anchor="middle" font-size="12" fill="#bc4c00">act</text>
+    <text x="224" y="510" text-anchor="middle" font-size="12" fill="#bc4c00">act</text>
+    <line x1="450" y1="388" x2="450" y2="438" stroke="#bc4c00" stroke-width="7" stroke-linecap="round"/>
+    <text x="464" y="418" font-size="12.5" font-weight="bold" fill="#bc4c00">left arm nerve</text>
+    <circle cx="450" cy="456" r="16" fill="#f6f8fa" stroke="#bc4c00" stroke-width="2"/>
+    <g stroke="#bc4c00" stroke-width="2" fill="none" marker-end="url(#arrow-act)">
+      <line x1="442" y1="471" x2="432" y2="494"/>
+      <line x1="458" y1="471" x2="468" y2="494"/>
     </g>
-    <!-- effectors -->
-    <g fill="#f6f8fa" stroke="#bc4c00" stroke-width="1.5">
-      <rect x="558" y="486" width="40" height="20" rx="10"/>
-      <rect x="612" y="486" width="40" height="20" rx="10"/>
-      <rect x="310" y="538" width="40" height="20" rx="10"/>
-      <rect x="410" y="538" width="40" height="20" rx="10"/>
+    <rect x="406" y="496" width="40" height="20" rx="10" fill="#f6f8fa" stroke="#bc4c00" stroke-width="1.5"/>
+    <rect x="454" y="496" width="40" height="20" rx="10" fill="#f6f8fa" stroke="#bc4c00" stroke-width="1.5"/>
+    <text x="426" y="510" text-anchor="middle" font-size="12" fill="#bc4c00">act</text>
+    <text x="474" y="510" text-anchor="middle" font-size="12" fill="#bc4c00">act</text>
+    <line x1="700" y1="388" x2="700" y2="438" stroke="#bc4c00" stroke-width="7" stroke-linecap="round"/>
+    <text x="714" y="418" font-size="12.5" font-weight="bold" fill="#bc4c00">legs nerve</text>
+    <circle cx="700" cy="456" r="16" fill="#f6f8fa" stroke="#bc4c00" stroke-width="2"/>
+    <g stroke="#bc4c00" stroke-width="2" fill="none" marker-end="url(#arrow-act)">
+      <line x1="692" y1="471" x2="682" y2="494"/>
+      <line x1="708" y1="471" x2="718" y2="494"/>
     </g>
-    <g font-size="12" text-anchor="middle" fill="#bc4c00">
-      <text x="578" y="500">act</text>
-      <text x="632" y="500">act</text>
-      <text x="330" y="552">act</text>
-      <text x="430" y="552">act</text>
-    </g>
-    <text x="352" y="434" text-anchor="end" font-size="12" fill="#59636e">together or in turn</text>
-    <!-- back up: outcomes and senses -->
-    <path d="M654,494 C700,486 690,436 622,438" stroke="#0969da" stroke-width="2" stroke-dasharray="5 4" fill="none" marker-end="url(#arrow-back)"/>
-    <text x="704" y="482" font-size="12" fill="#0969da">outcome, measured value:</text>
-    <text x="704" y="498" font-size="12" fill="#0969da">retry or adjust here</text>
-    <rect x="130" y="488" width="84" height="20" rx="10" fill="#f6f8fa" stroke="#0969da" stroke-width="1.5"/>
-    <text x="172" y="502" text-anchor="middle" font-size="12" fill="#0969da">receptor</text>
-    <line x1="214" y1="498" x2="312" y2="498" stroke="#0969da" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arrow-back)"/>
-    <text x="172" y="528" text-anchor="middle" font-size="12" fill="#0969da">waits for what it senses</text>
+    <rect x="656" y="496" width="40" height="20" rx="10" fill="#f6f8fa" stroke="#bc4c00" stroke-width="1.5"/>
+    <rect x="704" y="496" width="40" height="20" rx="10" fill="#f6f8fa" stroke="#bc4c00" stroke-width="1.5"/>
+    <text x="676" y="510" text-anchor="middle" font-size="12" fill="#bc4c00">act</text>
+    <text x="724" y="510" text-anchor="middle" font-size="12" fill="#bc4c00">act</text>
+    <!-- a part's own loop -->
+    <rect x="62" y="446" width="84" height="20" rx="10" fill="#f6f8fa" stroke="#0969da" stroke-width="1.5"/>
+    <text x="104" y="460" text-anchor="middle" font-size="12" fill="#0969da">fingertip</text>
+    <line x1="146" y1="456" x2="182" y2="456" stroke="#0969da" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arrow-back)"/>
+    <path d="M246,508 C276,500 262,452 218,454" stroke="#0969da" stroke-width="2" stroke-dasharray="5 4" fill="none" marker-end="url(#arrow-back)"/>
+    <text x="40" y="540" font-size="12" fill="#0969da">retry and adjust close inside the part</text>
+    <text x="450" y="540" text-anchor="middle" font-size="12" fill="#59636e">each nerve its own lane, urgent first</text>
+    <text x="700" y="540" text-anchor="middle" font-size="12" fill="#59636e">a jam in one part holds up no other</text>
     <!-- legend -->
     <line x1="16" y1="578" x2="884" y2="578" stroke="#d1d9e0" stroke-width="1"/>
     <line x1="24" y1="602" x2="64" y2="602" stroke="#1f2328" stroke-width="2" marker-end="url(#arrow)"/>
@@ -143,6 +145,8 @@
     <text x="74" y="637" font-size="13" fill="#1f2328">junction: any number, any depth</text>
     <circle cx="420" cy="632" r="10" fill="#f6f8fa" stroke="#bc4c00" stroke-width="2"/>
     <text x="450" y="637" font-size="13" fill="#1f2328">motor junction: one command in, commands out</text>
+    <line x1="24" y1="657" x2="64" y2="657" stroke="#bc4c00" stroke-width="7" stroke-linecap="round"/>
+    <text x="74" y="662" font-size="13" fill="#1f2328">nerve: the trunk to one part of the body</text>
     <line x1="400" y1="657" x2="440" y2="657" stroke="#0969da" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arrow-back)"/>
     <text x="450" y="662" font-size="13" fill="#1f2328">back up: outcomes, senses, answers</text>
   </g>

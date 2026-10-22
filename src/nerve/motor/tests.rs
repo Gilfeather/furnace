@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::nerve::effector::{Act, ActError, ActResult, Action, Effector, Retry};
-use crate::nerve::fabric::{BuildError, Fabric, FabricBuilder};
+use crate::nerve::fabric::{BuildError, Fabric, FabricBuilder, Nerve};
 use crate::nerve::neuron::{FnNeuron, NeuronKind};
 use crate::nerve::signal::{Command, Signal, Urgency};
 use crate::nerve::testing::{command, pass};
@@ -580,6 +580,7 @@ async fn a_brain_and_a_body_part_answering_each_other_forever_are_cut() {
     let mut b = builder();
     let r = b.neuron(pass("in"));
     let again = b.motor("again", |_| async { Ok(Value::Null) });
+    b.action(again, "Do it again.", Value::Null);
     // Whatever it hears, it says "again"
     let brain = b.neuron(
         FnNeuron::reflex("brain", |signal: Signal, _| {
@@ -711,4 +712,143 @@ fn an_llm_brain_is_prompted_with_the_actions_only() {
         !system.contains("hand") && !system.contains("elbow"),
         "{system}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_flooded_nerve_holds_up_only_itself_and_lets_the_urgent_go_first() {
+    let (log, mut parts) = mpsc::unbounded_channel();
+    let mut b = builder();
+    let r = b.neuron(pass("in"));
+    let hour = Duration::from_secs(3600);
+    b.nerve(Nerve::new("right_arm").in_flight(1), |b| {
+        b.effector(part("right", &log).delay(hour).once());
+    });
+    b.nerve("left_arm", |b| {
+        b.effector(part("left", &log).once());
+    });
+    let fabric = b.build().unwrap();
+
+    // The right arm's one place is taken for an hour; the next two wait in its lane
+    assert_eq!(fabric.stimulate(r, command("right", json!(1))).acted, 1);
+    assert_eq!(fabric.stimulate(r, command("right", json!(2))).queued, 1);
+    let urgent = Urgency::within(Duration::from_secs(36_000));
+    let third = command("right", json!(3)).with_urgency(urgent);
+    assert_eq!(fabric.stimulate(r, third).queued, 1);
+    // The left arm is not held up
+    assert_eq!(fabric.stimulate(r, command("left", json!(1))).acted, 1);
+    assert_eq!(parts.recv().await.unwrap(), "right 1");
+    assert_eq!(parts.recv().await.unwrap(), "left 1");
+    let lanes = fabric.metrics().nerves;
+    assert_eq!((lanes[0].in_flight, lanes[0].waiting), (1, 2));
+    assert_eq!((lanes[1].in_flight, lanes[1].waiting), (0, 0));
+    // As places free up, the urgent one goes first, then the one that came before it
+    let mut order = Vec::new();
+    for _ in 0..4 {
+        order.push(parts.recv().await.unwrap());
+    }
+    assert_eq!(order, ["right done", "right 3", "right done", "right 2"]);
+    assert_eq!(fabric.metrics().nerves[0].waited, 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn inside_a_nerve_a_part_s_own_commands_never_wait() {
+    let (log, mut parts) = mpsc::unbounded_channel();
+    let mut b = builder();
+    let r = b.neuron(pass("in"));
+    let hand = b.nerve(Nerve::new("right_arm").in_flight(1), |b| {
+        b.effector(part("knuckle", &log).delay(Duration::from_millis(5)).once());
+        b.motor("finger", |m| async move {
+            m.command("knuckle", Value::Null).await
+        });
+        b.motor("hand", |m| async move {
+            m.together([
+                Command::new("finger", Value::Null),
+                Command::new("knuckle", Value::Null),
+            ])
+            .await?;
+            Ok(json!("closed"))
+        })
+    });
+    let (brain, mut reports) = recorder("brain");
+    let brain = b.neuron(brain);
+    b.reflex(hand, brain);
+    let fabric = b.build().unwrap();
+
+    // One place in the nerve, taken by the hand: its finger and knuckle go on all the same
+    fabric.stimulate(r, command("hand", Value::Null));
+    assert_eq!(reports.recv().await.unwrap()["result"], "closed");
+    assert_eq!(drain(&mut parts).len(), 4);
+    let lane = &fabric.metrics().nerves[0];
+    assert_eq!((lane.in_flight, lane.waited), (0, 0));
+    assert_eq!(
+        fabric.describe().neurons[1].nerve.as_deref(),
+        Some("right_arm")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_brain_reaches_its_actions_and_not_the_parts_below_them() {
+    let (log, mut parts) = mpsc::unbounded_channel();
+    let mut b = builder();
+    let r = b.neuron(pass("in"));
+    let brain = b.neuron(
+        FnNeuron::reflex("brain", |signal: Signal, _| {
+            vec![
+                signal.command("elbow", Value::Null),
+                signal.command("wave", Value::Null),
+            ]
+        })
+        .with_kind(NeuronKind::Brain),
+    );
+    b.reflex(r, brain);
+    b.effector(part("elbow", &log).once());
+    let wave = b.effector(part("wave", &log).once());
+    b.spine(brain).action(wave, "Wave.", Value::Null);
+    let fabric = b.build().unwrap();
+
+    let outcome = fabric.stimulate(
+        r,
+        Signal::new(crate::nerve::Feature::NONE, Payload::text("hi")),
+    );
+    assert_eq!((outcome.acted, outcome.unrouted), (1, 1));
+    assert_eq!(drain(&mut parts), ["wave null"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_spine_carries_senses_up_and_actions_down_and_back() {
+    let (sender, mut heard) = mpsc::unbounded_channel();
+    let mut b = builder();
+    let r = b.neuron(pass("in"));
+    let eyes = b.neuron(pass("eyes"));
+    let brain = b.neuron(
+        FnNeuron::reflex("brain", move |signal: Signal, _| {
+            let _ = sender.send(
+                signal
+                    .payload
+                    .to_json()
+                    .unwrap_or_else(|| json!(signal.payload.as_text().unwrap_or_default())),
+            );
+            Firing::Quiet
+        })
+        .with_kind(NeuronKind::Brain),
+    );
+    let dress = b.motor("dress", |_| async { Ok(json!("dressed")) });
+    b.spine(brain)
+        .ascend(eyes)
+        .action(dress, "Get dressed.", Value::Null);
+    let fabric = b.build().unwrap();
+
+    // Up: what the eyes see reaches the brain
+    fabric.stimulate(
+        eyes,
+        Signal::new(crate::nerve::Feature::NONE, Payload::text("a coat")),
+    );
+    assert_eq!(heard.recv().await.unwrap(), "a coat");
+    // Down and back: the brain's action, and how it ended
+    fabric.stimulate(r, command("dress", Value::Null));
+    assert_eq!(
+        heard.recv().await.unwrap(),
+        json!({"action": "dress", "status": "done", "result": "dressed"})
+    );
+    assert_eq!(fabric.actions()[0].name, "dress");
 }

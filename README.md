@@ -167,9 +167,9 @@ scaling to zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
   decode. See [docs/LLM.md](docs/LLM.md).
 - **A nervous system**: receptors, reflex arcs, a brain and effectors, with habituation,
   thresholds, refractory periods and pathway selection by timing, so that most signals never
-  reach the LLM and the ones that must act do so in microseconds. The motor side is a
-  hierarchy too: the brain names an action ("get dressed") and motor neurons break it down,
-  retry and adjust locally, and report back up. The server's own routes run on it: every model
+  reach the LLM and the ones that must act do so in microseconds. Between the brain and the
+  body sit a spine and a nerve per body part: the brain names an action ("get dressed"), and
+  motor neurons break it down, retry and adjust locally, and report back up. The server's own routes run on it: every model
   is a neuron. See [docs/NERVE.md](docs/NERVE.md).
 - **Several models per process**, each swappable for new weights without downtime.
 - **Dynamic batching** of concurrent requests, for models where it pays (off by default).
@@ -256,7 +256,7 @@ slower, so leave it off there. [docs/API.md](docs/API.md#dynamic-batching) has t
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-dark.svg">
-  <img alt="Receptors feed a network of junctions of any depth that branches and merges; at every junction a signal acts now through an effector or passes on to the next junction; an optional brain is one possible end. Below, the motor side: the brain names an action, motor junctions break it down into commands for the junctions and effectors below them, and outcomes, senses and answers come back up" src="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-light.svg" width="900">
+  <img alt="Receptors feed a network of junctions of any depth that branches and merges; at every junction a signal acts now through an effector or passes on to the next junction; an optional brain is one possible end. Below, the motor side: the brain talks to the spine only, in actions; the spine carries actions down and senses, questions and outcomes up; a nerve per body part carries its own load to its motor junctions and effectors, where retries and adjustments close" src="https://raw.githubusercontent.com/Gilfeather/furnace/main/docs/images/nervous-system-light.svg" width="900">
 </picture>
 
 Furnace moves signals between sensors, models and actuators. Receptors gate each input
@@ -270,13 +270,16 @@ circuit breaker and a rate limit. The brain (an LLM, any large model, a remote s
 optional. Depth has no limit but 32 hops per signal, a guard against wiring loops. Not a
 cache: only habituation is cache-like; the rest is routing at every junction and acting.
 
-The motor side has junctions too. The brain is told a few actions ("get dressed", "stop"),
-not the joints. A motor neuron takes such a command and runs a program on the motor side:
-commands to the motor neurons and effectors below it, in turn or together, each answering
-with its outcome; signals it waits for from a receptor; a small question to the brain when it
-is stuck. A slipped grip is tried again by the hand, not the brain, and how the action ended
-goes back up. `cargo run --example get_dressed` shows it, from the thermometer to the knuckles
-and back.
+Between the brain and the body there is a spine and a nerve per body part, built in a few
+lines (`b.spine(brain)`, `b.nerve("right_arm", |b| ...)`). The brain talks to the spine only,
+in a few actions ("get dressed", "stop"), and never reaches a joint. The spine carries what the
+receptors should tell the brain up, and the actions down to motor neurons, whose programs
+command the motor neurons and effectors below them, in turn or together, wait for what a
+receptor senses and ask the brain a small question when stuck. Each nerve carries its own
+part's load, the urgent first, so a jam in one arm holds up no other, and the part's own loops
+close inside it: a slipped grip is tried again by the hand, not the brain. How the action
+ended goes back up. `cargo run --example get_dressed` shows it, from the thermometer to the
+knuckles and back.
 
 <!-- bench:nerve:start -->
 

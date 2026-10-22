@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
 
+use super::nerve::{Lane, Nerve};
 use super::pathway::{Pathway, PathwayKind, Summation};
 use super::summing::Summing;
 use super::{Cell, Counters, Fabric, Inner};
@@ -79,6 +80,11 @@ pub struct FabricBuilder {
     receptors: Vec<(NeuronId, Arc<dyn Receptor>)>,
     pathways: Vec<(NeuronId, NeuronId, PathwayKind, f32, Option<Summation>)>,
     actions: Vec<(NeuronId, String, serde_json::Value)>,
+    nerves: Vec<Nerve>,
+    /// The nerve each neuron was added in, by the neuron's index
+    nerve_of: Vec<Option<usize>>,
+    /// The nerve whose closure is running
+    current_nerve: Option<usize>,
     efferent_threads: usize,
     efferent: Option<tokio::runtime::Handle>,
 }
@@ -97,6 +103,9 @@ impl FabricBuilder {
             receptors: Vec::new(),
             pathways: Vec::new(),
             actions: Vec::new(),
+            nerves: Vec::new(),
+            nerve_of: Vec::new(),
+            current_nerve: None,
             efferent_threads: 2,
             efferent: None,
         }
@@ -127,7 +136,42 @@ impl FabricBuilder {
     pub(crate) fn add(&mut self, neuron: Arc<dyn Neuron>) -> NeuronId {
         let id = NeuronId(u32::try_from(self.neurons.len()).expect("fewer than 4G neurons"));
         self.neurons.push((neuron, Mechanisms::NONE));
+        self.nerve_of.push(self.current_nerve);
         id
+    }
+
+    /// A nerve: the trunk to one part of the body. Every neuron `parts` adds (motor
+    /// neurons, effectors, receptors, reflexes) belongs to it. What enters the nerve from
+    /// outside takes its lane, a few at a time and the most urgent first, so a part that is
+    /// flooded holds up nothing else; what stays inside (the hand commanding its fingers, a
+    /// fingertip's pressure reaching the hand) never waits there. `nerve` is a [`Nerve`] or
+    /// just its name.
+    ///
+    /// ```no_run
+    /// # use furnace::nerve::prelude::*;
+    /// # use serde_json::json;
+    /// # let mut b = Fabric::builder();
+    /// let grasp = b.nerve("right_arm", |b| {
+    ///     b.effector(Webhook::new("grip", "http://127.0.0.1:9000/grip")?);
+    ///     Ok::<_, BuildError>(b.motor("grasp", |m| async move {
+    ///         m.command("grip", json!({"force": 0.7})).await
+    ///     }))
+    /// })?;
+    /// # Ok::<(), BuildError>(())
+    /// ```
+    pub fn nerve<R>(&mut self, nerve: impl Into<Nerve>, parts: impl FnOnce(&mut Self) -> R) -> R {
+        self.nerves.push(nerve.into());
+        let outer = self.current_nerve.replace(self.nerves.len() - 1);
+        let parts = parts(self);
+        self.current_nerve = outer;
+        parts
+    }
+
+    /// The spine of `brain`: the tracts between it and the body. Ascending, what a receptor
+    /// or a reflex should tell the brain ([`Spine::ascend`]); descending, the actions it may
+    /// call ([`Spine::action`]), whose outcomes and questions ascend to it too.
+    pub fn spine(&mut self, brain: NeuronId) -> Spine<'_> {
+        Spine { b: self, brain }
     }
 
     /// Add a receptor: a neuron that is also started with the fabric and may be mounted as a
@@ -246,7 +290,9 @@ impl FabricBuilder {
             }
         }
         let mut actions = Vec::with_capacity(self.actions.len());
+        let mut is_action = vec![false; count];
         for (id, description, args) in self.actions {
+            is_action[id.index()] = true;
             let neuron = &self.neurons[id.index()].0;
             if !matches!(neuron.kind(), NeuronKind::Motor | NeuronKind::Effector) {
                 return Err(BuildError::NotAnAction(neuron.name().to_string()));
@@ -297,6 +343,8 @@ impl FabricBuilder {
                     out: Vec::new(),
                     last_prepared: AtomicU64::new(0),
                     taps: Taps::default(),
+                    nerve: self.nerve_of[i],
+                    action: is_action[i],
                 }
             })
             .collect();
@@ -345,6 +393,7 @@ impl FabricBuilder {
                 by_name,
                 receptors: self.receptors,
                 actions,
+                nerves: self.nerves.into_iter().map(Lane::new).collect(),
                 started: AtomicBool::new(false),
                 received: AtomicU64::new(0),
                 reached_brain: AtomicU64::new(0),
@@ -386,6 +435,40 @@ impl Link<'_> {
     pub fn summation(self, summation: Summation) -> Self {
         self.pathway.2 = PathwayKind::Deliberative;
         self.pathway.4 = Some(summation);
+        self
+    }
+}
+
+/// A brain's spine, from [`FabricBuilder::spine`]: the tracts between the brain and the
+/// body
+pub struct Spine<'a> {
+    b: &'a mut FabricBuilder,
+    brain: NeuronId,
+}
+
+impl Spine<'_> {
+    /// The ascending tract from `from` (a receptor, a reflex): what passes its gate and its
+    /// reflexes goes on to the brain over a deliberative pathway, summed into the brain's
+    /// firings
+    pub fn ascend(&mut self, from: NeuronId) -> &mut Self {
+        self.b.deliberative(from, self.brain);
+        self
+    }
+
+    /// The descending tract to `id`, a motor neuron or an effector: the brain may call it,
+    /// and is told what it does and the shape of its arguments
+    /// ([`FabricBuilder::action`]). A motor neuron's questions and how its programs ended
+    /// ascend to the brain.
+    pub fn action(
+        &mut self,
+        id: NeuronId,
+        description: &str,
+        args: serde_json::Value,
+    ) -> &mut Self {
+        self.b.action(id, description, args);
+        if self.b.neurons[id.index()].0.kind() == NeuronKind::Motor {
+            self.b.deliberative(id, self.brain);
+        }
         self
     }
 }
