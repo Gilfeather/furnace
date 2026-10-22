@@ -23,14 +23,15 @@ exclude = ["/wycheproof/", "/testdata/", "/tests/", "/interop/"]
 # 0.23.46 or any later 0.23, without its default providers (ring, aws-lc-rs) and without TLS 1.2
 rustls = { version = "0.23.46", default-features = false, features = ["std"] }
 # Only the features used: no defaults where they bring in more (OS randomness for nonces, the
-# allocating AEAD API, PEM parsing, OIDs). P-256 and P-384 keep `std`, which their precomputed
-# base-point tables (faster key generation and signing) need. Every crate below picks CPU instructions (AES-NI and
-# ARMv8 AES, CLMUL and PMULL, AVX2, SHA-NI and ARMv8 SHA) at run time on its own, in Rust.
+# allocating AEAD API, PEM parsing, OIDs, std, P-256 and P-384's precomputed base-point tables,
+# which trade memory for time). Every crate below picks CPU instructions (AES-NI and ARMv8 AES,
+# CLMUL and PMULL, AVX2, SHA-NI and ARMv8 SHA) at run time on its own, in Rust.
 # `zeroize`: the AEADs wipe their keys (and AES's key schedule) when a connection's keys drop
 aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"] }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
-p256 = { version = "0.14", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "precomputed-tables", "std"] }
-p384 = { version = "0.14", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "precomputed-tables", "std"] }
+# `alloc`: the SEC1 public keys and DER signatures handed to rustls
+p256 = { version = "0.14", default-features = false, features = ["alloc", "ecdh", "ecdsa", "pkcs8"] }
+p384 = { version = "0.14", default-features = false, features = ["alloc", "ecdh", "ecdsa", "pkcs8"] }
 ed25519-dalek = { version = "3", features = ["pkcs8"] }
 x25519-dalek = { version = "3", features = ["static_secrets"] }
 sha2 = { version = "0.11", default-features = false }
