@@ -109,6 +109,8 @@ secrets/
 # ...except the test-only certificates the TLS tests use (see tests/fixtures/tls/generate.sh)
 !tests/fixtures/tls/*.crt
 !tests/fixtures/tls/*.key
+!rustls-pure/testdata/*.crt
+!rustls-pure/testdata/*.key
 
 # Local development
 .local/

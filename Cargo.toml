@@ -109,7 +109,7 @@ tokio-stream = { version = "0.1", optional = true }
 rustls = { version = "0.23.46", default-features = false, features = ["std", "logging"], optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging"], optional = true }
 # Versioned on its own, apart from the workspace's other crates
-rustls-pure = { path = "rustls-pure", version = "0.14", optional = true }
+rustls-pure = { path = "rustls-pure", version = "0.15", optional = true }
 # LLM serving (feature `llm`). tokenizers without its defaults: they build Oniguruma (C) and
 # esaxx (C++); fancy-regex is the pure-Rust regex engine. minijinja without `stacker` (cc).
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"], optional = true }

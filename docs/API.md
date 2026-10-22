@@ -417,7 +417,7 @@ provider of our own over [RustCrypto](https://github.com/RustCrypto) primitives,
 |---|---|
 | Protocol | TLS 1.3 |
 | Ciphers | AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305 |
-| Key exchange | X25519, P-256, P-384 |
+| Key exchange | X25519MLKEM768 (post-quantum, preferred), X25519, P-256, P-384 |
 | Keys and client certificates | ECDSA P-256, ECDSA P-384, Ed25519 (PKCS#8 or SEC1 PEM) |
 
 RSA keys are refused with a clear error: the pure-Rust RSA implementation has an unfixed timing
@@ -426,12 +426,14 @@ cert-manager (`privateKey.algorithm: ECDSA`) and Let's Encrypt (`--key-type ecds
 P-256 over Ed25519 for the server certificate: Windows' TLS stack, and so clients built on it,
 do not accept Ed25519 certificates.
 
-The provider has not had an outside security audit, and neither have the RustCrypto crates
-under it. It is checked mechanically instead: its tests run Google's
+The provider has not had an outside security audit, and neither have the RustCrypto crates under
+it. It is checked mechanically instead: its tests run Google's
 [Wycheproof](https://github.com/C2SP/wycheproof) test vectors for every algorithm it offers
-(AES-GCM, ChaCha20-Poly1305, X25519, ECDH and ECDSA on P-256 and P-384, Ed25519, HMAC and HKDF),
-which must accept the valid inputs and refuse the crafted bad ones: forged signatures, points off
-the curve, altered tags, low-order keys. Further tests pin what the vectors cannot see: each
+(AES-GCM, ChaCha20-Poly1305, X25519, ML-KEM-768, ECDH and ECDSA on P-256 and P-384, Ed25519,
+HMAC and HKDF), which must accept the valid inputs and refuse the crafted bad ones: forged
+signatures, points off the curve, altered tags, low-order keys. It is also checked in full
+handshakes, with random input, and against OpenSSL, GnuTLS and curl ([rustls-pure's
+tests](../rustls-pure/README.md#tests)). Further tests pin what the vectors cannot see: each
 record's nonce is unique, a record that is altered, replayed or reordered does not decrypt, the
 randomness comes from the operating system, and keys are wiped when dropped. The tag comparisons
 happen in the AEAD crates and rustls, in constant time. See

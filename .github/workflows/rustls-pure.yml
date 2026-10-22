@@ -1,13 +1,18 @@
 name: rustls-pure
 
-# Weekly, and by hand: rustls-pure against the newest rustls its version range allows, on its
-# minimum supported Rust version, and against other TLS implementations (OpenSSL, GnuTLS,
-# curl). Pull requests run its unit tests in the CI workflow; these checks depend on what
-# others release, so they run on a schedule instead.
+# rustls-pure against other TLS implementations (OpenSSL, GnuTLS, curl), weekly and on pull
+# requests that change it; and, weekly only, against the newest rustls its version range allows
+# and on its minimum supported Rust version, which depend on what others release. Its unit,
+# handshake and property tests run in the CI workflow with the rest.
 on:
   schedule:
     # Mondays, 04:37 UTC
     - cron: '37 4 * * 1'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'rustls-pure/**'
+      - '.github/workflows/rustls-pure.yml'
   workflow_dispatch:
 
 permissions:
@@ -16,9 +21,15 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# A newer push to the same pull request makes an older run redundant
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   latest-rustls:
     name: Newest rustls (${{ matrix.os }})
+    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -55,6 +66,7 @@ jobs:
 
   msrv:
     name: Minimum supported Rust version
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -73,13 +85,28 @@ jobs:
     - name: Test
       run: cargo test -p rustls-pure --locked
 
-  interop:
-    name: Interoperability (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+  # REQUIRE_MLKEM: the OpenSSL here must have X25519MLKEM768 (3.5 or later), so the post-quantum
+  # checks cannot be skipped quietly
+  interop-linux:
+    name: Interoperability (Linux)
+    runs-on: ubuntu-latest
+    # Debian 13 has OpenSSL 3.5; the Ubuntu runner's is 3.0, without ML-KEM
+    container: rust:1-trixie
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install OpenSSL, GnuTLS and curl
+      run: apt-get update && apt-get install -y --no-install-recommends openssl gnutls-bin curl
+
+    - name: Interoperability tests
+      env:
+        REQUIRE_MLKEM: '1'
+      run: bash rustls-pure/interop/run.sh
+
+  interop-macos:
+    name: Interoperability (macOS)
+    runs-on: macos-latest
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
@@ -89,16 +116,13 @@ jobs:
       with:
         toolchain: stable
 
-    - name: Install GnuTLS (Linux)
-      if: runner.os == 'Linux'
-      run: sudo apt-get update && sudo apt-get install -y gnutls-bin
-
     # macOS's own openssl is LibreSSL; the test wants OpenSSL 3 (and GnuTLS) from Homebrew
-    - name: Install OpenSSL 3 and GnuTLS (macOS)
-      if: runner.os == 'macOS'
+    - name: Install OpenSSL 3 and GnuTLS
       run: |
         brew install openssl@3 gnutls
         echo "OPENSSL=$(brew --prefix openssl@3)/bin/openssl" >> "$GITHUB_ENV"
 
     - name: Interoperability tests
+      env:
+        REQUIRE_MLKEM: '1'
       run: bash rustls-pure/interop/run.sh

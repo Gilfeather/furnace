@@ -16,6 +16,8 @@ use serde_json::Value;
 
 use super::*;
 
+mod properties;
+
 const VECTORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wycheproof");
 
 /// What a Wycheproof test expects of an implementation
@@ -367,17 +369,194 @@ fn wycheproof_p384_key_exchange() {
 fn key_exchanges_agree_and_draw_fresh_keys() {
     for group in provider().kx_groups {
         // Each exchange starts from a fresh random key...
-        let (a, b) = (group.start().unwrap(), group.start().unwrap());
-        let (a_key, b_key) = (a.pub_key().to_vec(), b.pub_key().to_vec());
-        assert_ne!(a_key, b_key, "{:?}", group.name());
-        // ...and both sides derive the same secret
+        let (client, other) = (group.start().unwrap(), group.start().unwrap());
+        assert_ne!(client.pub_key(), other.pub_key(), "{:?}", group.name());
+        // ...and the client and the server derive the same secret, as rustls has them do: the
+        // server answers the client's share at once (for ML-KEM it must, to encapsulate to it)
+        let server = group.start_and_complete(client.pub_key()).unwrap();
+        assert_eq!(server.group, group.name());
         assert_eq!(
-            a.complete(&b_key).unwrap().secret_bytes(),
-            b.complete(&a_key).unwrap().secret_bytes(),
+            client.complete(&server.pub_key).unwrap().secret_bytes(),
+            server.secret.secret_bytes(),
             "{:?}",
             group.name()
         );
     }
+}
+
+#[test]
+fn the_post_quantum_hybrid_comes_first() {
+    // As in rustls's default provider (aws-lc-rs with `prefer-post-quantum`, on by default)
+    let groups: Vec<_> = provider()
+        .kx_groups
+        .iter()
+        .map(|group| group.name())
+        .collect();
+    assert_eq!(
+        groups,
+        [
+            NamedGroup::X25519MLKEM768,
+            NamedGroup::X25519,
+            NamedGroup::secp256r1,
+            NamedGroup::secp384r1
+        ]
+    );
+    assert!(X25519MLKEM768.usable_for_version(ProtocolVersion::TLSv1_3));
+    assert!(!X25519MLKEM768.usable_for_version(ProtocolVersion::TLSv1_2));
+}
+
+/// An X25519 key from one repeated byte, for tests that need known keys
+fn x25519_key(byte: u8) -> X25519Exchange {
+    let secret = x25519_dalek::StaticSecret::from([byte; 32]);
+    let public = x25519_dalek::PublicKey::from(&secret);
+    X25519Exchange { secret, public }
+}
+
+#[test]
+fn wycheproof_mlkem768_key_generation() {
+    let tally = run("mlkem_768_keygen_seed_test.json", |case| {
+        let seed = ml_kem::Seed::try_from(&case.hex("seed")[..]).ok()?;
+        let exchange = X25519MlKem768Group::start_with(seed, x25519_key(1));
+        Some(exchange.share[..MLKEM768_ENCAPSULATION_KEY_LEN] == case.hex("ek")[..])
+    });
+    assert_eq!(tally.skipped, 0, "{tally:?}");
+}
+
+#[test]
+fn wycheproof_mlkem768_encapsulation() {
+    let client_x25519 = x25519_key(1).public;
+    let tally = run("mlkem_768_encaps_test.json", |case| {
+        let m = ml_kem::B32::try_from(&case.hex("m")[..]).ok()?;
+        let mut client_share = case.hex("ek");
+        client_share.extend_from_slice(client_x25519.as_bytes());
+        Some(
+            match X25519MlKem768Group::respond(&client_share, &m, x25519_key(2)) {
+                Ok(done) => {
+                    done.pub_key[..MLKEM768_CIPHERTEXT_LEN] == case.hex("c")[..]
+                        && done.secret.secret_bytes()[..32] == case.hex("K")[..]
+                }
+                Err(_) => false,
+            },
+        )
+    });
+    // Unreduced keys (FIPS 203's modulus check) and keys of the wrong length
+    assert!(tally.invalid > 0, "{tally:?}");
+    assert_eq!(tally.skipped, 0, "{tally:?}");
+}
+
+#[test]
+fn wycheproof_mlkem768_decapsulation() {
+    let server_x25519 = x25519_key(2).public;
+    let tally = run("mlkem_768_test.json", |case| {
+        // Seeds of the wrong length: the provider makes its own
+        let seed = ml_kem::Seed::try_from(&case.hex("seed")[..]).ok()?;
+        let exchange = X25519MlKem768Group::start_with(seed, x25519_key(1));
+        let key_matches = exchange.share[..MLKEM768_ENCAPSULATION_KEY_LEN] == case.hex("ek")[..];
+        let mut server_share = case.hex("c");
+        server_share.extend_from_slice(server_x25519.as_bytes());
+        // Altered ciphertexts are valid tests too: they decapsulate to the implicit-rejection
+        // secret, which the vectors give
+        Some(
+            key_matches
+                && matches!(
+                    Box::new(exchange).complete(&server_share),
+                    Ok(secret) if secret.secret_bytes()[..32] == case.hex("K")[..]
+                ),
+        )
+    });
+    // Ciphertexts of the wrong length
+    assert!(tally.invalid > 0, "{tally:?}");
+}
+
+#[test]
+fn hybrid_shares_and_secret_are_put_together_as_the_draft_says() {
+    let seed = ml_kem::Seed::from([7; 64]);
+    let m = ml_kem::B32::from([9; 32]);
+    let (client_dh, server_dh) = (x25519_key(1), x25519_key(2));
+    let (client_public, server_public) = (client_dh.public, server_dh.public);
+    let dh_secret = client_dh.secret.diffie_hellman(&server_public).to_bytes();
+
+    // What the two parts give on their own
+    let decapsulation = ml_kem::DecapsulationKey::<ml_kem::MlKem768>::from_seed(seed);
+    let key = decapsulation.encapsulation_key().clone();
+    let (ciphertext, mlkem_secret) = key.encapsulate_deterministic(&m);
+
+    // ML-KEM first, then X25519, in both shares and in the secret
+    let client = X25519MlKem768Group::start_with(seed, client_dh);
+    let client_share = [&key.to_bytes()[..], client_public.as_bytes()].concat();
+    assert_eq!(client.share, client_share);
+    let server = X25519MlKem768Group::respond(&client.share, &m, server_dh).unwrap();
+    assert_eq!(server.group, NamedGroup::X25519MLKEM768);
+    let server_share = [&ciphertext[..], server_public.as_bytes()].concat();
+    assert_eq!(server.pub_key, server_share);
+    let secret = [&mlkem_secret[..], &dh_secret[..]].concat();
+    assert_eq!(server.secret.secret_bytes(), secret);
+    assert_eq!(
+        Box::new(client)
+            .complete(&server.pub_key)
+            .unwrap()
+            .secret_bytes(),
+        secret
+    );
+
+    // The X25519 part alone, for a server that picks plain X25519
+    let client = X25519MlKem768Group::start_with(seed, x25519_key(1));
+    assert_eq!(
+        client.hybrid_component(),
+        Some((NamedGroup::X25519, client_public.as_bytes().as_slice()))
+    );
+    assert_eq!(
+        Box::new(client)
+            .complete_hybrid_component(server_public.as_bytes())
+            .unwrap()
+            .secret_bytes(),
+        dh_secret
+    );
+}
+
+#[test]
+fn hybrid_shares_of_the_wrong_size_or_with_low_order_points_are_refused() {
+    let refused = |result: Result<(), Error>| {
+        matches!(
+            result,
+            Err(Error::PeerMisbehaved(
+                rustls::PeerMisbehaved::InvalidKeyShare
+            ))
+        )
+    };
+    let client = || X25519MlKem768Group::start_with(ml_kem::Seed::from([7; 64]), x25519_key(1));
+    let m = ml_kem::B32::from([9; 32]);
+    let respond = |share: &[u8]| X25519MlKem768Group::respond(share, &m, x25519_key(2)).map(|_| ());
+    let complete = |share: &[u8]| Box::new(client()).complete(share).map(|_| ());
+    let client_share = client().share;
+    let server_share = X25519MlKem768Group::respond(&client_share, &m, x25519_key(2))
+        .unwrap()
+        .pub_key;
+
+    for len in [0, 32, 1184, client_share.len() - 1, client_share.len() + 1] {
+        let mut altered = client_share.clone();
+        altered.resize(len, 1);
+        assert!(refused(respond(&altered)), "client share of {len} bytes");
+    }
+    for len in [
+        0,
+        32,
+        1088,
+        server_share.len() - 1,
+        server_share.len() + 1,
+        1216,
+    ] {
+        let mut altered = server_share.clone();
+        altered.resize(len, 1);
+        assert!(refused(complete(&altered)), "server share of {len} bytes");
+    }
+    // The X25519 part is checked as plain X25519 is: an all-zero point gives an all-zero secret
+    let mut low_order = client_share.clone();
+    low_order[MLKEM768_ENCAPSULATION_KEY_LEN..].fill(0);
+    assert!(refused(respond(&low_order)));
+    let mut low_order = server_share.clone();
+    low_order[MLKEM768_CIPHERTEXT_LEN..].fill(0);
+    assert!(refused(complete(&low_order)));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -523,6 +702,7 @@ fn secrets_are_wiped_when_dropped() {
     wiped::<p384::SecretKey>();
     wiped::<p256::ecdh::SharedSecret>();
     wiped::<p384::ecdh::SharedSecret>();
+    wiped::<ml_kem::DecapsulationKey<ml_kem::MlKem768>>();
     // The server's key
     wiped::<p256::ecdsa::SigningKey>();
     wiped::<p384::ecdsa::SigningKey>();

@@ -14,6 +14,7 @@ low-order keys and so on) must be refused. Only the algorithms the provider offe
 | `aes_gcm_test.json` | AES-128-GCM and AES-256-GCM record protection (96-bit nonces, 128-bit tags) |
 | `chacha20_poly1305_test.json` | ChaCha20-Poly1305 record protection |
 | `x25519_test.json` | X25519 key exchange |
+| `mlkem_768_keygen_seed_test.json`, `mlkem_768_encaps_test.json`, `mlkem_768_test.json` | The ML-KEM-768 half of X25519MLKEM768: keys from seeds, encapsulation (refusing unreduced keys), decapsulation (implicit rejection of altered ciphertexts) |
 | `ecdh_secp256r1_ecpoint_test.json`, `ecdh_secp384r1_ecpoint_test.json` | P-256 and P-384 key exchange (raw points, as TLS sends them) |
 | `ecdsa_secp256r1_sha256_test.json`, `ecdsa_secp384r1_sha256_test.json`, `ecdsa_secp384r1_sha384_test.json` | ECDSA signature verification (DER signatures) |
 | `ed25519_test.json` | Ed25519 signature verification |

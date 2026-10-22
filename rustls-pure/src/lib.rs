@@ -30,7 +30,7 @@
 //! are deliberately few, which keeps the code small enough to review:
 //!
 //! - TLS 1.3 only, with AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305
-//! - key exchange with X25519, P-256 and P-384
+//! - key exchange with X25519MLKEM768 (post-quantum, preferred), X25519, P-256 and P-384
 //! - server keys and client certificates (for mutual TLS) using ECDSA P-256 / P-384 or Ed25519
 //!
 //! RSA is not offered, for keys or for verifying certificates: the pure-Rust `rsa` crate has an
@@ -58,6 +58,7 @@ use aes_gcm::aead::{AeadCore, AeadInOut, KeyInit, KeySizeUser};
 use ed25519_dalek::pkcs8::DecodePrivateKey as _;
 use ed25519_dalek::pkcs8::{ObjectIdentifier, PrivateKeyInfoRef};
 // zeroize through the curve crates' re-export, which is the version they use themselves
+use ml_kem::{Decapsulate as _, KeyExport as _};
 use p256::ecdsa::signature::hazmat::PrehashVerifier;
 use p256::elliptic_curve::zeroize::Zeroizing;
 use rustls::crypto::cipher::{
@@ -66,8 +67,9 @@ use rustls::crypto::cipher::{
     UnsupportedOperationError, make_tls13_aad,
 };
 use rustls::crypto::{
-    ActiveKeyExchange, CryptoProvider, GetRandomFailed, KeyProvider, SecureRandom, SharedSecret,
-    SupportedKxGroup, WebPkiSupportedAlgorithms, hash, hmac as rustls_hmac, tls13,
+    ActiveKeyExchange, CompletedKeyExchange, CryptoProvider, GetRandomFailed, KeyProvider,
+    SecureRandom, SharedSecret, SupportedKxGroup, WebPkiSupportedAlgorithms, hash,
+    hmac as rustls_hmac, tls13,
 };
 use rustls::pki_types::{
     AlgorithmIdentifier, InvalidSignature, PrivateKeyDer, SignatureVerificationAlgorithm, alg_id,
@@ -88,7 +90,8 @@ pub fn provider() -> CryptoProvider {
             TLS13_AES_256_GCM_SHA384,
             TLS13_CHACHA20_POLY1305_SHA256,
         ],
-        kx_groups: vec![&X25519, &SECP256R1, &SECP384R1],
+        // The post-quantum hybrid first, as rustls's own default provider orders them
+        kx_groups: vec![&X25519MLKEM768, &X25519, &SECP256R1, &SECP384R1],
         signature_verification_algorithms: SUPPORTED_SIG_ALGS,
         secure_random: &Random,
         key_provider: &Keys,
@@ -417,9 +420,7 @@ static X25519: X25519Group = X25519Group;
 
 impl SupportedKxGroup for X25519Group {
     fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, Error> {
-        let secret = x25519_dalek::StaticSecret::from(*random::<32>()?);
-        let public = x25519_dalek::PublicKey::from(&secret);
-        Ok(Box::new(X25519Exchange { secret, public }))
+        Ok(Box::new(X25519Exchange::new()?))
     }
 
     fn name(&self) -> NamedGroup {
@@ -430,6 +431,15 @@ impl SupportedKxGroup for X25519Group {
 struct X25519Exchange {
     secret: x25519_dalek::StaticSecret,
     public: x25519_dalek::PublicKey,
+}
+
+impl X25519Exchange {
+    /// A fresh random key
+    fn new() -> Result<Self, Error> {
+        let secret = x25519_dalek::StaticSecret::from(*random::<32>()?);
+        let public = x25519_dalek::PublicKey::from(&secret);
+        Ok(Self { secret, public })
+    }
 }
 
 impl ActiveKeyExchange for X25519Exchange {
@@ -546,6 +556,140 @@ impl ActiveKeyExchange for Secp384r1Exchange {
 
     fn group(&self) -> NamedGroup {
         NamedGroup::secp384r1
+    }
+}
+
+/// X25519MLKEM768 (draft-ietf-tls-ecdhe-mlkem): ML-KEM-768 (FIPS 203) and X25519 at once, so
+/// the secret stays safe as long as either holds, including against a future quantum computer.
+/// Shares and the secret put ML-KEM's part first and X25519's second, as rustls's own providers
+/// do. The X25519 part is checked as the plain X25519 group checks it.
+#[derive(Debug)]
+struct X25519MlKem768Group;
+static X25519MLKEM768: X25519MlKem768Group = X25519MlKem768Group;
+
+/// The client's ML-KEM-768 share: its encapsulation key
+const MLKEM768_ENCAPSULATION_KEY_LEN: usize = 1184;
+/// The server's ML-KEM-768 share: the ciphertext
+const MLKEM768_CIPHERTEXT_LEN: usize = 1088;
+const X25519_SHARE_LEN: usize = 32;
+
+impl X25519MlKem768Group {
+    /// The client's side, from an ML-KEM seed (64 random bytes) and an X25519 key
+    fn start_with(seed: ml_kem::Seed, x25519: X25519Exchange) -> X25519MlKem768Exchange {
+        let decapsulation = ml_kem::DecapsulationKey::<ml_kem::MlKem768>::from_seed(seed);
+        let mut share = Vec::with_capacity(MLKEM768_ENCAPSULATION_KEY_LEN + X25519_SHARE_LEN);
+        share.extend_from_slice(&decapsulation.encapsulation_key().to_bytes());
+        share.extend_from_slice(x25519.public.as_bytes());
+        X25519MlKem768Exchange {
+            decapsulation,
+            x25519,
+            share,
+        }
+    }
+
+    /// The server's side: encapsulates to the client's ML-KEM key with `m` (32 random bytes),
+    /// and does X25519 with `x25519`
+    fn respond(
+        client_share: &[u8],
+        m: &ml_kem::B32,
+        x25519: X25519Exchange,
+    ) -> Result<CompletedKeyExchange, Error> {
+        if client_share.len() != MLKEM768_ENCAPSULATION_KEY_LEN + X25519_SHARE_LEN {
+            return Err(rustls::PeerMisbehaved::InvalidKeyShare.into());
+        }
+        let (key, x25519_share) = client_share.split_at(MLKEM768_ENCAPSULATION_KEY_LEN);
+        let key = ml_kem::Key::<ml_kem::EncapsulationKey<ml_kem::MlKem768>>::try_from(key)
+            .map_err(|_| Error::from(rustls::PeerMisbehaved::InvalidKeyShare))?;
+        // Refuses keys whose coefficients are not reduced (FIPS 203 section 7.2)
+        let key = ml_kem::EncapsulationKey::<ml_kem::MlKem768>::new(&key)
+            .map_err(|_| Error::from(rustls::PeerMisbehaved::InvalidKeyShare))?;
+        let (ciphertext, mlkem_secret) = key.encapsulate_deterministic(m);
+        let mlkem_secret = Zeroizing::new(mlkem_secret);
+        let mut pub_key = Vec::with_capacity(MLKEM768_CIPHERTEXT_LEN + X25519_SHARE_LEN);
+        pub_key.extend_from_slice(&ciphertext);
+        pub_key.extend_from_slice(x25519.public.as_bytes());
+        let x25519_secret = Box::new(x25519).complete(x25519_share)?;
+        Ok(CompletedKeyExchange {
+            group: NamedGroup::X25519MLKEM768,
+            pub_key,
+            secret: hybrid_secret(&mlkem_secret, x25519_secret.secret_bytes()),
+        })
+    }
+}
+
+/// ML-KEM's secret, then X25519's
+fn hybrid_secret(mlkem: &[u8], x25519: &[u8]) -> SharedSecret {
+    let mut secret = Vec::with_capacity(mlkem.len() + x25519.len());
+    secret.extend_from_slice(mlkem);
+    secret.extend_from_slice(x25519);
+    // rustls's SharedSecret wipes it when dropped
+    SharedSecret::from(secret)
+}
+
+impl SupportedKxGroup for X25519MlKem768Group {
+    fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, Error> {
+        let seed = random::<64>()?;
+        Ok(Box::new(Self::start_with(
+            ml_kem::Seed::from(*seed),
+            X25519Exchange::new()?,
+        )))
+    }
+
+    fn start_and_complete(&self, client_share: &[u8]) -> Result<CompletedKeyExchange, Error> {
+        let m = random::<32>()?;
+        Self::respond(client_share, &ml_kem::B32::from(*m), X25519Exchange::new()?)
+    }
+
+    fn name(&self) -> NamedGroup {
+        NamedGroup::X25519MLKEM768
+    }
+
+    fn usable_for_version(&self, version: ProtocolVersion) -> bool {
+        version == ProtocolVersion::TLSv1_3
+    }
+}
+
+struct X25519MlKem768Exchange {
+    decapsulation: ml_kem::DecapsulationKey<ml_kem::MlKem768>,
+    x25519: X25519Exchange,
+    /// The encapsulation key, then the X25519 public key
+    share: Vec<u8>,
+}
+
+impl ActiveKeyExchange for X25519MlKem768Exchange {
+    fn complete(self: Box<Self>, server_share: &[u8]) -> Result<SharedSecret, Error> {
+        if server_share.len() != MLKEM768_CIPHERTEXT_LEN + X25519_SHARE_LEN {
+            return Err(rustls::PeerMisbehaved::InvalidKeyShare.into());
+        }
+        let (ciphertext, x25519_share) = server_share.split_at(MLKEM768_CIPHERTEXT_LEN);
+        let ciphertext = ml_kem::Ciphertext::<ml_kem::MlKem768>::try_from(ciphertext)
+            .map_err(|_| Error::from(rustls::PeerMisbehaved::InvalidKeyShare))?;
+        // A ciphertext that was tampered with gives an unrelated secret (FIPS 203's implicit
+        // rejection), so the handshake fails at the Finished messages
+        let mlkem_secret = Zeroizing::new(self.decapsulation.decapsulate(&ciphertext));
+        let x25519_secret = Box::new(self.x25519).complete(x25519_share)?;
+        Ok(hybrid_secret(&mlkem_secret, x25519_secret.secret_bytes()))
+    }
+
+    /// The X25519 part is offered on its own too, so a server without ML-KEM can pick it with
+    /// no HelloRetryRequest
+    fn hybrid_component(&self) -> Option<(NamedGroup, &[u8])> {
+        Some((NamedGroup::X25519, self.x25519.public.as_bytes()))
+    }
+
+    fn complete_hybrid_component(
+        self: Box<Self>,
+        peer_pub_key: &[u8],
+    ) -> Result<SharedSecret, Error> {
+        Box::new(self.x25519).complete(peer_pub_key)
+    }
+
+    fn pub_key(&self) -> &[u8] {
+        &self.share
+    }
+
+    fn group(&self) -> NamedGroup {
+        NamedGroup::X25519MLKEM768
     }
 }
 
