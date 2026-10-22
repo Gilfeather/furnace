@@ -73,8 +73,19 @@ fn demo() -> Demo {
     let alarm = b.effector(alarm);
     b.effector(Respond::new("respond"));
     let (journal, journal_lines) = ChannelOut::new("journal", 16);
-    b.effector(journal);
-    b.effector(SseOut::new("push", 16));
+    let journal = b.effector(journal);
+    let push = b.effector(SseOut::new("push", 16));
+    b.spine(brain)
+        .action(
+            journal,
+            "Write a line to the journal.",
+            serde_json::json!({"line": "text"}),
+        )
+        .action(
+            push,
+            "Push to the subscribers.",
+            serde_json::json!({"text": "text"}),
+        );
     b.reflex(events, classify);
     b.reflex(classify, alarm);
     b.deliberative(classify, brain)
