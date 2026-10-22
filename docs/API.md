@@ -426,6 +426,17 @@ cert-manager (`privateKey.algorithm: ECDSA`) and Let's Encrypt (`--key-type ecds
 P-256 over Ed25519 for the server certificate: Windows' TLS stack, and so clients built on it,
 do not accept Ed25519 certificates.
 
+The provider has not had an outside security audit, and neither have the RustCrypto crates
+under it. It is checked mechanically instead: its tests run Google's
+[Wycheproof](https://github.com/C2SP/wycheproof) test vectors for every algorithm it offers
+(AES-GCM, ChaCha20-Poly1305, X25519, ECDH and ECDSA on P-256 and P-384, Ed25519, HMAC and HKDF),
+which must accept the valid inputs and refuse the crafted bad ones: forged signatures, points off
+the curve, altered tags, low-order keys. Further tests pin what the vectors cannot see: each
+record's nonce is unique, a record that is altered, replayed or reordered does not decrypt, the
+randomness comes from the operating system, and keys are wiped when dropped. The tag comparisons
+happen in the AEAD crates and rustls, in constant time. See
+[src/tls/provider/tests.rs](../src/tls/provider/tests.rs).
+
 With `tritonclient.grpc`, connect with `ssl=True` and the CA (and, for mutual TLS, the client
 key and certificate): `InferenceServerClient(url="host:8001", ssl=True,
 root_certificates="ca.crt", private_key="client.key", certificate_chain="client.crt")`.
