@@ -21,7 +21,7 @@ nervous system.
 
 ```toml
 [dependencies]
-amate = "0.14"
+amate = "0.15"
 ```
 
 ```rust

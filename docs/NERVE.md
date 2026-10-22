@@ -15,13 +15,13 @@ mechanisms are a neuron's.
 ```toml
 [dependencies]
 # `llm` for an LLM brain (`nerve::Llm`); the rest of the nervous system needs no feature
-furnace-server = { version = "0.14", features = ["llm"] }
+furnace-server = { version = "0.15", features = ["llm"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde_json = "1"
 tracing-subscriber = "0.3"
 ```
 
-This page follows `main`, which is released as 0.14; until 0.14 is on crates.io, use
+This page follows `main`, which is released as 0.15; until 0.15 is on crates.io, use
 `furnace-server = { git = "https://github.com/Gilfeather/furnace", features = ["llm"] }`.
 
 The nervous system is always built: the server's own routes run on it. Everything is pure Rust
