@@ -2,7 +2,7 @@
 name = "rustls-pure"
 # A version of its own, not Furnace's: raised only when rustls-pure changes (DEVELOPMENT.md,
 # "Releasing rustls-pure"; CHANGELOG.md)
-version = "0.15.0"
+version = "0.15.1"
 edition = "2024"
 # Tested weekly (.github/workflows/rustls-pure.yml), as is the newest rustls in the range below
 rust-version = "1.89"
@@ -22,14 +22,18 @@ exclude = ["/wycheproof/", "/testdata/", "/tests/", "/interop/"]
 [dependencies]
 # 0.23.46 or any later 0.23, without its default providers (ring, aws-lc-rs) and without TLS 1.2
 rustls = { version = "0.23.46", default-features = false, features = ["std"] }
+# Only the features used: no defaults where they bring in more (OS randomness for nonces, the
+# allocating AEAD API, PEM parsing, OIDs). P-256 and P-384 keep `std`, which their precomputed
+# base-point tables (faster key generation and signing) need. Every crate below picks CPU instructions (AES-NI and
+# ARMv8 AES, CLMUL and PMULL, AVX2, SHA-NI and ARMv8 SHA) at run time on its own, in Rust.
 # `zeroize`: the AEADs wipe their keys (and AES's key schedule) when a connection's keys drop
-aes-gcm = { version = "0.11", features = ["zeroize"] }
-chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
-p256 = { version = "0.14", features = ["ecdh", "ecdsa", "pkcs8"] }
-p384 = { version = "0.14", features = ["ecdh", "ecdsa", "pkcs8"] }
+aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "precomputed-tables", "std"] }
+p384 = { version = "0.14", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "precomputed-tables", "std"] }
 ed25519-dalek = { version = "3", features = ["pkcs8"] }
 x25519-dalek = { version = "3", features = ["static_secrets"] }
-sha2 = "0.11"
+sha2 = { version = "0.11", default-features = false }
 hmac = { version = "0.13", features = ["zeroize"] }
 getrandom = "0.4"
 # X25519MLKEM768; `zeroize`: the decapsulation key is wiped when dropped

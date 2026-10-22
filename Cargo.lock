@@ -2698,7 +2698,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a878c850e9e421b20262e9b41f9c860e4785fa07541c266b62ff9d1ef998a80a"
 dependencies = [
  "const-oid",
- "pem-rfc7468",
  "zeroize",
 ]
 
@@ -2944,7 +2943,6 @@ dependencies = [
  "group",
  "hkdf",
  "hybrid-array",
- "pem-rfc7468",
  "pkcs8",
  "rand_core 0.10.1",
  "sec1",
@@ -5627,15 +5625,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pem-rfc7468"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6305423e0e7738146434843d1694d621cce767262b2a86910beab705e4493d9"
-dependencies = [
- "base64ct",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6694,7 +6683,7 @@ dependencies = [
 
 [[package]]
 name = "rustls-pure"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "aes-gcm 0.11.1",
  "chacha20poly1305",
