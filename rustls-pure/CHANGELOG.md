@@ -14,8 +14,10 @@ the code.
 ### Changed
 - Dependencies without the default features rustls-pure does not use: `aes-gcm` and
   `chacha20poly1305` without OS randomness for nonces and the allocating API, `p256` and
-  `p384` without PEM, `sha2` without allocation and OIDs. Every RustCrypto crate still picks
-  AES-NI / ARMv8 AES, CLMUL / PMULL, AVX2 and SHA-NI / ARMv8 SHA at run time by itself.
+  `p384` without PEM, `std` and their precomputed base-point tables (memory traded for time),
+  `sha2` without allocation and OIDs. Every RustCrypto crate still picks AES-NI / ARMv8 AES,
+  CLMUL / PMULL, AVX2 and SHA-NI / ARMv8 SHA at run time by itself.
+- The README recommends X25519 (the default) and Ed25519 certificates for speed.
 - Nonces are built without a length check at run time: the 12-byte nonce and 16-byte tag
   are now type bounds on the AEADs, checked at compile time.
 - ECDSA signature verification hashes the message on the stack instead of into a `Vec`, and

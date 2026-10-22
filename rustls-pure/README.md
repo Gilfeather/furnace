@@ -103,10 +103,9 @@ Both work with tokio-rustls and anything else that takes a rustls config.
 
 For speed, prefer X25519 (the default, inside X25519MLKEM768) for key exchange and Ed25519
 certificates where your clients take them. RustCrypto's P-256 and P-384 are written for
-correctness in portable Rust, and are slower than the assembly in ring, aws-lc-rs or OpenSSL;
-their precomputed base-point tables, which speed up key generation and signing, are on (built
-once on first use, about 25 KB for P-256 and 56 KB for P-384). The ciphers and hashes use
-AES-NI, CLMUL, AVX2, SHA-NI and their ARM counterparts when the CPU has them.
+correctness in portable Rust, and are slower than the assembly in ring, aws-lc-rs or OpenSSL.
+The ciphers and hashes use AES-NI, CLMUL, AVX2, SHA-NI and their ARM counterparts when the CPU
+has them.
 
 ## Supported versions
 
