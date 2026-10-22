@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracing::debug;
 
-use super::latency::LatencyEstimate;
+use super::latency::Latency;
 use super::neuron::{Cx, Firing, Neuron, NeuronKind};
 use super::signal::Signal;
 #[cfg(any(feature = "llm", test))]
@@ -174,7 +174,7 @@ struct BrainCounters {
 }
 
 impl BrainCounters {
-    fn json(&self, latency: &LatencyEstimate) -> serde_json::Value {
+    fn json(&self, latency: &Latency) -> serde_json::Value {
         let load = |a: &AtomicU64| a.load(Ordering::Relaxed);
         serde_json::json!({
             "generations": load(&self.generations),
@@ -219,7 +219,7 @@ mod llm {
     #[derive(Default)]
     struct Shared {
         counters: BrainCounters,
-        latency: LatencyEstimate,
+        latency: Latency,
     }
 
     impl Llm {
@@ -448,7 +448,7 @@ pub struct ModelNeuron {
     input: Arc<InputFn>,
     output: Arc<OutputFn>,
     counters: BrainCounters,
-    latency: LatencyEstimate,
+    latency: Latency,
 }
 
 impl ModelNeuron {
@@ -467,7 +467,7 @@ impl ModelNeuron {
             input: Arc::new(input),
             output: Arc::new(output),
             counters: BrainCounters::default(),
-            latency: LatencyEstimate::new(),
+            latency: Latency::new(),
         }
     }
 

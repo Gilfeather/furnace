@@ -75,12 +75,12 @@ impl Receptor for Timer {
                         return;
                     }
                     next += period;
-                    let now = Instant::now();
                     let feature = Feature::new(kinds::TIMER, if same { 0 } else { tick });
-                    let mut signal =
-                        Signal::new(feature, Payload::json(serde_json::json!({"tick": tick})));
-                    signal.at = now;
-                    signal.urgency = rule.stamp(meter.tick(now), now);
+                    let signal = rule.signal(
+                        &meter,
+                        feature,
+                        Payload::json(serde_json::json!({"tick": tick})),
+                    );
                     if afferent.emit(signal).is_none() {
                         return;
                     }

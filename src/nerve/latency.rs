@@ -1,6 +1,8 @@
 //! Measured latencies: a rolling window of recent samples with cached p50 and p99, cheap to
 //! update on every signal and cheap to read on every pathway selection, and a
 //! [`Histogram`] of every sample for the metrics, in the shape the rest of `/metrics` uses.
+//! Only pathways read the window; latencies that steer nothing keep the histogram alone
+//! ([`Latency`]).
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,17 +19,23 @@ const EVERY: u64 = 16;
 /// The value of a percentile that was never computed
 const UNKNOWN: u64 = u64::MAX;
 
+/// Every measurement, for the metrics: count, sum, max and a histogram. What latencies that
+/// steer nothing keep (arcs, effectors, models, brains).
+pub(crate) struct Latency {
+    histogram: Histogram,
+    count: AtomicU64,
+    sum: AtomicU64,
+    max: AtomicU64,
+}
+
 /// A latency estimate, in nanoseconds, from a rolling window of measurements. Never
 /// configured, only measured. The window's percentiles steer pathway selection; the
 /// histogram of every measurement is what the metrics report.
 pub(crate) struct LatencyEstimate {
+    measured: Latency,
     recent: Mutex<Ring>,
-    histogram: Histogram,
     p50: AtomicU64,
     p99: AtomicU64,
-    count: AtomicU64,
-    sum: AtomicU64,
-    max: AtomicU64,
 }
 
 struct Ring {
@@ -51,6 +59,60 @@ pub struct LatencySnapshot {
     pub max: Option<f64>,
 }
 
+impl Default for Latency {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Latency {
+    /// No measurements yet
+    pub fn new() -> Self {
+        Self {
+            histogram: Histogram::with_buckets(FINE_LATENCY_BUCKETS),
+            count: AtomicU64::new(0),
+            sum: AtomicU64::new(0),
+            max: AtomicU64::new(0),
+        }
+    }
+
+    /// Record one measurement
+    pub fn observe(&self, elapsed: Duration) {
+        self.record(elapsed);
+    }
+
+    /// Record one measurement; returns it in nanoseconds and the count with it
+    fn record(&self, elapsed: Duration) -> (u64, u64) {
+        self.histogram.observe(elapsed);
+        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        let count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
+        self.sum.fetch_add(nanos, Ordering::Relaxed);
+        self.max.fetch_max(nanos, Ordering::Relaxed);
+        (nanos, count)
+    }
+
+    /// Measurements so far
+    pub fn count(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    /// Every measurement, in [`FINE_LATENCY_BUCKETS`], for the Prometheus histograms
+    pub fn histogram(&self) -> &Histogram {
+        &self.histogram
+    }
+
+    /// Count, percentiles, mean and max, in milliseconds
+    pub fn snapshot(&self) -> LatencySnapshot {
+        let count = self.count();
+        LatencySnapshot {
+            count,
+            percentiles: self.histogram.percentiles_ms(),
+            mean: (count > 0).then(|| self.sum.load(Ordering::Relaxed) as f64 / count as f64 / 1e6),
+            max: (count > 0).then(|| self.max.load(Ordering::Relaxed) as f64 / 1e6),
+        }
+    }
+}
+
 impl Default for LatencyEstimate {
     fn default() -> Self {
         Self::new()
@@ -61,27 +123,20 @@ impl LatencyEstimate {
     /// An estimate with no measurements yet
     pub fn new() -> Self {
         Self {
+            measured: Latency::new(),
             recent: Mutex::new(Ring {
                 samples: [0; WINDOW],
                 next: 0,
                 len: 0,
             }),
-            histogram: Histogram::with_buckets(FINE_LATENCY_BUCKETS),
             p50: AtomicU64::new(UNKNOWN),
             p99: AtomicU64::new(UNKNOWN),
-            count: AtomicU64::new(0),
-            sum: AtomicU64::new(0),
-            max: AtomicU64::new(0),
         }
     }
 
     /// Record one measurement
     pub fn observe(&self, elapsed: Duration) {
-        self.histogram.observe(elapsed);
-        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
-        let count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
-        self.sum.fetch_add(nanos, Ordering::Relaxed);
-        self.max.fetch_max(nanos, Ordering::Relaxed);
+        let (nanos, count) = self.measured.record(elapsed);
         let mut ring = self.recent.lock().unwrap_or_else(|e| e.into_inner());
         let next = ring.next;
         ring.samples[next] = nanos;
@@ -123,25 +178,14 @@ impl LatencyEstimate {
         self.get(&self.p99)
     }
 
-    /// Measurements so far
-    pub fn count(&self) -> u64 {
-        self.count.load(Ordering::Relaxed)
-    }
-
-    /// Every measurement, in [`FINE_LATENCY_BUCKETS`], for the Prometheus histograms
+    /// See [`Latency::histogram`]
     pub fn histogram(&self) -> &Histogram {
-        &self.histogram
+        self.measured.histogram()
     }
 
-    /// Count, percentiles, mean and max, in milliseconds
+    /// See [`Latency::snapshot`]
     pub fn snapshot(&self) -> LatencySnapshot {
-        let count = self.count();
-        LatencySnapshot {
-            count,
-            percentiles: self.histogram.percentiles_ms(),
-            mean: (count > 0).then(|| self.sum.load(Ordering::Relaxed) as f64 / count as f64 / 1e6),
-            max: (count > 0).then(|| self.max.load(Ordering::Relaxed) as f64 / 1e6),
-        }
+        self.measured.snapshot()
     }
 }
 
@@ -186,7 +230,7 @@ mod tests {
         for _ in 4..EVERY - 1 {
             l.observe(Duration::from_millis(1));
         }
-        assert_eq!(l.count(), EVERY - 1);
+        assert_eq!(l.snapshot().count, EVERY - 1);
         assert_eq!(l.p50(), Some(Duration::from_micros(10)));
         assert_eq!(l.p99(), Some(Duration::from_micros(10)));
         // The EVERY-th sees the window: 12 slow of 16

@@ -101,7 +101,7 @@ fn a_reflex_arc_is_a_direct_call_on_the_callers_thread() {
     // The arc's stimulus-to-action latency was measured
     let arc = fabric.0.cells[e.index()].arcs[r.index()].get().unwrap();
     assert_eq!(arc.count(), 1);
-    assert_eq!(fabric.0.pathways[1].latency.count(), 1);
+    assert_eq!(fabric.0.pathways[1].latency.snapshot().count, 1);
     assert_eq!(fabric.brain_fraction(), 0.0);
 }
 
@@ -302,7 +302,7 @@ fn deliberative_pathway_sums_a_window_into_one_firing() {
         assert_eq!(fabric.stimulate(r, signal(&[i])).queued, 1);
     }
     // The pathway's latency is measured last, after the batch has fired
-    wait_until(|| fabric.0.pathways[0].latency.count() == 6);
+    wait_until(|| fabric.0.pathways[0].latency.snapshot().count == 6);
     assert_eq!(*batchy.sizes.lock().unwrap(), vec![4, 2]);
     assert_eq!(fabric.waiting(), 0);
 }

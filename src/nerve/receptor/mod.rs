@@ -236,6 +236,14 @@ impl UrgencyRule {
         }
     }
 
+    /// A signal seen now, its rate measured by `meter` and its urgency stamped by the rule
+    pub(crate) fn signal(&self, meter: &RateMeter, feature: Feature, payload: Payload) -> Signal {
+        let now = Instant::now();
+        let mut signal = Signal::seen_at(feature, payload, now);
+        signal.urgency = self.stamp(meter.tick(now), now);
+        signal
+    }
+
     fn stamp(&self, rate: f32, now: Instant) -> Urgency {
         let from_rate = self
             .intervals
@@ -355,12 +363,7 @@ impl Source {
 
     /// A signal seen now, stamped with the rule
     fn signal(&self, feature: Feature, payload: Payload) -> Signal {
-        let now = Instant::now();
-        let rate = self.meter.tick(now);
-        let mut signal = Signal::new(feature, payload);
-        signal.at = now;
-        signal.urgency = self.rule.stamp(rate, now);
-        signal
+        self.rule.signal(&self.meter, feature, payload)
     }
 
     fn emit(&self, signal: Signal) -> Option<Outcome> {

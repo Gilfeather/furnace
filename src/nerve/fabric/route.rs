@@ -6,7 +6,7 @@ use std::time::Instant;
 use tracing::{debug, warn};
 
 use super::{Cell, Fabric, MAX_HOPS, Outcome, Pathway};
-use crate::nerve::latency::LatencyEstimate;
+use crate::nerve::latency::Latency;
 use crate::nerve::neuron::{Cx, Firing, NeuronKind, Quiet};
 use crate::nerve::signal::{NeuronId, PathwayId, Signal};
 
@@ -82,7 +82,7 @@ impl Fabric {
                 if !signal.trace.was_queued()
                     && let Some(arc) = cell.arcs.get(signal.origin.index())
                 {
-                    arc.get_or_init(LatencyEstimate::new)
+                    arc.get_or_init(Latency::new)
                         .observe(now.saturating_duration_since(signal.at));
                 }
             }

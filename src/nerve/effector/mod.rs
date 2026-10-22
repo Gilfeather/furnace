@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use serde::Serialize;
 
-use super::latency::LatencyEstimate;
+use super::latency::Latency;
 use super::neuron::{Cx, Firing, Neuron, NeuronKind};
 use super::signal::{Command, Signal};
 use kuebiko::{render_family, render_labelled};
@@ -201,7 +201,7 @@ struct EffectorInner {
     last_acted: AtomicU64,
     state: Mutex<LoopState>,
     counters: LoopCounters,
-    latency: LatencyEstimate,
+    latency: Latency,
 }
 
 /// An [`Act`] with its local loop: retry with backoff, circuit breaker, rate limit,
@@ -236,7 +236,7 @@ impl Effector {
                     refilled_at: now,
                 }),
                 counters: LoopCounters::default(),
-                latency: LatencyEstimate::new(),
+                latency: Latency::new(),
             }),
         }
     }

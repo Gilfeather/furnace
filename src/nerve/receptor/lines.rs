@@ -2,7 +2,7 @@
 
 use std::io::BufRead;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tracing::{debug, warn};
 
@@ -61,14 +61,11 @@ impl Lines {
 
     /// Make the signal for one line
     pub(crate) fn line_signal(rule: UrgencyRule, meter: &RateMeter, line: &str) -> Signal {
-        let now = Instant::now();
-        let mut signal = Signal::new(
+        rule.signal(
+            meter,
             Feature::sketch_as(kinds::TEXT, line.as_bytes()),
             Payload::text(line),
-        );
-        signal.at = now;
-        signal.urgency = rule.stamp(meter.tick(now), now);
-        signal
+        )
     }
 }
 

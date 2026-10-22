@@ -1,6 +1,6 @@
 //! An upstream Server-Sent-Events feed
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tracing::{debug, warn};
 
@@ -158,13 +158,11 @@ impl Receptor for SseIn {
                                         }) {
                                             continue;
                                         }
-                                        let now = Instant::now();
-                                        let mut signal = Signal::new(
+                                        let signal = rule.signal(
+                                            &meter,
                                             Feature::sketch_as(kinds::SSE, event.data.as_bytes()),
                                             Payload::text(&event.data),
                                         );
-                                        signal.at = now;
-                                        signal.urgency = rule.stamp(meter.tick(now), now);
                                         if afferent.emit(signal).is_none() {
                                             return;
                                         }
@@ -202,6 +200,7 @@ mod tests {
     use bytes::Bytes;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
 
     #[test]
     fn sse_parser_handles_multi_line_data_ids_and_comments() {

@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-use super::latency::LatencyEstimate;
+use super::latency::Latency;
 use super::neuron::{Gate, Neuron, NeuronKind, Quiet};
 use super::receptor::{Afferent, Receptor, Stop};
 use super::signal::{NeuronId, PathwayId};
@@ -67,7 +67,7 @@ pub(crate) struct Cell {
     last_prepared: AtomicU64,
     /// For effectors: stimulus-to-action latency per origin (reflex arcs only), by the
     /// origin's index
-    pub arcs: Vec<OnceLock<LatencyEstimate>>,
+    pub arcs: Vec<OnceLock<Latency>>,
 }
 
 pub(crate) struct Inner {
