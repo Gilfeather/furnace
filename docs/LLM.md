@@ -19,7 +19,7 @@ Docker image do not serve them. Your program builds a `Server` with `.llm(engine
 
 ```toml
 [dependencies]
-furnace-server = { version = "0.15", features = ["llm"] }
+furnace-server = { version = "0.16", features = ["llm"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = "0.3"
 ```
@@ -36,7 +36,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = "0.3"
 ```
 
-This page follows `main`, which is released as 0.15; until 0.15 is on crates.io, use the
+This page follows `main`, which is released as 0.16; until 0.16 is on crates.io, use the
 `git` line for `furnace-server` in either case.
 
 ## A GGUF file, with candle

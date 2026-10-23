@@ -22,7 +22,7 @@ spec:
     - grpc-v2
   containers:
     - name: kserve-container
-      image: ghcr.io/gilfeather/furnace:0.15.0
+      image: ghcr.io/gilfeather/furnace:0.16.0
       command: ["/app/furnace"]
       args:
         - --host

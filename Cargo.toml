@@ -3,7 +3,7 @@
 # library is still called `furnace`. Burn models are served through furnace-burn, the `furnace`
 # command is furnace-cli.
 name = "furnace-server"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Furnace Contributors"]
@@ -77,8 +77,8 @@ test-models = []
 
 [dependencies]
 # furnace's own parts, crates of their own with no dependencies
-amate = { path = "amate", version = "0.15.0" }
-kuebiko = { path = "kuebiko", version = "0.15.0", features = ["serde"] }
+amate = { path = "amate", version = "0.16.0" }
+kuebiko = { path = "kuebiko", version = "0.16.0", features = ["serde"] }
 
 bytes = "1.9"
 
