@@ -42,9 +42,47 @@ struct Block {
 // thread use or free a block another thread allocated
 unsafe impl Send for Block {}
 
-struct Cache {
-    blocks: [Option<Block>; SLOTS],
+/// Freed blocks kept, in `N` slots: the allocator's has [`SLOTS`], and the proofs check the
+/// same code with fewer
+struct Cache<const N: usize> {
+    blocks: [Option<Block>; N],
     bytes: usize,
+}
+
+impl<const N: usize> Cache<N> {
+    const fn new() -> Self {
+        Self {
+            blocks: [None; N],
+            bytes: 0,
+        }
+    }
+
+    /// A kept block of exactly `layout`, if any, no longer kept
+    fn take(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+        let slot = self.blocks.iter_mut().find(|slot| {
+            slot.is_some_and(|b| b.size == layout.size() && b.align == layout.align())
+        })?;
+        let block = slot.take()?;
+        self.bytes -= block.size;
+        Some(block.ptr)
+    }
+
+    /// Keep `ptr` of `layout`; false when the cache is full
+    fn keep(&mut self, ptr: NonNull<u8>, layout: Layout) -> bool {
+        if self.bytes + layout.size() > MAX_CACHED {
+            return false;
+        }
+        let Some(slot) = self.blocks.iter_mut().find(|slot| slot.is_none()) else {
+            return false;
+        };
+        *slot = Some(Block {
+            ptr,
+            size: layout.size(),
+            align: layout.align(),
+        });
+        self.bytes += layout.size();
+        true
+    }
 }
 
 /// [`System`] plus a cache of freed large blocks; see the module docs.
@@ -54,51 +92,14 @@ struct Cache {
 /// static ALLOCATOR: kamui::BlockCache = kamui::BlockCache::new();
 /// ```
 pub struct BlockCache {
-    // `std::sync::Mutex` does not allocate (SRW lock on Windows, futex on Linux), so it can be
-    // used inside the allocator
-    cache: Mutex<Cache>,
+    blocks: Blocks<SLOTS>,
 }
 
 impl BlockCache {
     pub const fn new() -> Self {
         Self {
-            cache: Mutex::new(Cache {
-                blocks: [None; SLOTS],
-                bytes: 0,
-            }),
+            blocks: Blocks::new(),
         }
-    }
-
-    /// A cached block of exactly `layout`, if any
-    fn take(&self, layout: Layout) -> Option<*mut u8> {
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        let slot = cache.blocks.iter_mut().find(|slot| {
-            slot.is_some_and(|b| b.size == layout.size() && b.align == layout.align())
-        })?;
-        let block = slot.take()?;
-        cache.bytes -= block.size;
-        Some(block.ptr.as_ptr())
-    }
-
-    /// Keep `ptr` for reuse; false when the cache is full
-    fn keep(&self, ptr: *mut u8, layout: Layout) -> bool {
-        let Some(ptr) = NonNull::new(ptr) else {
-            return false;
-        };
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        if cache.bytes + layout.size() > MAX_CACHED {
-            return false;
-        }
-        let Some(slot) = cache.blocks.iter_mut().find(|slot| slot.is_none()) else {
-            return false;
-        };
-        *slot = Some(Block {
-            ptr,
-            size: layout.size(),
-            align: layout.align(),
-        });
-        cache.bytes += layout.size();
-        true
     }
 }
 
@@ -108,10 +109,40 @@ impl Default for BlockCache {
     }
 }
 
-// SAFETY: every block handed out is either fresh from `System` or a block `System` allocated
-// with the same layout and that was freed (so no one else holds it); blocks not kept go back to
-// `System` with their original layout.
-unsafe impl GlobalAlloc for BlockCache {
+/// The allocator, with a cache of `N` slots: [`BlockCache`]'s has [`SLOTS`], and the proofs
+/// check the same code with fewer
+struct Blocks<const N: usize> {
+    // `std::sync::Mutex` does not allocate (SRW lock on Windows, futex on Linux), so it can be
+    // used inside the allocator
+    cache: Mutex<Cache<N>>,
+}
+
+impl<const N: usize> Blocks<N> {
+    const fn new() -> Self {
+        Self {
+            cache: Mutex::new(Cache::new()),
+        }
+    }
+
+    /// A cached block of exactly `layout`, if any
+    fn take(&self, layout: Layout) -> Option<*mut u8> {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.take(layout).map(NonNull::as_ptr)
+    }
+
+    /// Keep `ptr` for reuse; false when the cache is full
+    fn keep(&self, ptr: *mut u8, layout: Layout) -> bool {
+        let Some(ptr) = NonNull::new(ptr) else {
+            return false;
+        };
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.keep(ptr, layout)
+    }
+
+    // The four below have `GlobalAlloc`'s contracts. Every block handed out is either fresh
+    // from `System` or a block `System` allocated with the same layout and that was freed (so
+    // no one else holds it); blocks not kept go back to `System` with their original layout.
+
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if layout.size() >= MIN_SIZE
             && let Some(ptr) = self.take(layout)
@@ -154,6 +185,298 @@ unsafe impl GlobalAlloc for BlockCache {
             }
         }
         new_ptr
+    }
+}
+
+// SAFETY: `Blocks` keeps `GlobalAlloc`'s contracts (see there), and each call passes the
+// caller's promises on unchanged
+unsafe impl GlobalAlloc for BlockCache {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        unsafe { self.blocks.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        unsafe { self.blocks.alloc_zeroed(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { self.blocks.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        unsafe { self.blocks.realloc(ptr, layout, new_size) }
+    }
+}
+
+/// Kani proofs (`cargo kani -p kamui`): the cache's bookkeeping from any state it can be in, and
+/// the allocator's unsafe paths on real memory, checked for out-of-bounds access, use after free
+/// and double free.
+///
+/// Each proof is written once for a cache of any number of slots and run for 4 on every pull
+/// request and for the allocator's 64 on a schedule (`*_64_slots`; their loops take Kani well
+/// past a pull request's time). Four slots are enough to reach every behaviour: `Cache` and
+/// `Blocks` are the same generic code for any number, every slot goes through the same `find`
+/// with no branch on its index or on the number of slots, and from an arbitrary state four
+/// slots already hold every case: the block asked for in the first, a middle or the last slot,
+/// several blocks of one layout, every slot full, none full, and the byte limit reached with
+/// slots free. More slots only add more slots of these same kinds.
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Any non-null pointer
+    fn any_ptr() -> NonNull<u8> {
+        let addr = kani::any_where(|&addr: &usize| addr != 0);
+        NonNull::new(addr as *mut u8).unwrap()
+    }
+
+    impl kani::Arbitrary for Block {
+        fn any() -> Self {
+            Self {
+                ptr: any_ptr(),
+                size: kani::any(),
+                align: kani::any(),
+            }
+        }
+    }
+
+    /// What `take` and `keep` rely on and keep true: the bytes counted are the sizes of the
+    /// blocks kept, within [`MAX_CACHED`]
+    fn holds<const N: usize>(cache: &Cache<N>) -> bool {
+        let mut bytes = 0usize;
+        for block in cache.blocks.iter().flatten() {
+            let Some(sum) = bytes.checked_add(block.size) else {
+                return false;
+            };
+            bytes = sum;
+        }
+        bytes == cache.bytes && bytes <= MAX_CACHED
+    }
+
+    /// Any cache the invariant holds for
+    fn any_cache<const N: usize>() -> Cache<N> {
+        let cache = Cache {
+            blocks: kani::any(),
+            bytes: kani::any(),
+        };
+        kani::assume(holds(&cache));
+        cache
+    }
+
+    /// Any valid layout: any size, a power-of-two alignment up to 4096
+    fn any_layout() -> Layout {
+        let align = 1usize << kani::any_where(|&shift: &u32| shift <= 12);
+        let layout = Layout::from_size_align(kani::any(), align);
+        kani::assume(layout.is_ok());
+        layout.unwrap()
+    }
+
+    /// Any valid layout of `min..=max` bytes
+    fn any_layout_within(min: usize, max: usize) -> Layout {
+        let layout = any_layout();
+        kani::assume((min..=max).contains(&layout.size()));
+        layout
+    }
+
+    fn same(a: &Option<Block>, b: &Option<Block>) -> bool {
+        match (a, b) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.ptr == b.ptr && a.size == b.size && a.align == b.align,
+            _ => false,
+        }
+    }
+
+    /// The one slot `before` and `after` differ in, if they differ in exactly one
+    fn changed_slot<const N: usize>(
+        before: &[Option<Block>; N],
+        after: &[Option<Block>; N],
+    ) -> Option<usize> {
+        let mut changed = None;
+        for i in 0..N {
+            if !same(&before[i], &after[i]) {
+                if changed.is_some() {
+                    return None;
+                }
+                changed = Some(i);
+            }
+        }
+        changed
+    }
+
+    /// `take` from any cache: a block of exactly the layout asked for, removed from its slot
+    /// with nothing else touched (so a block kept once is handed out once), or none when no
+    /// block has the layout, the cache unchanged
+    fn take_hands_out_a_block_once<const N: usize>() {
+        let mut cache = any_cache::<N>();
+        let layout = any_layout();
+        let (blocks, bytes) = (cache.blocks, cache.bytes);
+        let taken = cache.take(layout);
+        assert!(holds(&cache));
+        match taken {
+            Some(ptr) => {
+                let slot = changed_slot(&blocks, &cache.blocks).expect("one slot emptied");
+                assert!(cache.blocks[slot].is_none());
+                let block = blocks[slot].expect("the slot held the block");
+                assert_eq!(block.ptr, ptr);
+                assert_eq!((block.size, block.align), (layout.size(), layout.align()));
+                assert_eq!(cache.bytes, bytes - layout.size());
+            }
+            None => {
+                for i in 0..N {
+                    assert!(same(&blocks[i], &cache.blocks[i]));
+                    if let Some(block) = blocks[i] {
+                        assert!(block.size != layout.size() || block.align != layout.align());
+                    }
+                }
+                assert_eq!(cache.bytes, bytes);
+            }
+        }
+    }
+
+    /// `keep` into any cache: the block with its layout in one empty slot, nothing else
+    /// touched, or refused with the cache unchanged, so the caller hands it back to `System`
+    fn keep_keeps_a_block_or_refuses_it<const N: usize>() {
+        let mut cache = any_cache::<N>();
+        let layout = any_layout();
+        let ptr = any_ptr();
+        let (blocks, bytes) = (cache.blocks, cache.bytes);
+        let kept = cache.keep(ptr, layout);
+        assert!(holds(&cache));
+        if kept {
+            let slot = changed_slot(&blocks, &cache.blocks).expect("one slot filled");
+            assert!(blocks[slot].is_none());
+            let block = cache.blocks[slot].expect("the slot holds the block");
+            assert_eq!(block.ptr, ptr);
+            assert_eq!((block.size, block.align), (layout.size(), layout.align()));
+            assert_eq!(cache.bytes, bytes + layout.size());
+        } else {
+            for i in 0..N {
+                assert!(same(&blocks[i], &cache.blocks[i]));
+            }
+            assert_eq!(cache.bytes, bytes);
+        }
+    }
+
+    /// Give every kept block back to `System`, with the layout it was allocated with
+    fn release<const N: usize>(blocks: &Blocks<N>) {
+        let mut cache = blocks.cache.lock().unwrap();
+        for block in cache.blocks.iter_mut().filter_map(Option::take) {
+            let layout = Layout::from_size_align(block.size, block.align).unwrap();
+            unsafe { System.dealloc(block.ptr.as_ptr(), layout) };
+        }
+        cache.bytes = 0;
+    }
+
+    /// A block freed and allocated again, zeroed or not, of any layout around the size limit
+    /// (1 to `MIN_SIZE + 64` bytes, any alignment up to 4096): every write and free stays
+    /// within live memory `System` handed out, a reused block is the one freed, and a zeroed
+    /// one is all zeros (at any byte) even when it is reused
+    fn alloc_and_dealloc_stay_in_bounds<const N: usize>() {
+        let blocks = Blocks::<N>::new();
+        let first = any_layout_within(1, MIN_SIZE + 64);
+        let a = unsafe { blocks.alloc(first) };
+        kani::assume(!a.is_null());
+        unsafe {
+            a.write_bytes(0xa5, first.size());
+            blocks.dealloc(a, first);
+        }
+
+        let second = any_layout_within(1, MIN_SIZE + 64);
+        let zeroed: bool = kani::any();
+        let b = unsafe {
+            if zeroed {
+                blocks.alloc_zeroed(second)
+            } else {
+                blocks.alloc(second)
+            }
+        };
+        kani::assume(!b.is_null());
+        assert_eq!(b as usize % second.align(), 0);
+        if first.size() >= MIN_SIZE && second == first {
+            assert_eq!(a, b, "the freed block is handed out again");
+        }
+        let at = kani::any_where(|&i: &usize| i < second.size());
+        if zeroed {
+            assert_eq!(unsafe { *b.add(at) }, 0);
+        }
+        unsafe {
+            b.add(at).write(1);
+            blocks.dealloc(b, second);
+        }
+        release(&blocks);
+    }
+
+    /// `realloc` of a block of any layout around the size limit to any size around it, across
+    /// it either way, keeps the bytes both sizes have (at any byte), and frees or keeps the
+    /// old block exactly once
+    fn realloc_keeps_the_contents<const N: usize>() {
+        let blocks = Blocks::<N>::new();
+        let old = any_layout_within(1, MIN_SIZE + 64);
+        let ptr = unsafe { blocks.alloc(old) };
+        kani::assume(!ptr.is_null());
+        let at = kani::any_where(|&i: &usize| i < old.size());
+        unsafe { ptr.add(at).write(0x5a) };
+
+        let new_size = kani::any_where(|&n: &usize| (1..=MIN_SIZE + 64).contains(&n));
+        let new = Layout::from_size_align(new_size, old.align()).unwrap();
+        let moved = unsafe { blocks.realloc(ptr, old, new_size) };
+        kani::assume(!moved.is_null());
+        if at < new_size {
+            assert_eq!(unsafe { *moved.add(at) }, 0x5a);
+        }
+        unsafe {
+            moved.add(new_size - 1).write(1);
+            blocks.dealloc(moved, new);
+        }
+        release(&blocks);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn take_hands_out_a_block_once_4_slots() {
+        take_hands_out_a_block_once::<4>();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(66)]
+    fn take_hands_out_a_block_once_64_slots() {
+        take_hands_out_a_block_once::<SLOTS>();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn keep_keeps_a_block_or_refuses_it_4_slots() {
+        keep_keeps_a_block_or_refuses_it::<4>();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(66)]
+    fn keep_keeps_a_block_or_refuses_it_64_slots() {
+        keep_keeps_a_block_or_refuses_it::<SLOTS>();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn alloc_and_dealloc_stay_in_bounds_4_slots() {
+        alloc_and_dealloc_stay_in_bounds::<4>();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(66)]
+    fn alloc_and_dealloc_stay_in_bounds_64_slots() {
+        alloc_and_dealloc_stay_in_bounds::<SLOTS>();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn realloc_keeps_the_contents_4_slots() {
+        realloc_keeps_the_contents::<4>();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(66)]
+    fn realloc_keeps_the_contents_64_slots() {
+        realloc_keeps_the_contents::<SLOTS>();
     }
 }
 
@@ -208,7 +531,7 @@ mod tests {
     }
 
     fn cached(cache: &BlockCache) -> (usize, usize) {
-        let cache = cache.cache.lock().unwrap();
+        let cache = cache.blocks.cache.lock().unwrap();
         (cache.blocks.iter().flatten().count(), cache.bytes)
     }
 
@@ -254,7 +577,7 @@ mod tests {
         let layout = Layout::from_size_align(1024, 8).unwrap();
         let a = alloc(&cache, layout);
         unsafe { cache.dealloc(a.as_ptr(), layout) };
-        assert_eq!(cache.cache.lock().unwrap().bytes, 0);
+        assert_eq!(cache.blocks.cache.lock().unwrap().bytes, 0);
     }
 
     #[test]
@@ -281,7 +604,7 @@ mod tests {
 
     /// Give every kept block back to `System`, with the layout it was allocated with
     fn release(cache: &BlockCache) {
-        let mut cache = cache.cache.lock().unwrap();
+        let mut cache = cache.blocks.cache.lock().unwrap();
         for block in cache.blocks.iter_mut().filter_map(Option::take) {
             let layout = Layout::from_size_align(block.size, block.align).unwrap();
             unsafe { System.dealloc(block.ptr.as_ptr(), layout) };
@@ -454,6 +777,7 @@ mod tests {
         let (blocks, bytes) = cached(&cache);
         assert!(blocks <= 2 * THREADS);
         let kept: usize = cache
+            .blocks
             .cache
             .lock()
             .unwrap()
@@ -521,7 +845,7 @@ mod tests {
         }
 
         fn check_cache(cache: &BlockCache) -> Result<(), TestCaseError> {
-            let cache = cache.cache.lock().unwrap();
+            let cache = cache.blocks.cache.lock().unwrap();
             let kept: usize = cache.blocks.iter().flatten().map(|b| b.size).sum();
             prop_assert_eq!(kept, cache.bytes);
             prop_assert!(cache.bytes <= MAX_CACHED);
@@ -589,7 +913,7 @@ mod tests {
                 for block in live {
                     unsafe { cache.dealloc(block.ptr.as_ptr(), block.layout) };
                 }
-                let mut cache = cache.cache.lock().unwrap();
+                let mut cache = cache.blocks.cache.lock().unwrap();
                 for block in cache.blocks.iter_mut().filter_map(Option::take) {
                     let layout = Layout::from_size_align(block.size, block.align).unwrap();
                     unsafe { System.dealloc(block.ptr.as_ptr(), layout) };

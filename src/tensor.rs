@@ -169,7 +169,11 @@ impl HostTensor {
         self.shape.first().copied().unwrap_or(0)
     }
 
-    /// Items `start..end` along the batch dimension
+    /// Items `start..end` along the batch dimension.
+    ///
+    /// Panics unless the shape has a batch dimension, `start..end` lies within it and the
+    /// values are as many as the shape holds (as [`Model`](crate::Model) checks of every
+    /// tensor it slices).
     pub fn slice_batch(&self, start: usize, end: usize) -> Self {
         let per_item: usize = self.shape[1..].iter().product();
         let range = start * per_item..end * per_item;
@@ -197,14 +201,23 @@ impl HostTensor {
             Values::I64(values) => values.reserve(rest),
         }
         for part in parts {
-            if part.shape[1..] != joined.shape[1..] {
+            // The parts are an engine's outputs, not checked yet: without a batch dimension
+            // there is nothing to join along
+            if joined.shape.is_empty()
+                || part.shape.is_empty()
+                || part.shape[1..] != joined.shape[1..]
+            {
                 return Err(ModelError::InferenceFailed(format!(
                     "chunks of one batch returned shapes {:?} and {:?}",
                     joined.shape, part.shape
                 ))
                 .into());
             }
-            joined.shape[0] += part.shape[0];
+            joined.shape[0] = joined.shape[0].checked_add(part.shape[0]).ok_or_else(|| {
+                ModelError::InferenceFailed(
+                    "chunks of one batch returned more items than fit in a usize".to_string(),
+                )
+            })?;
             match (&mut joined.values, part.values) {
                 (Values::F32(a), Values::F32(b)) => a.extend(b),
                 (Values::I64(a), Values::I64(b)) => a.extend(b),
@@ -217,6 +230,102 @@ impl HostTensor {
             }
         }
         Ok(joined)
+    }
+}
+
+/// Kani proofs (`cargo kani`): the element counts of any shape, and splitting and joining
+/// tensors along the batch dimension
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// `element_count` of any shape of up to four dimensions, each of any size, never
+    /// overflows: it is the exact product when that fits in a `usize`, and `None` only when the
+    /// product of the dimensions up to one of them does not
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn element_count_is_the_exact_product() {
+        let dims: [usize; 4] = kani::any();
+        let shape = &dims[..kani::any_where(|&len: &usize| len <= 4)];
+        // The product in 128 bits: no overflow while every partial product fits in 64
+        let mut exact: u128 = 1;
+        let mut overflows = false;
+        for &d in shape {
+            exact *= d as u128;
+            if exact > usize::MAX as u128 {
+                overflows = true;
+                break;
+            }
+        }
+        match element_count(shape) {
+            Some(n) => {
+                assert!(!overflows);
+                assert_eq!(n as u128, exact);
+            }
+            None => {
+                assert!(overflows);
+            }
+        }
+    }
+
+    /// A tensor whose values are as many as its shape holds, with a batch dimension
+    fn any_tensor(max_batch: usize) -> HostTensor {
+        let batch = kani::any_where(|&b: &usize| b <= max_batch);
+        let item = kani::any_where(|&d: &usize| d <= 2);
+        let rank2: bool = kani::any();
+        let shape = if rank2 {
+            vec![batch, item]
+        } else {
+            vec![batch]
+        };
+        let len = element_count(&shape).unwrap();
+        let values = if kani::any() {
+            Values::F32(vec![kani::any(); len])
+        } else {
+            Values::I64(vec![kani::any(); len])
+        };
+        HostTensor { shape, values }
+    }
+
+    /// `slice_batch` of any range within the batch takes exactly its items' values
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn slice_batch_stays_in_bounds() {
+        let tensor = any_tensor(3);
+        let end = kani::any_where(|&e: &usize| e <= tensor.batch());
+        let start = kani::any_where(|&s: &usize| s <= end);
+        let part = tensor.slice_batch(start, end);
+        assert_eq!(part.batch(), end - start);
+        // Element by element: a slice comparison is a `memcmp` Kani unwinds byte by byte
+        assert_eq!(part.shape.len(), tensor.shape.len());
+        assert_eq!(part.shape.get(1), tensor.shape.get(1));
+        assert_eq!(element_count(&part.shape), Some(part.values.len()));
+    }
+
+    /// `concat_batch` of up to three parts, even of other ranks, types or shapes or none at
+    /// all, never panics; what it joins has every part's items and values
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn concat_batch_never_panics() {
+        let count = kani::any_where(|&n: &usize| n <= 3);
+        let parts: Vec<HostTensor> = (0..count)
+            .map(|_| {
+                let mut part = any_tensor(2);
+                // A part as an engine may return it: without a batch dimension
+                if kani::any() {
+                    part.shape.clear();
+                }
+                part
+            })
+            .collect();
+        let items: Option<usize> = parts.iter().map(|p| p.shape.first().copied()).sum();
+        let values: usize = parts.iter().map(|p| p.values.len()).sum();
+        if let Ok(joined) = HostTensor::concat_batch(parts) {
+            assert_eq!(joined.values.len(), values);
+            if count > 1 {
+                assert_eq!(joined.shape.first().copied(), items);
+            }
+        }
     }
 }
 
@@ -233,6 +342,21 @@ mod tests {
         let parts = vec![tensor.slice_batch(0, 1), tensor.slice_batch(1, 3)];
         assert_eq!(parts[1].shape, [2, 2]);
         assert_eq!(HostTensor::concat_batch(parts).unwrap(), tensor);
+    }
+
+    #[test]
+    fn parts_without_a_batch_dimension_are_not_joined() {
+        // An engine's outputs, joined before they are checked: indexing their shapes panicked
+        let scalar = HostTensor {
+            shape: vec![],
+            values: Values::F32(vec![1.0]),
+        };
+        let row = HostTensor {
+            shape: vec![1],
+            values: Values::F32(vec![2.0]),
+        };
+        assert!(HostTensor::concat_batch(vec![row.clone(), scalar.clone()]).is_err());
+        assert!(HostTensor::concat_batch(vec![scalar, row]).is_err());
     }
 
     #[test]

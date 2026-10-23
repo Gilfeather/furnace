@@ -1,24 +1,43 @@
 name: Kani
 
-# Kani's bounded model checking of the code that takes untrusted input: rustls-pure's checks of
-# the peer's key shares, records and signatures before they reach the RustCrypto crates. The
-# proofs are the `#[cfg(kani)] mod verification` next to the code; each is bounded with
-# `#[kani::unwind]` so the whole run stays within minutes. Kani runs on Linux only. Locally:
-# `cargo install --locked kani-verifier --version 0.68.0 && cargo kani setup`, then
-# `cargo kani -p rustls-pure`.
+# Kani's bounded model checking of the code that takes untrusted input or is unsafe:
+# rustls-pure's checks of the peer's key shares, records and signatures before they reach the
+# RustCrypto crates; kamui's allocator (its unsafe paths on real memory, its cache's bookkeeping
+# from any state); the tensor shape and size arithmetic; the raw and JSON input decoders; and
+# the nerve HTTP client's response parsing. The proofs are the `#[cfg(kani)] mod verification`
+# next to the code; each is bounded with `#[kani::unwind]` so it stays within minutes. Kani runs
+# on Linux only. Locally: `cargo install --locked kani-verifier --version 0.68.0 && cargo kani
+# setup`, then `cargo kani -p rustls-pure`, `-p kamui` or `-p furnace-server` (with
+# `--harness <name> --exact` for one proof).
 on:
   push:
     branches: [ main ]
     paths:
+      - 'kamui/**'
       - 'rustls-pure/**'
+      - 'src/tensor.rs'
+      - 'src/model.rs'
+      - 'src/api/infer.rs'
+      - 'src/json_fast.rs'
+      - 'src/nerve/wire.rs'
+      - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/kani.yml'
+      - '.github/workflows/kani-nightly.yml'
   pull_request:
     branches: [ main ]
     paths:
+      - 'kamui/**'
       - 'rustls-pure/**'
+      - 'src/tensor.rs'
+      - 'src/model.rs'
+      - 'src/api/infer.rs'
+      - 'src/json_fast.rs'
+      - 'src/nerve/wire.rs'
+      - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/kani.yml'
+      - '.github/workflows/kani-nightly.yml'
   workflow_dispatch:
 
 permissions:
@@ -50,3 +69,57 @@ jobs:
       with:
         kani-version: '0.68.0'
         args: -p ${{ matrix.package }}
+
+  # kamui and furnace-server one harness per job: a model check can take most of a runner's
+  # memory, and the jobs run side by side. The harnesses that take longer than a pull request
+  # should wait run nightly instead, at the same bounds (kani-nightly.yml). A new harness gets
+  # a line here or there; `check-list` fails the run until it has one.
+  harness:
+    name: Kani ${{ matrix.package }} ${{ matrix.harness }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - { package: kamui, harness: 'verification::take_hands_out_a_block_once_4_slots' }
+        - { package: kamui, harness: 'verification::keep_keeps_a_block_or_refuses_it_4_slots' }
+        - { package: kamui, harness: 'verification::alloc_and_dealloc_stay_in_bounds_4_slots' }
+        - { package: kamui, harness: 'verification::realloc_keeps_the_contents_4_slots' }
+        - { package: furnace-server, harness: 'json_fast::verification::number_lengths_take_json_numbers_only' }
+        - { package: furnace-server, harness: 'json_fast::verification::cut_pieces_join_back_into_the_span' }
+        - { package: furnace-server, harness: 'json_fast::verification::array_spans_lie_between_brackets' }
+        - { package: furnace-server, harness: 'model::verification::flat_sizes_never_overflow' }
+        - { package: furnace-server, harness: 'nerve::wire::verification::the_head_ends_at_the_first_blank_line' }
+        - { package: furnace-server, harness: 'nerve::wire::verification::content_lengths_are_digits_only' }
+        - { package: furnace-server, harness: 'nerve::wire::verification::chunk_sizes_are_hex_only' }
+        - { package: furnace-server, harness: 'tensor::verification::slice_batch_stays_in_bounds' }
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Prove
+      uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+      with:
+        kani-version: '0.68.0'
+        args: -p ${{ matrix.package }} --harness ${{ matrix.harness }} --exact
+
+  # Every `#[kani::proof]` of kamui and furnace-server is in the matrix above or in
+  # kani-nightly.yml's (rustls-pure's run all at once, in the first job)
+  check-list:
+    name: Every Kani harness runs
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Compare the harnesses with the matrix
+      shell: bash
+      run: |
+        listed=$(cat .github/workflows/kani.yml .github/workflows/kani-nightly.yml |
+          grep -o "package: [a-z-]*, harness: '[^']*'" | cut -d"'" -f2 | sed 's/.*:://' | sort)
+        found=$(grep -rh -A3 '#\[kani::proof\]' src kamui/src | grep -o 'fn [a-z_0-9]*' | cut -c4- | sort)
+        if [ "$listed" != "$found" ]; then
+          diff <(echo "$listed") <(echo "$found")
+          exit 1
+        fi

@@ -154,7 +154,9 @@ proptest = { version = "1.12", default-features = false, features = ["std"] }
 loom = "0.7"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(furnace_loom)"] }
+# The loom tests' cfg, and Kani's proof harnesses (`#[cfg(kani)] mod verification`, set by
+# `cargo kani`)
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(furnace_loom)", "cfg(kani)"] }
 
 [[test]]
 name = "llm"

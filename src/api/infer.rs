@@ -338,3 +338,88 @@ pub(crate) fn values_datatype(values: &Values) -> DataType {
         Values::I64(_) => DataType::Int64,
     }
 }
+
+/// Kani proofs (`cargo kani`): raw tensor data of any bytes
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Raw data of `N` bytes of any value as `datatype`: as many values as there are whole
+    /// elements, each the little-endian value of its bytes (`INT32` widened), and `FP32` and
+    /// `INT64` values encode back to the same bytes. The length is fixed per call so the
+    /// vectors have a known size; the proofs call it for every length up to 17, two `INT64`
+    /// values and a byte more.
+    fn decodes_whole_elements<const N: usize>(datatype: DataType) {
+        let bytes: [u8; N] = kani::any();
+        let size = datatype.size();
+        let values = decode_raw(datatype, &bytes);
+        assert_eq!(values.len(), N / size);
+        if values.is_empty() {
+            return;
+        }
+        let i = kani::any_where(|&i: &usize| i < values.len());
+        let at: [u8; 8] = std::array::from_fn(|k| bytes.get(i * size + k).copied().unwrap_or(0));
+        let at4 = [at[0], at[1], at[2], at[3]];
+        match (&values, datatype) {
+            (Values::F32(v), DataType::Fp32) => {
+                assert_eq!(v[i].to_bits(), u32::from_le_bytes(at4));
+            }
+            (Values::I64(v), DataType::Int64) => {
+                assert_eq!(v[i], i64::from_le_bytes(at));
+            }
+            (Values::I64(v), DataType::Int32) => {
+                assert_eq!(v[i], i64::from(i32::from_le_bytes(at4)));
+            }
+            _ => panic!("{datatype:?} decoded to the wrong type"),
+        }
+        if datatype != DataType::Int32 {
+            let whole = N / size * size;
+            assert_eq!(raw_len(&values), whole);
+            let mut encoded = Vec::new();
+            encode_raw_into(&values, &mut encoded);
+            assert_eq!(encoded.len(), whole);
+            let j = kani::any_where(|&j: &usize| j < whole);
+            assert_eq!(encoded[j], bytes[j]);
+        }
+    }
+
+    /// [`decodes_whole_elements`] for every length up to 17 bytes
+    fn every_length(datatype: DataType) {
+        decodes_whole_elements::<0>(datatype);
+        decodes_whole_elements::<1>(datatype);
+        decodes_whole_elements::<2>(datatype);
+        decodes_whole_elements::<3>(datatype);
+        decodes_whole_elements::<4>(datatype);
+        decodes_whole_elements::<5>(datatype);
+        decodes_whole_elements::<6>(datatype);
+        decodes_whole_elements::<7>(datatype);
+        decodes_whole_elements::<8>(datatype);
+        decodes_whole_elements::<9>(datatype);
+        decodes_whole_elements::<10>(datatype);
+        decodes_whole_elements::<11>(datatype);
+        decodes_whole_elements::<12>(datatype);
+        decodes_whole_elements::<13>(datatype);
+        decodes_whole_elements::<14>(datatype);
+        decodes_whole_elements::<15>(datatype);
+        decodes_whole_elements::<16>(datatype);
+        decodes_whole_elements::<17>(datatype);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(19)]
+    fn raw_fp32_decodes_whole_elements() {
+        every_length(DataType::Fp32);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(19)]
+    fn raw_int64_decodes_whole_elements() {
+        every_length(DataType::Int64);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(19)]
+    fn raw_int32_decodes_whole_elements() {
+        every_length(DataType::Int32);
+    }
+}
