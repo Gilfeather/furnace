@@ -35,9 +35,16 @@ const PEERS: usize = 512;
 
 /// One class of input or the other, chosen at random for every sample: 0 for class A, 1 for
 /// class B. A number rather than an enum, so inputs are made from it by arithmetic, the same
-/// work in the same places in memory for both classes, never by a branch on the class just
-/// before the timer starts.
+/// work and the same memory accesses for both classes, never by a branch on the class or by
+/// reading from a place that depends on it. On Neoverse N2, reading a class's input from its own
+/// address, even outside the timing, changed the time of the operation after it: |t| up to 58.
 type Class = usize;
+
+/// `a` for class A, `b` for class B, with both read and the mask deciding which survives
+fn select<const N: usize>(class: Class, a: &[u8; N], b: &[u8; N]) -> [u8; N] {
+    let mask = black_box(0u8.wrapping_sub(class as u8));
+    std::array::from_fn(|i| a[i] ^ ((a[i] ^ b[i]) & mask))
+}
 
 /// A small generator for classes and inputs. The secrets it makes are only inputs to time,
 /// so they need not be unpredictable.
@@ -73,11 +80,9 @@ impl Rng {
     }
 
     /// "Fixed vs random": `fixed` for class A, fresh random bytes for class B. Both classes
-    /// draw the random bytes and mix them in; the mask decides which survive.
+    /// draw the random bytes
     fn fixed_or_random<const N: usize>(&mut self, class: Class, fixed: &[u8; N]) -> [u8; N] {
-        let random = self.bytes::<N>();
-        let mask = black_box(0u8.wrapping_sub(class as u8));
-        std::array::from_fn(|i| fixed[i] ^ ((fixed[i] ^ random[i]) & mask))
+        select(class, fixed, &self.bytes::<N>())
     }
 }
 
@@ -338,10 +343,9 @@ fn x25519_all_zero_check(resolution: Duration) -> Outcome {
         ],
         resolution,
         |class, rng| {
-            (
-                Box::new(x25519_key(1)),
-                pairs[rng.below(pairs.len())][class],
-            )
+            let [a, b] = &pairs[rng.below(pairs.len())];
+            let peer = select(class, a.as_bytes(), b.as_bytes());
+            (Box::new(x25519_key(1)), x25519_dalek::PublicKey::from(peer))
         },
         |(exchange, peer)| exchange.complete(peer.as_bytes()),
     )
@@ -563,8 +567,12 @@ fn aead_open<C: Cipher>(name: &'static str, resolution: Duration) -> Outcome {
         ["first tag byte wrong", "last tag byte wrong"],
         resolution,
         |class, rng| {
+            // The same bytes changed for both classes: the first by `flip` for class A, the last
+            // for class B, the other by nothing
+            let flip = 1 + rng.below(255) as u8;
             let mut wrong = tag;
-            wrong[class * (TAG_LEN - 1)] ^= 1 + rng.below(255) as u8;
+            wrong[0] ^= select(class, &[flip], &[0])[0];
+            wrong[TAG_LEN - 1] ^= select(class, &[0], &[flip])[0];
             wrong
         },
         |wrong| crypter.open(0, &aad, &mut text, &wrong).is_err(),

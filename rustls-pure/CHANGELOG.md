@@ -6,6 +6,14 @@ the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 a breaking change, a new minimum Rust version or a new rustls minor version is a new minor
 version.
 
+## [Unreleased]
+
+### Changed
+- The timing tests read both classes' inputs and keep one by a mask, so the class decides no
+  memory access. On Neoverse N2, reading only the class's input had made the X25519 all-zero
+  check differ between classes (|t| up to 58); with this change it passes on every runner, and
+  CONSTANT_TIME.md records why.
+
 ## [0.15.2] - 2026-10-23
 
 Hardening: ML-KEM's encapsulation randomness is wiped, X25519's all-zero check is branch-free
