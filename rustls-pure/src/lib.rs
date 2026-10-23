@@ -1,5 +1,7 @@
 //! A pure-Rust crypto provider for [rustls], built on [RustCrypto] primitives: no C, no
-//! assembly, so it builds wherever Rust does.
+//! assembly, so it builds wherever Rust and rustls do. CI builds it for RISC-V, WASI and the
+//! browser (`wasm32-unknown-unknown`, where the application turns on `getrandom`'s `wasm_js`
+//! and `rustls-pki-types`' `web` features, as rustls needs there with any provider).
 //!
 //! ```no_run
 //! use std::sync::Arc;
@@ -45,6 +47,12 @@
 //! randomness and the wiping of keys. Where the standards allow a choice it refuses: X25519
 //! exchanges that end in an all-zero secret, compressed or malformed key shares, and malleable
 //! Ed25519 signatures.
+//!
+//! In the repository, it is also tested for interoperability with OpenSSL, GnuTLS and curl,
+//! X25519MLKEM768 included; [Kani](https://github.com/model-checking/kani) proves what it does
+//! with the peer's bytes for every input within bounds; and its secret handling is checked for
+//! constant time, in its machine code and with timing tests. These are tests and bounded proofs,
+//! not guarantees: see the README and CONSTANT_TIME.md.
 //!
 //! [rustls]: https://docs.rs/rustls
 //! [RustCrypto]: https://github.com/RustCrypto

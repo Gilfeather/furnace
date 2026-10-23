@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- amate, kuebiko, kamui, furnace-burn and furnace-cli's packages include the license text
+  (LICENSE), as the MIT license asks; before, only furnace-server's did.
+
 ## [0.16.0] - 2026-10-23
 
 The nervous system, its allocator and its parsers checked by model checking and proof: TLA+

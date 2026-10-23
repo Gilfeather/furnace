@@ -8,6 +8,13 @@ version.
 
 ## [Unreleased]
 
+### Added
+- CI builds it for RISC-V, WASI and the browser (`wasm32-unknown-unknown`); the README's
+  "Targets" says what an application in the browser turns on.
+
+### Fixed
+- The package includes the license text (LICENSE), as the MIT license asks.
+
 ### Changed
 - The timing tests read both classes' inputs and keep one by a mask, so the class decides no
   memory access. On Neoverse N2, reading only the class's input had made the X25519 all-zero

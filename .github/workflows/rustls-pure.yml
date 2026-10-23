@@ -130,6 +130,52 @@ jobs:
       shell: bash
       run: bash rustls-pure/ct-asm.sh
 
+  # No C or assembly, so it builds for targets the providers on C do not reach: RISC-V, WASI,
+  # and the browser, where an application chooses getrandom's and rustls-pki-types' web backends
+  # (README, "Targets")
+  targets:
+    name: Builds for other targets
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: stable
+        targets: riscv64gc-unknown-linux-gnu,wasm32-wasip2,wasm32-unknown-unknown
+
+    - name: RISC-V and WASI
+      run: |
+        cargo check -p rustls-pure --target riscv64gc-unknown-linux-gnu
+        cargo check -p rustls-pure --target wasm32-wasip2
+
+    # As an application in the browser would depend on it
+    - name: Browser (wasm32-unknown-unknown)
+      run: |
+        mkdir -p "$RUNNER_TEMP/browser/src"
+        cat > "$RUNNER_TEMP/browser/Cargo.toml" <<EOF
+        [package]
+        name = "browser"
+        version = "0.0.0"
+        edition = "2024"
+        publish = false
+
+        [workspace]
+
+        [dependencies]
+        rustls = { version = "0.23.46", default-features = false, features = ["std"] }
+        rustls-pure = { path = "$GITHUB_WORKSPACE/rustls-pure" }
+        getrandom = { version = "0.4", features = ["wasm_js"] }
+        rustls-pki-types = { version = "1", features = ["web"] }
+        EOF
+        echo 'pub fn provider() -> rustls::crypto::CryptoProvider { rustls_pure::provider() }' \
+          > "$RUNNER_TEMP/browser/src/lib.rs"
+        cargo check --manifest-path "$RUNNER_TEMP/browser/Cargo.toml" --target wasm32-unknown-unknown
+
   # REQUIRE_MLKEM: the OpenSSL here must have X25519MLKEM768 (3.5 or later), so the post-quantum
   # checks cannot be skipped quietly
   interop-linux:
@@ -182,7 +228,7 @@ jobs:
   required:
     name: rustls-pure required
     if: always()
-    needs: [changes, latest-rustls, msrv, machine-code, interop-linux, interop-macos]
+    needs: [changes, latest-rustls, msrv, machine-code, targets, interop-linux, interop-macos]
     runs-on: ubuntu-latest
     steps:
     - name: Every job passed or was skipped

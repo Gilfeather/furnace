@@ -117,6 +117,18 @@ rustls-pure has a version of its own, apart from Furnace's, and a release only w
 ([CHANGELOG](CHANGELOG.md)). Before 1.0, raising either minimum, or moving to rustls 0.24, is
 a minor version.
 
+## Targets
+
+With no C or assembly, it builds wherever Rust and rustls do. CI builds it for RISC-V
+(`riscv64gc-unknown-linux-gnu`), WASI (`wasm32-wasip2`) and the browser
+(`wasm32-unknown-unknown`). In the browser, rustls needs a source of randomness and of time
+from the JavaScript host, whatever the provider, so the application turns them on:
+
+```toml
+getrandom = { version = "0.4", features = ["wasm_js"] }
+rustls-pki-types = { version = "1", features = ["web"] }
+```
+
 ## Compared with the other pure-Rust providers
 
 Others have the same aim, most with a wider reach: from the RustCrypto organization,
