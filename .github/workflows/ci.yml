@@ -46,10 +46,11 @@ env:
   MNIST_URL: https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx
 
 
-# A newer push to the same branch or pull request makes an older run of this workflow redundant
+# On a pull request a newer push makes an older run redundant; on main every commit runs to the
+# end, so the README badge shows a result, never a cancelled run
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:

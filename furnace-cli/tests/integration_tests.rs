@@ -8,7 +8,7 @@ use furnace_burn::load_built_in_model;
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const RESNET_INPUT: usize = 3 * 224 * 224;
@@ -603,12 +603,7 @@ fn furnace() -> Command {
 /// `furnace --model-name mnist` serves the model, through the real binary and CLI
 #[tokio::test]
 async fn test_cli_serves_model_by_name() {
-    // Grab a free port, then hand it to the server
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = free_port();
     let _server = ServerProcess(
         furnace()
             .args(["--model-name", "MNIST", "--port", &port.to_string()])
@@ -638,13 +633,23 @@ async fn test_cli_serves_model_by_name() {
     assert_eq!(response.status(), 200);
 }
 
-/// A free port on localhost
+/// A free port on localhost for a server process, never one handed out before in this run: a
+/// port is free again once its probe closes, so two tests probing at once could be given the
+/// same one and each talk to the other's server
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    static HANDED_OUT: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+    let mut handed_out = HANDED_OUT.lock().unwrap();
+    loop {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        if !handed_out.contains(&port) {
+            handed_out.push(port);
+            return port;
+        }
+    }
 }
 
 /// `--config` supplies the model and options; the command line overrides the file's port
