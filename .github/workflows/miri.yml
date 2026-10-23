@@ -1,0 +1,83 @@
+name: Miri
+
+# The workspace's unsafe code run under Miri, which checks every memory access against Rust's
+# rules: out of bounds, use after free, double free, misaligned access, data races, leaks and
+# aliasing. That code is kamui's allocator (its unit tests, and its integration tests with
+# kamui as the process's global allocator). The rest of the workspace has no unsafe of its
+# own but furnace-burn's weight mapping, which Miri cannot run (it maps a file), and
+# rustls-pure forbids it. Both aliasing models Rust may adopt: Stacked Borrows, and Tree
+# Borrows. Strict provenance under both: a pointer is never made up from an integer. On pull
+# requests that change kamui, on main, and weekly.
+#
+# On Linux only: there `System` hands over-aligned blocks to `posix_memalign`, which Miri
+# models. Windows' `System` keeps a header in front of an over-aligned block and reads it on
+# free, outside the bytes the freed `Box` may touch; Miri reports that as undefined behaviour
+# in std itself, with std's `System` as the only allocator and no kamui at all.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'kamui/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/miri.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'kamui/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/miri.yml'
+  schedule:
+    # Mondays, 04:30 UTC
+    - cron: '30 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# A newer push to the same branch or pull request makes an older run redundant
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  miri:
+    name: Miri (${{ matrix.model.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        model:
+          - name: Stacked Borrows
+            flags: -Zmiri-strict-provenance
+          - name: Tree Borrows
+            flags: -Zmiri-strict-provenance -Zmiri-tree-borrows
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    # Miri ships with nightly only; a pinned one, so a new nightly never breaks a pull request
+    # that did not change anything. The date moves in a pull request of its own.
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: nightly-2026-10-20
+        components: miri, rust-src
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: miri
+
+    - name: Build Miri's standard library
+      run: cargo miri setup
+
+    - name: kamui
+      env:
+        MIRIFLAGS: ${{ matrix.model.flags }}
+      run: cargo miri test -p kamui

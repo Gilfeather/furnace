@@ -17,6 +17,7 @@
 //! The `furnace` command of [furnace](https://github.com/Gilfeather/furnace) runs on it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::ptr::NonNull;
 use std::sync::Mutex;
 
 /// Smallest allocation whose block is kept on free
@@ -28,12 +29,18 @@ const SLOTS: usize = 64;
 /// Most bytes kept in freed blocks at once
 pub const MAX_CACHED: usize = 128 * 1024 * 1024;
 
+/// A freed block, kept as a pointer rather than an address so it keeps the provenance
+/// `System` gave it: an address cast back to a pointer would have none
 #[derive(Clone, Copy)]
 struct Block {
-    ptr: usize,
+    ptr: NonNull<u8>,
     size: usize,
     align: usize,
 }
+
+// SAFETY: a kept block is owned by the cache alone (its user freed it), and `System` lets any
+// thread use or free a block another thread allocated
+unsafe impl Send for Block {}
 
 struct Cache {
     blocks: [Option<Block>; SLOTS],
@@ -70,11 +77,14 @@ impl BlockCache {
         })?;
         let block = slot.take()?;
         cache.bytes -= block.size;
-        Some(block.ptr as *mut u8)
+        Some(block.ptr.as_ptr())
     }
 
     /// Keep `ptr` for reuse; false when the cache is full
     fn keep(&self, ptr: *mut u8, layout: Layout) -> bool {
+        let Some(ptr) = NonNull::new(ptr) else {
+            return false;
+        };
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         if cache.bytes + layout.size() > MAX_CACHED {
             return false;
@@ -83,7 +93,7 @@ impl BlockCache {
             return false;
         };
         *slot = Some(Block {
-            ptr: ptr as usize,
+            ptr,
             size: layout.size(),
             align: layout.align(),
         });
@@ -150,7 +160,6 @@ unsafe impl GlobalAlloc for BlockCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ptr::NonNull;
 
     /// `cache.alloc`, failing the test instead of handing out a null pointer
     fn alloc(cache: &BlockCache, layout: Layout) -> NonNull<u8> {
@@ -159,6 +168,18 @@ mod tests {
 
     fn alloc_zeroed(cache: &BlockCache, layout: Layout) -> NonNull<u8> {
         NonNull::new(unsafe { cache.alloc_zeroed(layout) }).expect("allocation failed")
+    }
+
+    /// The bytes of a block of `len` the tests write and check: every one natively, and under
+    /// Miri, which interprets each access, both ends and every 997th (a prime, so a copy that
+    /// shifts by a power of two still shows)
+    fn positions(len: usize) -> impl Iterator<Item = usize> {
+        let step = if cfg!(miri) { 997 } else { 1 };
+        (0..len).step_by(step).chain(len.checked_sub(1))
+    }
+
+    fn zeroed(ptr: NonNull<u8>, len: usize) -> bool {
+        positions(len).all(|i| unsafe { *ptr.as_ptr().add(i) } == 0)
     }
 
     #[test]
@@ -172,8 +193,7 @@ mod tests {
         }
         let b = alloc_zeroed(&cache, layout);
         assert_eq!(a, b, "the freed block is handed out again");
-        let zeroed = unsafe { std::slice::from_raw_parts(b.as_ptr(), layout.size()) };
-        assert!(zeroed.iter().all(|&x| x == 0));
+        assert!(zeroed(b, layout.size()));
 
         // A different size does not get it
         let other = Layout::from_size_align(MIN_SIZE + 64, 64).unwrap();
@@ -184,6 +204,7 @@ mod tests {
         let d = alloc(&cache, layout);
         assert_eq!(d, b);
         unsafe { cache.dealloc(d.as_ptr(), layout) };
+        release(&cache);
     }
 
     fn cached(cache: &BlockCache) -> (usize, usize) {
@@ -255,11 +276,194 @@ mod tests {
         unsafe { cache.dealloc(ptr, layout) };
         // The large blocks freed on the way were kept
         assert_eq!(cached(&cache), (2, MIN_SIZE + 4096 + 2 * MIN_SIZE));
-        let mut kept = cache.cache.lock().unwrap();
-        for block in kept.blocks.iter_mut().filter_map(Option::take) {
+        release(&cache);
+    }
+
+    /// Give every kept block back to `System`, with the layout it was allocated with
+    fn release(cache: &BlockCache) {
+        let mut cache = cache.cache.lock().unwrap();
+        for block in cache.blocks.iter_mut().filter_map(Option::take) {
             let layout = Layout::from_size_align(block.size, block.align).unwrap();
-            unsafe { System.dealloc(block.ptr as *mut u8, layout) };
+            unsafe { System.dealloc(block.ptr.as_ptr(), layout) };
         }
+        cache.bytes = 0;
+    }
+
+    /// The byte at `i` of a filled block: bytes differ from one position to the next, so a
+    /// copy that shifts or drops a byte shows; the pattern repeats every 64 KiB
+    fn byte(i: usize) -> u8 {
+        i as u8 ^ (i >> 8) as u8
+    }
+
+    /// Fill every byte of a block, copying the pattern in 64 KiB pieces (one bulk copy each,
+    /// which Miri runs as one operation)
+    fn fill(ptr: NonNull<u8>, len: usize) {
+        const PERIOD: usize = 1 << 16;
+        let pattern: Vec<u8> = (0..PERIOD).map(byte).collect();
+        for start in (0..len).step_by(PERIOD) {
+            let n = (len - start).min(PERIOD);
+            unsafe { std::ptr::copy_nonoverlapping(pattern.as_ptr(), ptr.as_ptr().add(start), n) };
+        }
+    }
+
+    /// Whether the first `len` bytes of a block are still as `fill` wrote them
+    fn filled(ptr: NonNull<u8>, len: usize) -> bool {
+        positions(len).all(|i| unsafe { *ptr.as_ptr().add(i) } == byte(i))
+    }
+
+    #[test]
+    fn realloc_between_large_sizes_grows_shrinks_and_stays() {
+        let cache = BlockCache::new();
+        let mut layout = Layout::from_size_align(MIN_SIZE, 64).unwrap();
+        let mut ptr = alloc(&cache, layout);
+        fill(ptr, layout.size());
+        // A block of the size grown to is cached already: realloc hands that one out
+        let waiting = Layout::from_size_align(2 * MIN_SIZE, 64).unwrap();
+        let block = alloc(&cache, waiting);
+        unsafe { cache.dealloc(block.as_ptr(), waiting) };
+        // Same size, grow onto the cached block, shrink, shrink below the limit. Only the
+        // bytes filled at the start are known: growing adds bytes no one wrote.
+        let mut written = layout.size();
+        for new_size in [MIN_SIZE, 2 * MIN_SIZE, MIN_SIZE + 1, MIN_SIZE - 1] {
+            let old = ptr;
+            ptr = NonNull::new(unsafe { cache.realloc(ptr.as_ptr(), layout, new_size) })
+                .expect("allocation failed");
+            if new_size == 2 * MIN_SIZE {
+                assert_eq!(ptr, block, "the cached block of that size is reused");
+            }
+            if new_size == layout.size() {
+                assert_ne!(ptr, old, "a same-size realloc moves to a fresh block");
+            }
+            assert_eq!(ptr.as_ptr() as usize % 64, 0);
+            written = written.min(new_size);
+            assert!(filled(ptr, written), "realloc to {new_size}");
+            layout = Layout::from_size_align(new_size, 64).unwrap();
+        }
+        // Below the limit now: this one goes back to `System`
+        unsafe { cache.dealloc(ptr.as_ptr(), layout) };
+        // Kept on the way: every block realloc moved away from (MIN_SIZE twice, 2 * MIN_SIZE
+        // and MIN_SIZE + 1)
+        assert_eq!(cached(&cache), (4, 5 * MIN_SIZE + 1));
+        release(&cache);
+    }
+
+    #[test]
+    fn a_kept_block_goes_only_to_its_own_alignment() {
+        let cache = BlockCache::new();
+        let loose = Layout::from_size_align(MIN_SIZE, 8).unwrap();
+        // An alignment as large as the block itself
+        let strict = Layout::from_size_align(MIN_SIZE, MIN_SIZE).unwrap();
+        let a = alloc(&cache, loose);
+        unsafe { cache.dealloc(a.as_ptr(), loose) };
+        let b = alloc(&cache, strict);
+        assert_eq!(b.as_ptr() as usize % MIN_SIZE, 0);
+        assert_eq!(
+            cached(&cache),
+            (1, MIN_SIZE),
+            "the loose block is not handed out"
+        );
+        unsafe { cache.dealloc(b.as_ptr(), strict) };
+        let c = alloc_zeroed(&cache, strict);
+        assert_eq!(c, b);
+        assert_eq!(c.as_ptr() as usize % MIN_SIZE, 0);
+        // realloc keeps the alignment, and the zeroed bytes
+        let d = NonNull::new(unsafe { cache.realloc(c.as_ptr(), strict, 2 * MIN_SIZE) })
+            .expect("allocation failed");
+        assert_eq!(d.as_ptr() as usize % MIN_SIZE, 0);
+        assert!(zeroed(d, MIN_SIZE));
+        let grown = Layout::from_size_align(2 * MIN_SIZE, MIN_SIZE).unwrap();
+        unsafe { cache.dealloc(d.as_ptr(), grown) };
+        assert_eq!(cached(&cache), (3, 4 * MIN_SIZE));
+        release(&cache);
+    }
+
+    /// A block handed from one thread to another, as a model's output is
+    struct Sent(NonNull<u8>);
+
+    // SAFETY: the block is `System` memory, which any thread may use and free; the tests hand
+    // each one to a single thread at a time
+    unsafe impl Send for Sent {}
+
+    #[test]
+    fn a_block_freed_on_another_thread_is_reused_on_a_third() {
+        let cache = BlockCache::new();
+        let layout = Layout::from_size_align(MIN_SIZE, 64).unwrap();
+        let shared = &cache;
+        std::thread::scope(|s| {
+            let a = s
+                .spawn(move || {
+                    let a = alloc(shared, layout);
+                    fill(a, layout.size());
+                    Sent(a)
+                })
+                .join()
+                .unwrap();
+            let a = s
+                .spawn(move || {
+                    let a = a;
+                    assert!(filled(a.0, layout.size()));
+                    unsafe { shared.dealloc(a.0.as_ptr(), layout) };
+                    a.0.as_ptr() as usize
+                })
+                .join()
+                .unwrap();
+            let b = s
+                .spawn(move || {
+                    let b = alloc(shared, layout);
+                    // The bytes the first thread wrote, seen from the third
+                    assert!(filled(b, layout.size()));
+                    Sent(b)
+                })
+                .join()
+                .unwrap();
+            assert_eq!(b.0.as_ptr() as usize, a);
+            unsafe { shared.dealloc(b.0.as_ptr(), layout) };
+        });
+        release(&cache);
+    }
+
+    /// Threads allocating and freeing blocks of the sizes the cache keeps, at once, each
+    /// checking its block keeps what it wrote: no block is handed to two threads, and the
+    /// cache's count stays the bytes it holds
+    #[test]
+    fn threads_share_the_cache() {
+        const THREADS: usize = 4;
+        let rounds = if cfg!(miri) { 4 } else { 200 };
+        let cache = BlockCache::new();
+        std::thread::scope(|s| {
+            for t in 0..THREADS {
+                let cache = &cache;
+                s.spawn(move || {
+                    for round in 0..rounds {
+                        let layout =
+                            Layout::from_size_align(MIN_SIZE + (round + t) % 2 * 4096, 64).unwrap();
+                        let block = alloc(cache, layout);
+                        let byte = (t * rounds + round) as u8;
+                        unsafe { block.as_ptr().write_bytes(byte, layout.size()) };
+                        std::thread::yield_now();
+                        for i in [0, layout.size() / 2, layout.size() - 1] {
+                            assert_eq!(unsafe { *block.as_ptr().add(i) }, byte);
+                        }
+                        unsafe { cache.dealloc(block.as_ptr(), layout) };
+                    }
+                });
+            }
+        });
+        // A fresh block of a size is made only while every block of that size is in use, one
+        // per thread at most: so at most THREADS of each of the two sizes
+        let (blocks, bytes) = cached(&cache);
+        assert!(blocks <= 2 * THREADS);
+        let kept: usize = cache
+            .cache
+            .lock()
+            .unwrap()
+            .blocks
+            .iter()
+            .flatten()
+            .map(|b| b.size)
+            .sum();
+        assert_eq!(kept, bytes);
+        release(&cache);
     }
 
     mod properties {
@@ -325,10 +529,17 @@ mod tests {
         }
 
         proptest! {
-            // At most 64 cases; PROPTEST_CASES lowers it
-            #![proptest_config(ProptestConfig::with_cases(
-                ProptestConfig::default().cases.min(64)
-            ))]
+            // At most 64 cases (8 under Miri); PROPTEST_CASES lowers it. Under Miri no file of
+            // failed cases: Miri keeps the test away from the file system.
+            #![proptest_config(ProptestConfig {
+                cases: ProptestConfig::default().cases.min(if cfg!(miri) { 8 } else { 64 }),
+                failure_persistence: if cfg!(miri) {
+                    None
+                } else {
+                    ProptestConfig::default().failure_persistence
+                },
+                ..ProptestConfig::default()
+            })]
 
             /// Blocks in use never overlap and keep what was written to them, a zeroed one is
             /// all zeros even when it is a reused block, and the cache's count of bytes is
@@ -349,10 +560,7 @@ mod tests {
                             };
                             prop_assert_eq!(ptr.as_ptr() as usize % align, 0);
                             if zeroed {
-                                let bytes = unsafe {
-                                    std::slice::from_raw_parts(ptr.as_ptr(), layout.size())
-                                };
-                                prop_assert!(bytes.iter().all(|&b| b == 0));
+                                prop_assert!(super::zeroed(ptr, layout.size()));
                             }
                             let start = ptr.as_ptr() as usize;
                             let end = start + layout.size();
@@ -384,7 +592,7 @@ mod tests {
                 let mut cache = cache.cache.lock().unwrap();
                 for block in cache.blocks.iter_mut().filter_map(Option::take) {
                     let layout = Layout::from_size_align(block.size, block.align).unwrap();
-                    unsafe { System.dealloc(block.ptr as *mut u8, layout) };
+                    unsafe { System.dealloc(block.ptr.as_ptr(), layout) };
                 }
                 cache.bytes = 0;
             }

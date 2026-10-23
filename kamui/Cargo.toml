@@ -6,7 +6,6 @@ rust-version = "1.95"
 authors = ["Furnace Contributors"]
 description = "A global allocator that keeps freed large blocks for reuse, so repeated model passes skip fresh page faults; no dependencies"
 documentation = "https://docs.rs/kamui"
-homepage = "https://github.com/Gilfeather/furnace"
 repository = "https://github.com/Gilfeather/furnace"
 license = "MIT"
 keywords = ["allocator", "global-allocator", "cache", "inference"]
