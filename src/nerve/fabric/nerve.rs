@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use super::{Fabric, Inner, Outcome};
 use crate::nerve::motor::MotionError;
 use crate::nerve::signal::{NeuronId, Signal};
+use crate::nerve::sync::{Mutex, MutexGuard};
 
 /// Signals that may wait in a nerve's lane; beyond it, the least urgent is dropped
 const WAITING: usize = 1024;
@@ -62,26 +63,56 @@ struct Key {
     sequence: u64,
 }
 
-struct LaneState {
+struct LaneState<T> {
     running: usize,
-    waiting: BTreeMap<Key, (NeuronId, Signal)>,
+    waiting: BTreeMap<Key, T>,
     sequence: u64,
 }
 
-/// A nerve at run time: its lane and counters
-pub(crate) struct Lane {
+/// A nerve at run time: its lane and counters. What waits in it (a signal and the neuron it
+/// goes to) is handed back out of the lane's lock whenever it leaves, so that whatever
+/// dropping or answering it does never runs under the lock.
+pub(crate) struct Lane<T = (NeuronId, Signal)> {
     pub(crate) name: String,
     limit: usize,
-    state: Mutex<LaneState>,
+    /// Most waiting at once
+    room: usize,
+    state: Mutex<LaneState<T>>,
     waited: AtomicU64,
     dropped: AtomicU64,
 }
 
-impl Lane {
+/// What became of something entering a lane
+pub(crate) enum Entered<T> {
+    /// A place was free and it took it: carry it on
+    Go(T),
+    /// It waits for a place; the least urgent of those waiting was dropped for it, when the
+    /// lane was full
+    Waits { dropped: Option<T> },
+    /// The lane is full of more urgent ones: it is dropped
+    Full(T),
+}
+
+/// What freeing a place in a lane let go of
+pub(crate) struct Released<T> {
+    /// The most urgent waiting that is still due and wanted: it took the place
+    pub(crate) next: Option<T>,
+    /// Those whose deadline passed while they waited
+    pub(crate) expired: Vec<T>,
+    /// Those nobody wanted any more
+    pub(crate) unwanted: Vec<T>,
+}
+
+impl<T> Lane<T> {
     pub(super) fn new(nerve: Nerve) -> Self {
+        Self::with_room(nerve, WAITING)
+    }
+
+    fn with_room(nerve: Nerve, room: usize) -> Self {
         Self {
             name: nerve.name,
             limit: nerve.in_flight,
+            room,
             state: Mutex::new(LaneState {
                 running: 0,
                 waiting: BTreeMap::new(),
@@ -92,7 +123,7 @@ impl Lane {
         }
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, LaneState> {
+    fn state(&self) -> MutexGuard<'_, LaneState<T>> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -106,6 +137,73 @@ impl Lane {
             waited: self.waited.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
         }
+    }
+
+    /// Take a place for `item`, due by `deadline`, or wait for one. An idle lane lets it
+    /// straight on.
+    fn enter(&self, deadline: Option<Instant>, item: T) -> Entered<T> {
+        let mut state = self.state();
+        if state.running < self.limit && state.waiting.is_empty() {
+            state.running += 1;
+            return Entered::Go(item);
+        }
+        state.sequence += 1;
+        let key = Key {
+            whenever: deadline.is_none(),
+            deadline,
+            sequence: state.sequence,
+        };
+        let mut dropped = None;
+        if state.waiting.len() >= self.room {
+            match state.waiting.last_key_value().map(|(k, _)| *k) {
+                // The newcomer is more urgent than the least urgent waiting: that one goes
+                Some(least) if key < least => {
+                    dropped = state.waiting.pop_last().map(|(_, item)| item);
+                }
+                _ => {
+                    drop(state);
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                    return Entered::Full(item);
+                }
+            }
+        }
+        state.waiting.insert(key, item);
+        drop(state);
+        if dropped.is_some() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        self.waited.fetch_add(1, Ordering::Relaxed);
+        Entered::Waits { dropped }
+    }
+
+    /// A place is free: the most urgent waiting that is still due at `now` and `wanted`
+    /// takes it
+    fn release(&self, now: Instant, wanted: impl Fn(&T) -> bool) -> Released<T> {
+        let mut released = Released {
+            next: None,
+            expired: Vec::new(),
+            unwanted: Vec::new(),
+        };
+        let mut state = self.state();
+        state.running = state.running.saturating_sub(1);
+        while state.running < self.limit {
+            let Some((key, item)) = state.waiting.pop_first() else {
+                break;
+            };
+            if key.deadline.is_some_and(|d| d <= now) {
+                released.expired.push(item);
+            } else if !wanted(&item) {
+                released.unwanted.push(item);
+            } else {
+                state.running += 1;
+                released.next = Some(item);
+                break;
+            }
+        }
+        drop(state);
+        self.dropped
+            .fetch_add(released.expired.len() as u64, Ordering::Relaxed);
+        released
     }
 }
 
@@ -127,7 +225,8 @@ pub struct NerveLaneMetrics {
 }
 
 /// A place in a nerve's lane, held by the signal that took it and every signal derived from
-/// it: the place is free again once the last of them is gone
+/// it, until it enters a nerve from outside: the place is free again once the last of them is
+/// gone
 #[derive(Clone)]
 pub(crate) struct Ticket(Arc<Held>);
 
@@ -166,47 +265,33 @@ impl Fabric {
         if self.0.cells[from.index()].nerve == Some(nerve) {
             return Ok(signal);
         }
+        // Entering from outside, it lets go of the place it held: in another nerve, or in
+        // this one when it left and came back. Waiting with that place, it could keep taken
+        // the very place it waits for.
+        signal.ticket = None;
         let lane = &self.0.nerves[nerve];
-        let mut state = lane.state();
-        if state.running < lane.limit && state.waiting.is_empty() {
-            state.running += 1;
-            drop(state);
-            signal.ticket = Some(self.ticket(nerve));
-            return Ok(signal);
-        }
-        state.sequence += 1;
-        let key = Key {
-            whenever: signal.urgency.deadline.is_none(),
-            deadline: signal.urgency.deadline,
-            sequence: state.sequence,
-        };
-        if state.waiting.len() >= WAITING {
-            let least = state.waiting.last_key_value().map(|(k, _)| *k);
-            match least {
-                // The newcomer is more urgent than the least urgent waiting: that one goes
-                Some(least) if key < least => {
-                    if let Some((_, (_, dropped))) = state.waiting.pop_last() {
-                        dropped.report(Err(full(&lane.name)));
-                    }
-                }
-                _ => {
-                    drop(state);
-                    lane.dropped.fetch_add(1, Ordering::Relaxed);
-                    signal.report(Err(full(&lane.name)));
-                    return Err(Outcome {
-                        dropped: 1,
-                        ..Outcome::default()
-                    });
-                }
+        match lane.enter(signal.urgency.deadline, (to, signal)) {
+            Entered::Go((_, mut signal)) => {
+                signal.ticket = Some(self.ticket(nerve));
+                Ok(signal)
             }
-            lane.dropped.fetch_add(1, Ordering::Relaxed);
+            Entered::Waits { dropped } => {
+                if let Some((_, dropped)) = dropped {
+                    dropped.report(Err(full(&lane.name)));
+                }
+                Err(Outcome {
+                    queued: 1,
+                    ..Outcome::default()
+                })
+            }
+            Entered::Full((_, signal)) => {
+                signal.report(Err(full(&lane.name)));
+                Err(Outcome {
+                    dropped: 1,
+                    ..Outcome::default()
+                })
+            }
         }
-        state.waiting.insert(key, (to, signal));
-        lane.waited.fetch_add(1, Ordering::Relaxed);
-        Err(Outcome {
-            queued: 1,
-            ..Outcome::default()
-        })
     }
 
     fn ticket(&self, nerve: usize) -> Ticket {
@@ -220,33 +305,79 @@ impl Fabric {
     /// motor side's runtime
     fn release(&self, nerve: usize) {
         let lane = &self.0.nerves[nerve];
-        let mut state = lane.state();
-        state.running = state.running.saturating_sub(1);
-        let now = Instant::now();
-        while state.running < lane.limit {
-            let Some((_, (to, mut signal))) = state.waiting.pop_first() else {
-                return;
-            };
-            if signal.urgency.deadline.is_some_and(|d| d <= now) {
-                lane.dropped.fetch_add(1, Ordering::Relaxed);
-                signal.report(Err(MotionError::TimedOut));
-                continue;
-            }
-            if signal.abandoned() {
-                continue;
-            }
-            state.running += 1;
-            drop(state);
+        let released = lane.release(Instant::now(), |(_, signal)| !signal.abandoned());
+        for (_, signal) in released.expired {
+            signal.report(Err(MotionError::TimedOut));
+        }
+        if let Some((to, mut signal)) = released.next {
             signal.ticket = Some(self.ticket(nerve));
             let fabric = self.clone();
             self.efferent().spawn(async move {
                 fabric.deliver(to, signal);
             });
-            return;
         }
     }
 }
 
 fn full(nerve: &str) -> MotionError {
     MotionError::failed(format!("the nerve '{nerve}' is full"))
+}
+
+#[cfg(all(test, furnace_loom))]
+mod model_check;
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::*;
+
+    /// Locks its lane when it is dropped, as a signal holding the last of another place in
+    /// the lane does when it frees that place
+    struct Probe(Arc<Lane<Probe>>);
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.0.metrics();
+        }
+    }
+
+    /// What leaves a lane leaves it out of the lane's lock: dropping it may lock the lane
+    /// again (free a place in it) without deadlocking
+    #[test]
+    fn what_leaves_a_lane_is_dropped_out_of_its_lock() {
+        let lane = Arc::new(Lane::with_room(Nerve::new("arm").in_flight(1), 1));
+        let probe = || Probe(lane.clone());
+        let soon = Some(Instant::now() + Duration::from_secs(3600));
+        let later = Some(Instant::now() + Duration::from_secs(7200));
+        let Entered::Go(running) = lane.enter(None, probe()) else {
+            panic!("an idle lane lets it on");
+        };
+        assert!(matches!(
+            lane.enter(later, probe()),
+            Entered::Waits { dropped: None }
+        ));
+        // More urgent: the one waiting is dropped for it, and handed back
+        let Entered::Waits { dropped } = lane.enter(soon, probe()) else {
+            panic!("the more urgent one waits");
+        };
+        drop(dropped.expect("the least urgent is dropped"));
+        // Less urgent than all waiting: handed back
+        let Entered::Full(full) = lane.enter(later, probe()) else {
+            panic!("the lane is full");
+        };
+        drop(full);
+        drop(running);
+        // Freed after its deadline, the one waiting expired and is handed back too
+        let released = lane.release(Instant::now() + Duration::from_secs(4000), |_| true);
+        assert!(released.next.is_none());
+        assert_eq!(released.expired.len(), 1);
+        drop(released);
+        let metrics = lane.metrics();
+        assert_eq!(
+            (metrics.in_flight, metrics.waiting, metrics.dropped),
+            (0, 0, 3)
+        );
+    }
 }

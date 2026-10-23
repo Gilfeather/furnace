@@ -83,6 +83,7 @@ mod neuron;
 pub mod receptor;
 pub(crate) mod serve;
 mod signal;
+mod sync;
 #[cfg(test)]
 mod testing;
 pub(crate) mod wire;

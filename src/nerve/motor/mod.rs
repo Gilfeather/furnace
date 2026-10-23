@@ -41,6 +41,7 @@ use tracing::debug;
 use super::fabric::{Fabric, Inner};
 use super::neuron::{Cx, Firing, Neuron, NeuronKind};
 use super::signal::{Command, Feedback, NeuronId, Payload, Reported, Signal};
+use super::sync;
 
 /// Why a command did not come to a good end
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,10 +105,63 @@ pub struct ActionSpec {
 type MotionFuture = Pin<Box<dyn Future<Output = Reported> + Send + 'static>>;
 type Program = dyn Fn(Motion) -> MotionFuture + Send + Sync;
 
-/// The program running at a motor neuron, and the way to stop it: dropping `stop` does
-struct Running {
+/// The program running at a motor neuron, one at a time: a new one preempts it. `S` is the
+/// way to stop a program, which dropping does; it is always dropped out of the lock.
+struct Slot<S> {
+    running: sync::Mutex<Option<Running<S>>>,
+    generations: sync::AtomicU64,
+}
+
+struct Running<S> {
     generation: u64,
-    _stop: oneshot::Sender<()>,
+    _stop: S,
+}
+
+impl<S> Slot<S> {
+    fn new() -> Self {
+        Self {
+            running: sync::Mutex::new(None),
+            generations: sync::AtomicU64::new(0),
+        }
+    }
+
+    fn running(&self) -> sync::MutexGuard<'_, Option<Running<S>>> {
+        self.running.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A program starts, stopped by dropping `stop`, and preempts the one running; its
+    /// generation, for [`end`](Self::end)
+    fn start(&self, stop: S) -> u64 {
+        let generation = self.generations.fetch_add(1, Ordering::Relaxed);
+        let preempted = self.running().replace(Running {
+            generation,
+            _stop: stop,
+        });
+        drop(preempted);
+        generation
+    }
+
+    /// The program of `generation` ended: none runs now, unless a newer one does
+    fn end(&self, generation: u64) {
+        let ended = {
+            let mut running = self.running();
+            match &*running {
+                Some(r) if r.generation == generation => running.take(),
+                _ => None,
+            }
+        };
+        drop(ended);
+    }
+
+    /// Stop the program running; whether one was
+    fn stop(&self) -> bool {
+        let stopped = self.running().take();
+        stopped.is_some()
+    }
+
+    fn is_running(&self) -> bool {
+        self.running().is_some()
+    }
 }
 
 #[derive(Default)]
@@ -122,15 +176,8 @@ struct MotorCounters {
 struct MotorInner {
     name: Arc<str>,
     program: Box<Program>,
-    running: Mutex<Option<Running>>,
-    generations: AtomicU64,
+    running: Slot<oneshot::Sender<()>>,
     counters: MotorCounters,
-}
-
-impl MotorInner {
-    fn running(&self) -> std::sync::MutexGuard<'_, Option<Running>> {
-        self.running.lock().unwrap_or_else(|e| e.into_inner())
-    }
 }
 
 /// A motor neuron: commands addressed to its name start its program, which carries them out
@@ -153,8 +200,7 @@ impl Motor {
             inner: Arc::new(MotorInner {
                 name: Arc::from(name),
                 program: Box::new(move |motion| Box::pin(program(motion))),
-                running: Mutex::new(None),
-                generations: AtomicU64::new(0),
+                running: Slot::new(),
                 counters: MotorCounters::default(),
             }),
         }
@@ -179,13 +225,8 @@ impl Neuron for Motor {
             None => signal.payload.to_json().unwrap_or_default(),
         };
         let (stop, stopped) = oneshot::channel();
-        let generation = inner.generations.fetch_add(1, Ordering::Relaxed);
-        // The program running is preempted: its stop is dropped here
-        let preempted = inner.running().replace(Running {
-            generation,
-            _stop: stop,
-        });
-        drop(preempted);
+        // The program running is preempted: its stop is dropped
+        let generation = inner.running.start(stop);
         inner.counters.started.fetch_add(1, Ordering::Relaxed);
         let deadline = signal.urgency.deadline;
         let upward = outcome.is_none().then(|| signal.clone());
@@ -211,11 +252,11 @@ impl Neuron for Motor {
     }
 
     fn stop(&self) -> bool {
-        self.inner.running().take().is_some()
+        self.inner.running.stop()
     }
 
     fn describe(&self) -> serde_json::Value {
-        serde_json::json!({"running": self.inner.running().is_some()})
+        serde_json::json!({"running": self.inner.running.is_running()})
     }
 
     fn metrics(&self) -> serde_json::Value {
@@ -227,7 +268,7 @@ impl Neuron for Motor {
             "failed": load(&c.failed),
             "timed_out": load(&c.timed_out),
             "cancelled": load(&c.cancelled),
-            "running": u8::from(self.inner.running().is_some()),
+            "running": u8::from(self.inner.running.is_running()),
         })
     }
 }
@@ -276,15 +317,7 @@ impl Started {
             }
         };
         let inner = &self.inner;
-        {
-            let mut running = inner.running();
-            if running
-                .as_ref()
-                .is_some_and(|r| r.generation == self.generation)
-            {
-                *running = None;
-            }
-        }
+        inner.running.end(self.generation);
         let counters = &inner.counters;
         let counter = match &result {
             Ok(_) => &counters.done,
@@ -547,5 +580,7 @@ impl Taps {
     }
 }
 
+#[cfg(all(test, furnace_loom))]
+mod model_check;
 #[cfg(test)]
 mod tests;
