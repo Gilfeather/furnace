@@ -55,10 +55,12 @@
 //! ```
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError, TrySendError};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use sync::mpsc::{self, RecvTimeoutError, TryRecvError, TrySendError};
+use sync::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, thread};
+
+mod sync;
 
 /// What a batch is made of and what to do with one
 pub trait Batching: Send + Sync + 'static {
@@ -190,7 +192,7 @@ impl<I: Send + 'static> Engine<I> {
                 queue: queue.clone(),
                 counts: counts.clone(),
             };
-            std::thread::Builder::new()
+            thread::Builder::new()
                 .name(thread_name(i))
                 .spawn(move || worker.run())
                 .expect("failed to spawn a batching thread");
@@ -226,11 +228,31 @@ impl<I: Send + 'static> Engine<I> {
 
     fn send(&self, item: I, announced: bool) -> Result<(), I> {
         // Counted before it is sent, so a worker never takes an item that is not counted; the
-        // count is also what bounds the queue
-        let before = self.counts.waiting.fetch_add(1, Ordering::Relaxed);
-        if self.capacity.is_some_and(|capacity| before >= capacity) {
-            self.counts.waiting.fetch_sub(1, Ordering::Relaxed);
-            return Err(item);
+        // count is also what bounds the queue. A full queue is not counted into at all: an
+        // item counted and then refused would make the queue look full to the next one, while
+        // a worker may have emptied it in between.
+        let waiting = &self.counts.waiting;
+        match self.capacity {
+            None => {
+                waiting.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(capacity) => {
+                let mut counted = waiting.load(Ordering::Relaxed);
+                loop {
+                    if counted >= capacity {
+                        return Err(item);
+                    }
+                    match waiting.compare_exchange_weak(
+                        counted,
+                        counted + 1,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(now) => counted = now,
+                    }
+                }
+            }
         }
         let message = Message::Item {
             queued: Queued {
@@ -411,7 +433,11 @@ impl<I> Queue<I> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, loom))]
+mod model_check;
+
+// Under loom, the engine's parts work only inside a model
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
 
@@ -532,6 +558,53 @@ mod tests {
         assert_eq!(s.batches.recv().unwrap(), vec![1]);
         assert_eq!(s.batches.recv().unwrap(), vec![2]);
         assert_eq!(s.engine.waiting(), 0);
+    }
+
+    /// Submitters refused by a full queue never count into it, not even for a moment: the
+    /// queue never looks fuller than it is (src/model_check.rs checks every interleaving)
+    #[test]
+    fn refused_items_never_count_as_waiting() {
+        let capacity = 2;
+        let s = setup(
+            Config {
+                max_batch: 1,
+                capacity: Some(capacity),
+                ..ONE_WORKER
+            },
+            Duration::ZERO,
+        );
+        // The worker is held in its first batch, so the queue stays full and every other
+        // submit is refused
+        let held = s.hold.lock().unwrap();
+        s.engine.submit(None, 0).unwrap();
+        assert_eq!(s.batches.recv().unwrap(), vec![0]);
+        let done = AtomicBool::new(false);
+        let most = std::thread::scope(|scope| {
+            let watcher = scope.spawn(|| {
+                let mut most = 0;
+                while !done.load(Ordering::Relaxed) {
+                    most = most.max(s.engine.waiting());
+                }
+                most
+            });
+            let submitters: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        for i in 1..=2000 {
+                            let _ = s.engine.submit(None, i);
+                        }
+                    })
+                })
+                .collect();
+            for submitter in submitters {
+                submitter.join().unwrap();
+            }
+            done.store(true, Ordering::Relaxed);
+            watcher.join().unwrap()
+        });
+        assert!(most <= capacity, "{most} waiting in a queue of {capacity}");
+        assert_eq!(s.engine.waiting(), capacity);
+        drop(held);
     }
 
     #[test]
