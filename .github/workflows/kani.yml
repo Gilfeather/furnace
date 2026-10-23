@@ -105,6 +105,7 @@ jobs:
         - { package: furnace-server, harness: 'api::infer::verification::raw_fp32_decodes_lengths_12_to_17' }
         - { package: furnace-server, harness: 'api::infer::verification::raw_int64_decodes_lengths_12_to_17' }
         - { package: furnace-server, harness: 'api::infer::verification::raw_int32_decodes_lengths_12_to_17' }
+        - { package: furnace-server, harness: 'tensor::verification::joined_batch_keeps_its_contract' }
     steps:
     - name: Checkout code
       uses: actions/checkout@v5

@@ -353,11 +353,15 @@ mod verification {
         let bytes: [u8; N] = kani::any();
         let size = datatype.size();
         let values = decode_raw(datatype, &bytes);
-        assert_eq!(values.len(), N / size);
-        if values.is_empty() {
+        let count = N / size;
+        assert_eq!(values.len(), count);
+        // On the count known from `N` (equal to the length just asserted), not the vector's own
+        // length: for no values, CBMC then does not go on to index an empty vector's dangling
+        // pointer, which runs it out of memory
+        if count == 0 {
             return;
         }
-        let i = kani::any_where(|&i: &usize| i < values.len());
+        let i = kani::any_where(|&i: &usize| i < count);
         let at: [u8; 8] = std::array::from_fn(|k| bytes.get(i * size + k).copied().unwrap_or(0));
         let at4 = [at[0], at[1], at[2], at[3]];
         match (&values, datatype) {
