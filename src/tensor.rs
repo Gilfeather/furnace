@@ -127,7 +127,17 @@ impl From<&IoSpec> for TensorInfo {
 /// The number of elements of a tensor of `shape`; `None` when it does not fit in a `usize`,
 /// as a client's shape may not
 pub(crate) fn element_count(shape: &[usize]) -> Option<usize> {
-    shape.iter().try_fold(1usize, |n, &d| n.checked_mul(d))
+    shape.iter().try_fold(1usize, |n, &d| times(n, d))
+}
+
+/// One step of [`element_count`]: `n * d`, `None` past a `usize`. Its contract, the exact
+/// product, is what the proofs of the whole count build on.
+#[cfg_attr(kani, kani::ensures(|product: &Option<usize>| match product {
+    Some(product) => *product as u128 == n as u128 * d as u128,
+    None => n as u128 * d as u128 > usize::MAX as u128,
+}))]
+fn times(n: usize, d: usize) -> Option<usize> {
+    n.checked_mul(d)
 }
 
 /// Tensor elements in host memory
@@ -239,10 +249,18 @@ impl HostTensor {
 mod verification {
     use super::*;
 
+    /// `times` is the exact product of any two `usize`s, or `None` when it does not fit
+    #[kani::proof_for_contract(times)]
+    fn times_is_the_exact_product() {
+        times(kani::any(), kani::any());
+    }
+
     /// `element_count` of any shape of up to four dimensions, each of any size, never
     /// overflows: it is the exact product when that fits in a `usize`, and `None` only when the
-    /// product of the dimensions up to one of them does not
+    /// product of the dimensions up to one of them does not. Each step stands on `times`'s
+    /// proven contract.
     #[kani::proof]
+    #[kani::stub_verified(times)]
     #[kani::unwind(6)]
     fn element_count_is_the_exact_product() {
         let dims: [usize; 4] = kani::any();
