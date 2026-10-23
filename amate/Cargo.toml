@@ -18,3 +18,11 @@ readme = "README.md"
 [dev-dependencies]
 # Property tests only; the crate itself has no dependencies
 proptest = { version = "1.12", default-features = false, features = ["std"] }
+
+# Model checking with `RUSTFLAGS="--cfg loom"` (src/model_check.rs): every interleaving of the
+# workers and the submitters. Not part of a normal build.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
