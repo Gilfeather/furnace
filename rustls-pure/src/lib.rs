@@ -372,8 +372,19 @@ impl<C: Cipher> MessageEncrypter for Crypter<C> {
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
-        payload_len + 1 + TAG_LEN
+        sealed_payload_len(payload_len)
     }
+}
+
+/// A record's payload for `text_len` bytes of content: the content, its type, then the tag
+fn sealed_payload_len(text_len: usize) -> usize {
+    text_len + 1 + TAG_LEN
+}
+
+/// How much of a record's payload of `payload_len` bytes is the encrypted text, before its tag;
+/// a payload too short for a tag is refused
+fn sealed_text_len(payload_len: usize) -> Option<usize> {
+    payload_len.checked_sub(TAG_LEN)
 }
 
 impl<C: Cipher> MessageDecrypter for Crypter<C> {
@@ -383,9 +394,7 @@ impl<C: Cipher> MessageDecrypter for Crypter<C> {
         seq: u64,
     ) -> Result<InboundPlainMessage<'a>, Error> {
         let payload = &mut msg.payload;
-        let Some(plain_len) = payload.len().checked_sub(TAG_LEN) else {
-            return Err(Error::DecryptError);
-        };
+        let plain_len = sealed_text_len(payload.len()).ok_or(Error::DecryptError)?;
         let aad = make_tls13_aad(payload.len());
         let (text, tag) = payload.split_at_mut(plain_len);
         self.open(seq, &aad, text, tag)?;
@@ -414,6 +423,42 @@ const _: () = {
 
 // ---------------------------------------------------------------------------------------------
 // Key exchange
+
+// The shape of the peer's key share, checked here before any of it reaches a curve or ML-KEM:
+// apart from the cryptography, and without rustls's `Error` (whose drop Kani cannot bound), so
+// Kani proves these on every input (`mod verification`)
+
+fn invalid_key_share() -> Error {
+    rustls::PeerMisbehaved::InvalidKeyShare.into()
+}
+
+/// An X25519 share: 32 bytes
+fn x25519_share(share: &[u8]) -> Option<[u8; X25519_SHARE_LEN]> {
+    share.try_into().ok()
+}
+
+/// A P-256 or P-384 share: an uncompressed point, 4 then both coordinates, as TLS 1.3 requires
+/// (RFC 8446 section 4.2.8.2); compressed points and the point at infinity are refused
+fn ec_share(share: &[u8], coordinate_len: usize) -> Option<&[u8]> {
+    match share {
+        [4, coordinates @ ..] if coordinates.len() == 2 * coordinate_len => Some(share),
+        _ => None,
+    }
+}
+
+/// An X25519MLKEM768 share: ML-KEM's part of `mlkem_len` bytes (the client's encapsulation key or
+/// the server's ciphertext), then X25519's, and nothing else
+fn hybrid_share(share: &[u8], mlkem_len: usize) -> Option<(&[u8], &[u8])> {
+    (share.len() == mlkem_len + X25519_SHARE_LEN).then(|| share.split_at(mlkem_len))
+}
+
+/// `first`, then `second`: the hybrid's shares and its secret
+fn concat(first: &[u8], second: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(first.len() + second.len());
+    bytes.extend_from_slice(first);
+    bytes.extend_from_slice(second);
+    bytes
+}
 
 #[derive(Debug)]
 struct X25519Group;
@@ -445,15 +490,13 @@ impl X25519Exchange {
 
 impl ActiveKeyExchange for X25519Exchange {
     fn complete(self: Box<Self>, peer_pub_key: &[u8]) -> Result<SharedSecret, Error> {
-        let peer: [u8; 32] = peer_pub_key
-            .try_into()
-            .map_err(|_| Error::from(rustls::PeerMisbehaved::InvalidKeyShare))?;
+        let peer = x25519_share(peer_pub_key).ok_or_else(invalid_key_share)?;
         let shared = self
             .secret
             .diffie_hellman(&x25519_dalek::PublicKey::from(peer));
         // An all-zero result means a low-order peer key (RFC 8446 section 7.4.2)
         if !shared.was_contributory() {
-            return Err(rustls::PeerMisbehaved::InvalidKeyShare.into());
+            return Err(invalid_key_share());
         }
         Ok(SharedSecret::from(&shared.as_bytes()[..]))
     }
@@ -496,12 +539,10 @@ struct Secp256r1Exchange {
 
 impl ActiveKeyExchange for Secp256r1Exchange {
     fn complete(self: Box<Self>, peer_pub_key: &[u8]) -> Result<SharedSecret, Error> {
-        // TLS 1.3 key shares are uncompressed points (RFC 8446 section 4.2.8.2)
-        if peer_pub_key.first() != Some(&4) {
-            return Err(rustls::PeerMisbehaved::InvalidKeyShare.into());
-        }
-        let peer = p256::PublicKey::from_sec1_bytes(peer_pub_key)
-            .map_err(|_| Error::from(rustls::PeerMisbehaved::InvalidKeyShare))?;
+        let peer = p256::PublicKey::from_sec1_bytes(
+            ec_share(peer_pub_key, 32).ok_or_else(invalid_key_share)?,
+        )
+        .map_err(|_| invalid_key_share())?;
         let shared = self.secret.diffie_hellman(&peer);
         Ok(SharedSecret::from(&shared.raw_secret_bytes()[..]))
     }
@@ -542,11 +583,10 @@ struct Secp384r1Exchange {
 
 impl ActiveKeyExchange for Secp384r1Exchange {
     fn complete(self: Box<Self>, peer_pub_key: &[u8]) -> Result<SharedSecret, Error> {
-        if peer_pub_key.first() != Some(&4) {
-            return Err(rustls::PeerMisbehaved::InvalidKeyShare.into());
-        }
-        let peer = p384::PublicKey::from_sec1_bytes(peer_pub_key)
-            .map_err(|_| Error::from(rustls::PeerMisbehaved::InvalidKeyShare))?;
+        let peer = p384::PublicKey::from_sec1_bytes(
+            ec_share(peer_pub_key, 48).ok_or_else(invalid_key_share)?,
+        )
+        .map_err(|_| invalid_key_share())?;
         let shared = self.secret.diffie_hellman(&peer);
         Ok(SharedSecret::from(&shared.raw_secret_bytes()[..]))
     }
@@ -578,9 +618,10 @@ impl X25519MlKem768Group {
     /// The client's side, from an ML-KEM seed (64 random bytes) and an X25519 key
     fn start_with(seed: ml_kem::Seed, x25519: X25519Exchange) -> X25519MlKem768Exchange {
         let decapsulation = ml_kem::DecapsulationKey::<ml_kem::MlKem768>::from_seed(seed);
-        let mut share = Vec::with_capacity(MLKEM768_ENCAPSULATION_KEY_LEN + X25519_SHARE_LEN);
-        share.extend_from_slice(&decapsulation.encapsulation_key().to_bytes());
-        share.extend_from_slice(x25519.public.as_bytes());
+        let share = concat(
+            &decapsulation.encapsulation_key().to_bytes(),
+            x25519.public.as_bytes(),
+        );
         X25519MlKem768Exchange {
             decapsulation,
             x25519,
@@ -595,20 +636,16 @@ impl X25519MlKem768Group {
         m: &ml_kem::B32,
         x25519: X25519Exchange,
     ) -> Result<CompletedKeyExchange, Error> {
-        if client_share.len() != MLKEM768_ENCAPSULATION_KEY_LEN + X25519_SHARE_LEN {
-            return Err(rustls::PeerMisbehaved::InvalidKeyShare.into());
-        }
-        let (key, x25519_share) = client_share.split_at(MLKEM768_ENCAPSULATION_KEY_LEN);
+        let (key, x25519_share) = hybrid_share(client_share, MLKEM768_ENCAPSULATION_KEY_LEN)
+            .ok_or_else(invalid_key_share)?;
         let key = ml_kem::Key::<ml_kem::EncapsulationKey<ml_kem::MlKem768>>::try_from(key)
-            .map_err(|_| Error::from(rustls::PeerMisbehaved::InvalidKeyShare))?;
+            .map_err(|_| invalid_key_share())?;
         // Refuses keys whose coefficients are not reduced (FIPS 203 section 7.2)
         let key = ml_kem::EncapsulationKey::<ml_kem::MlKem768>::new(&key)
-            .map_err(|_| Error::from(rustls::PeerMisbehaved::InvalidKeyShare))?;
+            .map_err(|_| invalid_key_share())?;
         let (ciphertext, mlkem_secret) = key.encapsulate_deterministic(m);
         let mlkem_secret = Zeroizing::new(mlkem_secret);
-        let mut pub_key = Vec::with_capacity(MLKEM768_CIPHERTEXT_LEN + X25519_SHARE_LEN);
-        pub_key.extend_from_slice(&ciphertext);
-        pub_key.extend_from_slice(x25519.public.as_bytes());
+        let pub_key = concat(&ciphertext, x25519.public.as_bytes());
         let x25519_secret = Box::new(x25519).complete(x25519_share)?;
         Ok(CompletedKeyExchange {
             group: NamedGroup::X25519MLKEM768,
@@ -620,11 +657,8 @@ impl X25519MlKem768Group {
 
 /// ML-KEM's secret, then X25519's
 fn hybrid_secret(mlkem: &[u8], x25519: &[u8]) -> SharedSecret {
-    let mut secret = Vec::with_capacity(mlkem.len() + x25519.len());
-    secret.extend_from_slice(mlkem);
-    secret.extend_from_slice(x25519);
     // rustls's SharedSecret wipes it when dropped
-    SharedSecret::from(secret)
+    SharedSecret::from(concat(mlkem, x25519))
 }
 
 impl SupportedKxGroup for X25519MlKem768Group {
@@ -659,12 +693,10 @@ struct X25519MlKem768Exchange {
 
 impl ActiveKeyExchange for X25519MlKem768Exchange {
     fn complete(self: Box<Self>, server_share: &[u8]) -> Result<SharedSecret, Error> {
-        if server_share.len() != MLKEM768_CIPHERTEXT_LEN + X25519_SHARE_LEN {
-            return Err(rustls::PeerMisbehaved::InvalidKeyShare.into());
-        }
-        let (ciphertext, x25519_share) = server_share.split_at(MLKEM768_CIPHERTEXT_LEN);
+        let (ciphertext, x25519_share) =
+            hybrid_share(server_share, MLKEM768_CIPHERTEXT_LEN).ok_or_else(invalid_key_share)?;
         let ciphertext = ml_kem::Ciphertext::<ml_kem::MlKem768>::try_from(ciphertext)
-            .map_err(|_| Error::from(rustls::PeerMisbehaved::InvalidKeyShare))?;
+            .map_err(|_| invalid_key_share())?;
         // A ciphertext that was tampered with gives an unrelated secret (FIPS 203's implicit
         // rejection), so the handshake fails at the Finished messages
         let mlkem_secret = Zeroizing::new(self.decapsulation.decapsulate(&ciphertext));
@@ -965,10 +997,9 @@ impl SignatureVerificationAlgorithm for Ed25519Verify {
         message: &[u8],
         signature: &[u8],
     ) -> Result<(), InvalidSignature> {
-        let key: [u8; 32] = public_key.try_into().map_err(|_| InvalidSignature)?;
+        let (key, signature) = ed25519_parts(public_key, signature)?;
         let key = ed25519_dalek::VerifyingKey::from_bytes(&key).map_err(|_| InvalidSignature)?;
-        let signature =
-            ed25519_dalek::Signature::from_slice(signature).map_err(|_| InvalidSignature)?;
+        let signature = ed25519_dalek::Signature::from_bytes(&signature);
         // Strict: rejects malleable signatures and small-order keys
         key.verify_strict(message, &signature)
             .map_err(|_| InvalidSignature)
@@ -980,6 +1011,18 @@ impl SignatureVerificationAlgorithm for Ed25519Verify {
 
     fn signature_alg_id(&self) -> AlgorithmIdentifier {
         alg_id::ED25519
+    }
+}
+
+/// An Ed25519 public key and signature: 32 and 64 bytes, as RFC 8032 has them; the key is the
+/// raw one inside the certificate's SubjectPublicKeyInfo, which webpki takes out
+fn ed25519_parts(
+    public_key: &[u8],
+    signature: &[u8],
+) -> Result<([u8; 32], [u8; 64]), InvalidSignature> {
+    match (public_key.try_into(), signature.try_into()) {
+        (Ok(key), Ok(signature)) => Ok((key, signature)),
+        _ => Err(InvalidSignature),
     }
 }
 
@@ -1006,3 +1049,161 @@ static SUPPORTED_SIG_ALGS: WebPkiSupportedAlgorithms = WebPkiSupportedAlgorithms
 
 #[cfg(test)]
 mod tests;
+
+// Kani's proofs of the code above that takes the peer's bytes: every input up to the bounds
+// given, not samples. The cryptography is the RustCrypto crates' and the protocol rustls's, so
+// these cover what rustls-pure itself does with a share, a record or a signature before handing
+// it on. `cargo kani -p rustls-pure` (Linux; .github/workflows/kani.yml)
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Any length up to `N`
+    fn any_len<const N: usize>() -> usize {
+        kani::any_where(|&len: &usize| len <= N)
+    }
+
+    /// Exactly the 32-byte shares are taken for X25519, as they are
+    #[kani::proof]
+    #[kani::unwind(41)]
+    fn x25519_shares_are_exactly_32_bytes() {
+        let bytes: [u8; 40] = kani::any();
+        let share = &bytes[..any_len::<40>()];
+        match x25519_share(share) {
+            Some(key) => {
+                assert!(share.len() == 32);
+                let i = kani::any_where(|&i: &usize| i < 32);
+                assert!(key[i] == share[i]);
+            }
+            None => {
+                assert!(share.len() != 32);
+            }
+        }
+    }
+
+    /// P-256 and P-384 take exactly the uncompressed points of their size, and pass them on
+    /// untouched: the curve crates never see a compressed point, the point at infinity or bytes
+    /// past the point
+    #[kani::proof]
+    fn ec_shares_are_uncompressed_points_of_the_curve() {
+        let bytes: [u8; 100] = kani::any();
+        let share = &bytes[..any_len::<100>()];
+        let coordinate_len = if kani::any() { 32 } else { 48 };
+        let uncompressed = share.len() == 1 + 2 * coordinate_len && share[0] == 4;
+        match ec_share(share, coordinate_len) {
+            Some(point) => {
+                assert!(uncompressed);
+                assert!(point.as_ptr() == share.as_ptr() && point.len() == share.len());
+            }
+            None => {
+                assert!(!uncompressed);
+            }
+        }
+    }
+
+    /// A hybrid share of any length: refused unless it is ML-KEM's part and X25519's exactly,
+    /// and split where ML-KEM's ends, for the client's share and the server's
+    #[kani::proof]
+    fn hybrid_shares_split_where_ml_kem_ends() {
+        const MAX: usize = MLKEM768_ENCAPSULATION_KEY_LEN + X25519_SHARE_LEN + 8;
+        // Only the length matters to the split, so the bytes need not be symbolic
+        let bytes = [0u8; MAX];
+        let share = &bytes[..any_len::<MAX>()];
+        let mlkem_len = if kani::any() {
+            MLKEM768_ENCAPSULATION_KEY_LEN
+        } else {
+            MLKEM768_CIPHERTEXT_LEN
+        };
+        match hybrid_share(share, mlkem_len) {
+            Some((mlkem, x25519)) => {
+                assert!(share.len() == mlkem_len + X25519_SHARE_LEN);
+                assert!(mlkem.as_ptr() == share.as_ptr() && mlkem.len() == mlkem_len);
+                assert!(x25519.as_ptr() == share[mlkem_len..].as_ptr());
+                assert!(x25519.len() == X25519_SHARE_LEN);
+            }
+            None => {
+                assert!(share.len() != mlkem_len + X25519_SHARE_LEN);
+            }
+        }
+    }
+
+    /// What one side puts together, the other takes apart into the same two parts
+    fn hybrid_round_trip<const MLKEM: usize>() {
+        let mlkem: [u8; MLKEM] = kani::any();
+        let x25519: [u8; X25519_SHARE_LEN] = kani::any();
+        let share = concat(&mlkem, &x25519);
+        assert!(share.len() == MLKEM + X25519_SHARE_LEN);
+        let (mlkem_part, x25519_part) = hybrid_share(&share, MLKEM).unwrap();
+        let i = kani::any_where(|&i: &usize| i < MLKEM);
+        assert!(mlkem_part.len() == MLKEM && mlkem_part[i] == mlkem[i]);
+        let j = kani::any_where(|&j: &usize| j < X25519_SHARE_LEN);
+        assert!(x25519_part.len() == X25519_SHARE_LEN && x25519_part[j] == x25519[j]);
+        assert!(x25519_share(x25519_part).unwrap() == x25519);
+    }
+
+    /// The client's share (encapsulation key, then X25519's key), as the server reads it
+    #[kani::proof]
+    #[kani::unwind(33)]
+    fn client_hybrid_shares_round_trip() {
+        hybrid_round_trip::<MLKEM768_ENCAPSULATION_KEY_LEN>();
+    }
+
+    /// The server's share (ciphertext, then X25519's key), as the client reads it
+    #[kani::proof]
+    #[kani::unwind(33)]
+    fn server_hybrid_shares_round_trip() {
+        hybrid_round_trip::<MLKEM768_CIPHERTEXT_LEN>();
+    }
+
+    /// The hybrid's secret: ML-KEM's 32 bytes, then X25519's 32, nothing else (the bound covers
+    /// its wiping when dropped)
+    #[kani::proof]
+    #[kani::unwind(65)]
+    fn the_hybrid_secret_is_ml_kem_then_x25519() {
+        let mlkem: [u8; 32] = kani::any();
+        let x25519: [u8; 32] = kani::any();
+        let secret = hybrid_secret(&mlkem, &x25519);
+        let bytes = secret.secret_bytes();
+        let i = kani::any_where(|&i: &usize| i < 32);
+        assert!(bytes.len() == 64 && bytes[i] == mlkem[i] && bytes[32 + i] == x25519[i]);
+    }
+
+    /// A record's payload of any length: refused if shorter than a tag, never an underflow; and
+    /// a record this side seals, of any content up to TLS's largest (2^14 bytes and up to 256 of
+    /// padding, RFC 8446 section 5.2), opens to its content and type
+    #[kani::proof]
+    fn record_lengths_never_underflow_or_overflow() {
+        let payload_len: usize = kani::any();
+        match sealed_text_len(payload_len) {
+            Some(text_len) => {
+                assert!(text_len + TAG_LEN == payload_len);
+            }
+            None => {
+                assert!(payload_len < TAG_LEN);
+            }
+        }
+        let text_len = kani::any_where(|&len: &usize| len <= (1 << 14) + 256);
+        assert!(sealed_text_len(sealed_payload_len(text_len)) == Some(text_len + 1));
+    }
+
+    /// Exactly the 32-byte keys and 64-byte signatures go on to Ed25519, as they are
+    #[kani::proof]
+    #[kani::unwind(73)]
+    fn ed25519_keys_and_signatures_have_their_sizes() {
+        let key_bytes: [u8; 40] = kani::any();
+        let signature_bytes: [u8; 72] = kani::any();
+        let key = &key_bytes[..any_len::<40>()];
+        let signature = &signature_bytes[..any_len::<72>()];
+        match ed25519_parts(key, signature) {
+            Ok((key_part, signature_part)) => {
+                assert!(key.len() == 32 && signature.len() == 64);
+                let i = kani::any_where(|&i: &usize| i < 32);
+                let j = kani::any_where(|&j: &usize| j < 64);
+                assert!(key_part[i] == key[i] && signature_part[j] == signature[j]);
+            }
+            Err(_) => {
+                assert!(key.len() != 32 || signature.len() != 64);
+            }
+        }
+    }
+}

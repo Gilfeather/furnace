@@ -45,3 +45,7 @@ ml-kem = { version = "0.3.3", features = ["zeroize"] }
 serde_json = "1.0"
 # Random and broken input (src/tests/properties.rs), in place of fuzzing: pure Rust
 proptest = { version = "1.12", default-features = false, features = ["std"] }
+
+[lints.rust]
+# Kani's proof harnesses (`#[cfg(kani)] mod verification`, set by `cargo kani`)
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
