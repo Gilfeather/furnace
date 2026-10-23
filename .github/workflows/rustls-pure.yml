@@ -4,16 +4,14 @@ name: rustls-pure
 # requests that change it, with a check of its own machine code that handles secrets; and, weekly
 # only, against the newest rustls its version range allows and on its minimum supported Rust
 # version, which depend on what others release. Its unit, handshake and property tests run in the
-# CI workflow with the rest.
+# CI workflow with the rest. Every pull request runs `rustls-pure required`, the job to require
+# before merging.
 on:
   schedule:
     # Mondays, 04:37 UTC
     - cron: '37 4 * * 1'
   pull_request:
     branches: [ main ]
-    paths:
-      - 'rustls-pure/**'
-      - '.github/workflows/rustls-pure.yml'
   workflow_dispatch:
 
 permissions:
@@ -22,12 +20,34 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-# A newer push to the same pull request makes an older run redundant
+# On a pull request a newer push makes an older run redundant; every other run (scheduled, by
+# hand) is a group of its own and runs to the end
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.changes.outputs.relevant }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        filter: blob:none
+
+    - name: Files this workflow checks
+      id: changes
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: >-
+        bash .github/changed-files.sh 'rustls-pure/**' '.github/workflows/rustls-pure.yml'
+        '.github/changed-files.sh'
+
   latest-rustls:
     name: Newest rustls (${{ matrix.os }})
     if: github.event_name != 'pull_request'
@@ -90,6 +110,8 @@ jobs:
   # (ct-asm.sh; the timing tests are in rustls-pure-ct.yml)
   machine-code:
     name: Constant-time machine code (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -112,6 +134,8 @@ jobs:
   # checks cannot be skipped quietly
   interop-linux:
     name: Interoperability (Linux)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     # Debian 13 has OpenSSL 3.5; the Ubuntu runner's is 3.0, without ML-KEM
     container: rust:1-trixie
@@ -129,6 +153,8 @@ jobs:
 
   interop-macos:
     name: Interoperability (macOS)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: macos-latest
     steps:
     - name: Checkout code
@@ -151,3 +177,23 @@ jobs:
       env:
         REQUIRE_MLKEM: '1'
       run: bash rustls-pure/interop/run.sh
+
+  # The check to require before merging: every job above passed, or was skipped as not needed
+  required:
+    name: rustls-pure required
+    if: always()
+    needs: [changes, latest-rustls, msrv, machine-code, interop-linux, interop-macos]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Every job passed or was skipped
+      env:
+        NEEDS: ${{ toJSON(needs) }}
+        RESULTS: ${{ join(needs.*.result, ' ') }}
+      run: |
+        echo "$NEEDS"
+        for result in $RESULTS; do
+          case $result in
+            success|skipped) ;;
+            *) echo "::error::A job ended in $result"; exit 1 ;;
+          esac
+        done

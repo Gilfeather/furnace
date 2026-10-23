@@ -292,10 +292,14 @@ Closes #issue_number
 
 ### Review Process
 
-1. Maintainers will review your PR
-2. Address any feedback
-3. Once approved, your PR will be merged
-4. CI will automatically run tests and checks
+1. CI runs on every PR: each workflow ends in a `<Workflow> required` check (`CI required`,
+   `Kani required`, ...), and those checks must pass before the PR can be merged. A workflow
+   skips its heavy jobs when the PR changes none of the files it checks, and its required
+   check still passes
+2. Maintainers will review your PR
+3. Address any feedback
+4. Once approved and green, your PR will be merged. Pushes to main run nothing again; the full
+   matrix (Windows, macOS, coverage and the rest) runs nightly on main
 
 ## Release Process
 

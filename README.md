@@ -1,6 +1,6 @@
 # Furnace
 
-[![Build Status](https://github.com/Gilfeather/furnace/actions/workflows/ci.yml/badge.svg)](https://github.com/Gilfeather/furnace/actions/workflows/ci.yml)
+[![Build Status](https://github.com/Gilfeather/furnace/actions/workflows/ci.yml/badge.svg?branch=main&event=schedule)](https://github.com/Gilfeather/furnace/actions/workflows/ci.yml?query=branch%3Amain+event%3Aschedule)
 [![crates.io](https://img.shields.io/crates/v/furnace-server)](https://crates.io/crates/furnace-server)
 [![Burn](https://img.shields.io/badge/burn-0.22-orange)](https://github.com/tracel-ai/burn)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)

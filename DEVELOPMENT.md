@@ -85,17 +85,31 @@ cargo fmt --check
 cargo deny check
 ```
 
+## When CI Runs
+
+- **Pull requests to main** run every verification workflow: CI, Kani, TLA+, Loom, Miri,
+  rustls-pure, Security Audit and KServe end-to-end. Each starts with a `Changed files` job
+  (`.github/changed-files.sh`, the pull request's diff from its merge base against the
+  workflow's patterns) and runs its heavy jobs only when the pull request changes a file they
+  check. Each ends in one gate job, `<Workflow> required`, which passes when every job passed
+  or was skipped as not needed, and fails when one failed or was cancelled. A newer push to
+  the same pull request cancels the older run.
+- **Pushes to main** run nothing: what is merged has passed as a pull request. Only the
+  release workflows run on tags.
+- **Nightly on main** CI runs everything pull requests leave out (Windows and macOS, beta and
+  the MSRV, Metal, the vendored kernels, the bench harnesses, furnace-candle, the Kubernetes
+  manifests, coverage); Kani, TLA+ and Loom run nightly too, and `kani-nightly.yml` runs the
+  Kani harnesses too long for a pull request. Miri, rustls-pure (with the newest rustls and its
+  MSRV), Security Audit, KServe end-to-end, the constant-time tests, the soak test and the
+  benchmarks run weekly. Scheduled runs are never cancelled. The README's CI badge shows the
+  last nightly CI run on main.
+
 ## GitHub Branch Protection
 
-To protect the main branch:
-
-1. Go to **Settings** → **Branches** in GitHub
-2. Add rule for `main` branch
-3. Enable:
-   - ✅ Require pull request reviews before merging
-   - ✅ Require status checks to pass before merging
-   - ✅ Require branches to be up to date before merging
-   - ✅ Include administrators
+`main` requires the gate jobs to pass before a pull request is merged (Settings → Branches →
+`main` → Require status checks to pass): `CI required`, `Kani required`, `TLA+ required`,
+`Loom required`, `Miri required`, `rustls-pure required`, `Security Audit required` and
+`KServe end-to-end required`. The branch need not be up to date with main first.
 
 ## Local Development
 

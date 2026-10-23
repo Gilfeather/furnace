@@ -3,39 +3,24 @@ name: CI
 # Pull requests run the few jobs that catch almost everything: tests and lints on Linux, and
 # every feature combination type-checked in one job. The rest (other platforms, toolchains,
 # the GPU and Metal backends, the vendored kernels, the bench harnesses, furnace-candle,
-# coverage) runs on main after a merge and weekly. Changes to docs alone run nothing, except to
-# the Markdown files whose Rust examples compile as doc-tests (src/lib.rs, furnace-burn's and
-# furnace-candle's src/lib.rs); later patterns override earlier ones.
+# coverage) runs nightly on main, with the pull request jobs too. A push to main runs nothing:
+# what is merged has passed as a pull request. The README's badge shows the last nightly run on
+# main (`?branch=main&event=schedule`), so it is always a finished run, never a cancelled one.
+#
+# Every pull request runs `CI required`, the job to require before merging. Its jobs are skipped
+# when the pull request changes only docs, except the Markdown files whose Rust examples compile
+# as doc-tests (src/lib.rs, furnace-burn's and furnace-candle's src/lib.rs); the patterns in
+# `changes` are in GitHub's `paths` syntax, later ones overriding earlier ones.
 #
 # The workspace's default members are furnace-server (the root), furnace-burn and furnace-cli:
 # `cargo test`, `cargo clippy` and `cargo check` without `-p` cover those three (furnace-demo is
 # linted with `-p` in the features job). The built-in ONNX models go in furnace-burn/models/.
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - '**'
-      - '!**.md'
-      - '!docs/**'
-      - '!LICENSE*'
-      - 'README.md'
-      - 'CONTRIBUTING.md'
-      - 'examples/README.md'
-      - 'docs/*.md'
   pull_request:
     branches: [ main ]
-    paths:
-      - '**'
-      - '!**.md'
-      - '!docs/**'
-      - '!LICENSE*'
-      - 'README.md'
-      - 'CONTRIBUTING.md'
-      - 'examples/README.md'
-      - 'docs/*.md'
   schedule:
-    # Mondays, 03:17 UTC
-    - cron: '17 3 * * 1'
+    # Every night, 03:17 UTC
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 env:
@@ -46,20 +31,43 @@ env:
   MNIST_URL: https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx
 
 
-# On a pull request a newer push makes an older run redundant; on main every commit runs to the
-# end, so the README badge shows a result, never a cancelled run
+# On a pull request a newer push makes an older run redundant; every other run (nightly, by
+# hand) is a group of its own and runs to the end
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.changes.outputs.relevant }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        filter: blob:none
+
+    - name: Files this workflow checks
+      id: changes
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: >-
+        bash .github/changed-files.sh '**' '!**.md' '!docs/**' '!LICENSE*'
+        'README.md' 'CONTRIBUTING.md' 'examples/README.md' 'docs/*.md'
+
   test:
     name: Test Suite
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # Linux on pull requests; Windows and macOS too on main
+        # Linux on pull requests; Windows and macOS too nightly
         os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "windows-latest", "macos-latest"]') }}
         rust: [stable]
 
@@ -115,6 +123,8 @@ jobs:
   # a type check that also fails on the unused-import warnings an odd combination produces.
   features:
     name: Features and pure-Rust tree
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -197,7 +207,7 @@ jobs:
   # Beta and the MSRV only need to compile: a type check, no tests
   toolchains:
     name: Type check (${{ matrix.rust }})
-    # On main and weekly only: pull requests run the checks above
+    # Nightly only: pull requests run the checks above
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
@@ -227,7 +237,7 @@ jobs:
 
   metal:
     name: Features (metal, macOS)
-    # On main and weekly only: pull requests run the checks above
+    # Nightly only: pull requests run the checks above
     if: github.event_name != 'pull_request'
     runs-on: macos-latest
     steps:
@@ -256,7 +266,7 @@ jobs:
   # they share (benches/common) are a path dependency, which a harness's clippy does not lint.
   bench-harnesses:
     name: Benchmark harnesses
-    # On main and weekly only: pull requests run the checks above
+    # Nightly only: pull requests run the checks above
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -302,7 +312,7 @@ jobs:
 
   llm-candle:
     name: furnace-candle (GGUF LLMs through candle)
-    # On main and weekly only: pull requests run the checks above
+    # Nightly only: pull requests run the checks above
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -327,7 +337,7 @@ jobs:
 
   kubernetes:
     name: Kubernetes manifests
-    # On main and weekly only: pull requests run the checks above
+    # Nightly only: pull requests run the checks above
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -365,7 +375,7 @@ jobs:
 
   vendored-kernels:
     name: Vendored CPU kernels (${{ matrix.os }})
-    # On main and weekly only: pull requests run the checks above
+    # Nightly only: pull requests run the checks above
     if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
     strategy:
@@ -403,7 +413,7 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
-    # Ten minutes of instrumented build; on main only, not on every pull request
+    # Ten minutes of instrumented build; nightly only, not on every pull request
     if: github.event_name != 'pull_request'
     steps:
     - name: Checkout code
@@ -444,6 +454,7 @@ jobs:
         token: ${{ secrets.CODECOV_TOKEN }}
       continue-on-error: true
 
+  # Nightly only: that the benchmark compiles (bench.yml runs the benchmarks)
   benchmarks:
     name: Benchmarks
     runs-on: ubuntu-latest
@@ -474,3 +485,25 @@ jobs:
 
     - name: Run benchmarks
       run: cargo bench -p furnace-burn --bench inference_benchmark --features onnx --no-run
+
+  # The check to require before merging: every job above passed, or was skipped as not needed
+  # (a pull request that changes only docs, or a nightly job). Also on a nightly run, where
+  # nothing is skipped.
+  required:
+    name: CI required
+    if: always()
+    needs: [changes, test, features, toolchains, metal, bench-harnesses, llm-candle, kubernetes, vendored-kernels, coverage, benchmarks]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Every job passed or was skipped
+      env:
+        NEEDS: ${{ toJSON(needs) }}
+        RESULTS: ${{ join(needs.*.result, ' ') }}
+      run: |
+        echo "$NEEDS"
+        for result in $RESULTS; do
+          case $result in
+            success|skipped) ;;
+            *) echo "::error::A job ended in $result"; exit 1 ;;
+          esac
+        done
