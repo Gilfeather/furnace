@@ -30,6 +30,7 @@ env:
   KSERVE_VERSION: v0.21.0
 
 jobs:
+  # Which jobs this run needs (.github/relevance)
   changes:
     name: Changed files
     runs-on: ubuntu-latest
@@ -47,9 +48,7 @@ jobs:
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      run: >-
-        bash .github/changed-files.sh 'deploy/kserve/**' '.github/workflows/kserve-e2e.yml'
-        '.github/changed-files.sh'
+      run: bash .github/changed-files.sh kserve-e2e
 
   kserve:
     name: ResNet-18 on KServe (kind)

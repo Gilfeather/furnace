@@ -7,8 +7,9 @@ name: Miri
 # own but furnace-burn's weight mapping, which Miri cannot run (it maps a file), and
 # rustls-pure forbids it. Both aliasing models Rust may adopt: Stacked Borrows, and Tree
 # Borrows. Strict provenance under both: a pointer is never made up from an integer. On pull
-# requests that change kamui, and weekly on main. Every pull request runs `Miri required`, the
-# job to require before merging.
+# requests that change kamui's code or what it is built from (.github/relevance), and weekly on
+# main when kamui changed since the last successful weekly run. Every pull request runs `Miri
+# required`, the job to require before merging.
 #
 # On Linux only: there `System` hands over-aligned blocks to `posix_memalign`, which Miri
 # models. Windows' `System` keeps a header in front of an over-aligned block and reads it on
@@ -35,9 +36,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Which jobs this run needs (.github/relevance)
   changes:
     name: Changed files
     runs-on: ubuntu-latest
+    # actions: read, to find the last successful scheduled run
+    permissions:
+      contents: read
+      actions: read
     outputs:
       relevant: ${{ steps.changes.outputs.relevant }}
     steps:
@@ -52,9 +58,8 @@ jobs:
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      run: >-
-        bash .github/changed-files.sh 'kamui/**' 'Cargo.toml' 'Cargo.lock'
-        '.github/workflows/miri.yml' '.github/changed-files.sh'
+        GH_TOKEN: ${{ github.token }}
+      run: bash .github/changed-files.sh miri
 
   miri:
     name: Miri (${{ matrix.model.name }})

@@ -5,7 +5,9 @@ and model-checked with TLC: the motor side's hierarchy, the nerves' lanes, and h
 routed. Each spec follows the Rust code it names closely enough to catch its bugs, and stays
 small and bounded, so that TLC explores every state in seconds.
 [`.github/workflows/tla.yml`](../.github/workflows/tla.yml) checks every model on the pull
-requests that touch `specs/` or `src/nerve/`, and nightly on main.
+requests that change a spec or a model, and nightly on main when they changed. A change to
+the Rust code a spec follows does not run TLC, which reads only the specs: update the spec with
+it.
 
 | Spec | Models | The Rust code |
 | --- | --- | --- |

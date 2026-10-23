@@ -5,7 +5,7 @@ name: rustls-pure
 # only, against the newest rustls its version range allows and on its minimum supported Rust
 # version, which depend on what others release. Its unit, handshake and property tests run in the
 # CI workflow with the rest. Every pull request runs `rustls-pure required`, the job to require
-# before merging.
+# before merging; each job runs when the pull request changes what it reads (.github/relevance).
 on:
   schedule:
     # Mondays, 04:37 UTC
@@ -27,11 +27,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Which jobs this run needs (.github/relevance)
   changes:
     name: Changed files
     runs-on: ubuntu-latest
     outputs:
-      relevant: ${{ steps.changes.outputs.relevant }}
+      machine-code: ${{ steps.changes.outputs['machine-code'] }}
+      interop: ${{ steps.changes.outputs.interop }}
+      targets: ${{ steps.changes.outputs.targets }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
@@ -44,9 +47,7 @@ jobs:
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      run: >-
-        bash .github/changed-files.sh 'rustls-pure/**' '.github/workflows/rustls-pure.yml'
-        '.github/changed-files.sh'
+      run: bash .github/changed-files.sh rustls-pure
 
   latest-rustls:
     name: Newest rustls (${{ matrix.os }})
@@ -107,11 +108,12 @@ jobs:
       run: cargo test -p rustls-pure --locked
 
   # rustls-pure's own code that handles secrets, as compiled: no branch, call or indexed load
-  # (ct-asm.sh; the timing tests are in rustls-pure-ct.yml)
+  # (ct-asm.sh; the timing tests are in rustls-pure-ct.yml, which runs this check weekly too, so
+  # the weekly run here leaves it out)
   machine-code:
     name: Constant-time machine code (${{ matrix.os }})
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: github.event_name != 'schedule' && needs.changes.outputs['machine-code'] == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -135,7 +137,7 @@ jobs:
   interop-linux:
     name: Interoperability (Linux)
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.interop == 'true'
     runs-on: ubuntu-latest
     # Debian 13 has OpenSSL 3.5; the Ubuntu runner's is 3.0, without ML-KEM
     container: rust:1-trixie
@@ -154,7 +156,7 @@ jobs:
   interop-macos:
     name: Interoperability (macOS)
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.interop == 'true'
     runs-on: macos-latest
     steps:
     - name: Checkout code

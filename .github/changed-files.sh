@@ -1,20 +1,70 @@
 #!/usr/bin/env bash
-# Whether a pull request changes a file a workflow checks: writes `relevant=true` or
-# `relevant=false` to $GITHUB_OUTPUT, for the workflow's heavy jobs to run on or skip. The
-# arguments are patterns as GitHub's `paths` filters take them, applied in order with a later one
-# overriding an earlier one: `**` matches any part of a path, `*` and `?` stay within one
-# directory, and a leading `!` leaves the files it matches out again. The pull request's changes
-# are those since its merge base with the base branch (BASE_SHA and HEAD_SHA, from the event;
-# the checkout needs their history). Every run that is not for a pull request (the scheduled and
-# manual ones) checks everything.
+# Which of a workflow's jobs a run needs: for each output the workflow has in .github/relevance,
+# writes `<output>=true` or `<output>=false` to $GITHUB_OUTPUT (stdout without it), true when
+# the run's changes include a file that output's rules count.
+#
+#   bash .github/changed-files.sh <workflow>
+#
+# A pull request's changes are those since its merge base with the base branch (BASE_SHA and
+# HEAD_SHA, from the event). A scheduled run of a workflow with `schedule since-last-success`
+# takes those since the commit of its last successful scheduled run on main (gh, with GH_TOKEN
+# and `actions: read`); every other run checks everything. The checkout needs the history of
+# both commits (`fetch-depth: 0`).
 set -euo pipefail
 
+workflow=$1
+here=$(dirname "$0")
 output=${GITHUB_OUTPUT:-/dev/stdout}
-if [ "${GITHUB_EVENT_NAME:-}" != pull_request ]; then
-  echo "A $GITHUB_EVENT_NAME run: everything is checked"
-  echo relevant=true >> "$output"
-  exit 0
+
+# The workflow's outputs and their rules, in order; every output counts the workflow's own file
+# and the files that decide relevance
+declare -A rules=()
+outputs=()
+since_last_success=false
+while read -r name out rest; do
+  [ "$name" = "$workflow" ] || continue
+  if [ "$out" = schedule ]; then
+    [ "$rest" = since-last-success ] && since_last_success=true
+    continue
+  fi
+  if [ -z "${rules[$out]+set}" ]; then
+    outputs+=("$out")
+    rules[$out]=""
+  fi
+  rules[$out]+=" $rest"
+done < <(grep -v -E '^\s*(#|$)' "$here/relevance")
+if [ ${#outputs[@]} -eq 0 ]; then
+  echo "::error::$workflow has no rules in .github/relevance" >&2
+  exit 1
 fi
+common=".github/workflows/$workflow.yml .github/relevance .github/changed-files.sh .github/dependency-tree.py"
+
+everything() {
+  echo "$1"
+  for out in "${outputs[@]}"; do echo "$out=true" >> "$output"; done
+  exit 0
+}
+
+event=${GITHUB_EVENT_NAME:-pull_request}
+case $event in
+  pull_request)
+    base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+    head=$HEAD_SHA
+    ;;
+  schedule)
+    $since_last_success || everything "A scheduled run of $workflow: everything is checked"
+    base=$(gh run list --workflow "$workflow.yml" --branch main --event schedule \
+      --status success --limit 1 --json headSha --jq '.[0].headSha // empty')
+    [ -n "$base" ] || everything "No successful scheduled run yet: everything is checked"
+    git cat-file -e "$base^{commit}" 2>/dev/null ||
+      everything "$base, the last successful scheduled run, is not on main: everything is checked"
+    head=${HEAD_SHA:-$(git rev-parse HEAD)}
+    echo "Changes since $base, the last successful scheduled run"
+    ;;
+  *)
+    everything "A $event run: everything is checked"
+    ;;
+esac
 
 # A pattern as an extended regular expression; `**/` may match nothing, so `**/Cargo.toml`
 # matches the root's Cargo.toml too
@@ -24,33 +74,85 @@ regex() {
     -e 's|\x01|(.*/)?|g' -e 's/\x02/.*/g')"
 }
 
-includes=()
-regexes=()
-for pattern in "$@"; do
-  if [ "${pattern:0:1}" = '!' ]; then
-    includes+=(false)
-    regexes+=("$(regex "${pattern:1}")")
+# Whether a file differs other than in its version numbers (1.2.3, v1.2.3-rc.1): a release
+# moves the image tags and download URLs in the deploy manifests, and nothing else
+versionless() {
+  if git cat-file -e "$1:$2" 2>/dev/null; then
+    git show "$1:$2" | sed -E 's/v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.]+)?/<version>/g'
   else
-    includes+=(true)
-    regexes+=("$(regex "$pattern")")
+    echo "<no file>"
   fi
-done
+}
+beyond_versions() {
+  [ "$(versionless "$base" "$1")" != "$(versionless "$head" "$1")" ]
+}
 
-changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
-relevant=false
-while IFS= read -r file; do
-  [ -n "$file" ] || continue
-  hit=false
-  for i in "${!regexes[@]}"; do
-    if [[ $file =~ ${regexes[$i]} ]]; then
-      hit=${includes[$i]}
+# Whether a package's dependencies and build manifests differ between the two commits, once
+# per package
+declare -A crate_changed=()
+crate_differs() {
+  if [ -z "${crate_changed[$1]+set}" ]; then
+    local before after
+    before=$(python3 "$here/dependency-tree.py" "$base" "$1") || exit 1
+    after=$(python3 "$here/dependency-tree.py" "$head" "$1") || exit 1
+    if [ "$before" = "$after" ]; then
+      crate_changed[$1]=false
+    else
+      crate_changed[$1]=true
     fi
-  done
-  if [ "$hit" = true ]; then
-    echo "checked: $file"
-    relevant=true
+    echo "  $1's dependencies or build manifests changed: ${crate_changed[$1]}"
   fi
-done <<< "$changed"
+  [ "${crate_changed[$1]}" = true ]
+}
 
-echo "relevant=$relevant"
-echo "relevant=$relevant" >> "$output"
+changed=$(git diff --name-only "$base...$head")
+for out in "${outputs[@]}"; do
+  read -r -a list <<< "${rules[$out]}"
+  crates=()
+  patterns=()
+  regexes=()
+  for rule in "${list[@]}"; do
+    case $rule in
+      crate:*) crates+=("${rule#crate:}") ;;
+      *) patterns+=("$rule") ;;
+    esac
+  done
+  for pattern in "${patterns[@]}" $common; do
+    pattern=${pattern#!}
+    regexes+=("$(regex "${pattern#\~}")")
+  done
+  patterns+=($common)
+
+  relevant=false
+  echo "$out:"
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    hit=false
+    case $file in
+      Cargo.lock | Cargo.toml | */Cargo.toml)
+        if [ ${#crates[@]} -gt 0 ]; then
+          for crate in "${crates[@]}"; do
+            if crate_differs "$crate"; then hit=true; fi
+          done
+          if $hit; then echo "  checked: $file"; relevant=true; fi
+          continue
+        fi
+        ;;
+    esac
+    for i in "${!patterns[@]}"; do
+      if [[ $file =~ ${regexes[$i]} ]]; then
+        case ${patterns[$i]} in
+          '!'*) hit=false ;;
+          '~'*) if beyond_versions "$file"; then hit=true; else hit=false; fi ;;
+          *) hit=true ;;
+        esac
+      fi
+    done
+    if $hit; then
+      echo "  checked: $file"
+      relevant=true
+    fi
+  done <<< "$changed"
+  echo "  $out=$relevant"
+  echo "$out=$relevant" >> "$output"
+done
