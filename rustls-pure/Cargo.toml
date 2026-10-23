@@ -16,8 +16,8 @@ keywords = ["rustls", "tls", "crypto", "pure-rust", "rustcrypto"]
 categories = ["cryptography", "network-programming"]
 readme = "README.md"
 # Wycheproof's test vectors (5.5 MB), the test certificates, the handshake tests that read them and
-# the interoperability script stay in the repository
-exclude = ["/wycheproof/", "/testdata/", "/tests/", "/interop/"]
+# the interoperability and machine-code scripts stay in the repository
+exclude = ["/wycheproof/", "/testdata/", "/tests/", "/interop/", "/ct-asm.sh"]
 
 [dependencies]
 # 0.23.46 or any later 0.23, without its default providers (ring, aws-lc-rs) and without TLS 1.2

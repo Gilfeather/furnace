@@ -178,6 +178,15 @@ suite, key exchange group (X25519MLKEM768 with OpenSSL 3.5 or later) and key typ
 certificates, and refusing a server with an RSA certificate or an unknown CA. It runs weekly,
 and on pull requests that change rustls-pure, on Linux and macOS.
 
+Timing tests in the style of dudect (`src/tests/constant_time.rs`) time every operation that
+handles a secret on two classes of secret input and look for a difference: key exchanges,
+ML-KEM decapsulation of valid against tampered ciphertexts, signing, and records refused for a
+wrong tag. A control comes first, and a machine whose control fails gives no result. They run
+weekly on x86_64 Linux, aarch64 Linux and Apple silicon; `bash rustls-pure/ct-asm.sh` checks
+on every pull request that rustls-pure's own code that touches secrets compiles to straight-line
+code. What these show and what they do not, a review of rustls-pure's own code and a survey of
+what the primitives do about constant time are in [CONSTANT_TIME.md](CONSTANT_TIME.md).
+
 The vectors, the certificates and the scripts are left out of the published crate.
 
 ## Security

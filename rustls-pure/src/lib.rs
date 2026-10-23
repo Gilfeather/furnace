@@ -114,8 +114,14 @@ impl SecureRandom for Random {
 /// Fresh secret bytes, wiped when dropped
 fn random<const N: usize>() -> Result<Zeroizing<[u8; N]>, Error> {
     let mut bytes = Zeroizing::new([0; N]);
-    getrandom::fill(&mut *bytes).map_err(|_| Error::FailedToGetRandomBytes)?;
+    fill_random(&mut *bytes)?;
     Ok(bytes)
+}
+
+/// Fills `bytes` in place, for secrets of a type of their own that would otherwise be copied out
+/// of a wiped buffer and left behind unwiped
+fn fill_random(bytes: &mut [u8]) -> Result<(), Error> {
+    getrandom::fill(bytes).map_err(|_| Error::FailedToGetRandomBytes)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -488,17 +494,36 @@ impl X25519Exchange {
     }
 }
 
-impl ActiveKeyExchange for X25519Exchange {
-    fn complete(self: Box<Self>, peer_pub_key: &[u8]) -> Result<SharedSecret, Error> {
+impl X25519Exchange {
+    /// The secret shared with the peer, refused if it is all zeros
+    fn agree(self, peer_pub_key: &[u8]) -> Result<x25519_dalek::SharedSecret, Error> {
         let peer = x25519_share(peer_pub_key).ok_or_else(invalid_key_share)?;
         let shared = self
             .secret
             .diffie_hellman(&x25519_dalek::PublicKey::from(peer));
         // An all-zero result means a low-order peer key (RFC 8446 section 7.4.2)
-        if !shared.was_contributory() {
+        if all_zero(shared.as_bytes()) {
             return Err(invalid_key_share());
         }
-        Ok(SharedSecret::from(&shared.as_bytes()[..]))
+        Ok(shared)
+    }
+}
+
+/// Whether an X25519 result is all zeros, in constant time: every byte is ORed in, with no
+/// early exit, and only whether the result is zero, which is public, is compared. (The same as
+/// x25519-dalek's `was_contributory`, since its results are always fully reduced, but here the
+/// whole check is rustls-pure's own.) Out of line, so its machine code can be checked for
+/// branches (`ct-asm.sh`).
+#[inline(never)]
+fn all_zero(secret: &[u8; 32]) -> bool {
+    std::hint::black_box(secret.iter().fold(0, |acc, byte| acc | byte)) == 0
+}
+
+impl ActiveKeyExchange for X25519Exchange {
+    fn complete(self: Box<Self>, peer_pub_key: &[u8]) -> Result<SharedSecret, Error> {
+        Ok(SharedSecret::from(
+            &self.agree(peer_pub_key)?.as_bytes()[..],
+        ))
     }
 
     fn pub_key(&self) -> &[u8] {
@@ -646,19 +671,30 @@ impl X25519MlKem768Group {
         let (ciphertext, mlkem_secret) = key.encapsulate_deterministic(m);
         let mlkem_secret = Zeroizing::new(mlkem_secret);
         let pub_key = concat(&ciphertext, x25519.public.as_bytes());
-        let x25519_secret = Box::new(x25519).complete(x25519_share)?;
+        let x25519_secret = x25519.agree(x25519_share)?;
         Ok(CompletedKeyExchange {
             group: NamedGroup::X25519MLKEM768,
             pub_key,
-            secret: hybrid_secret(&mlkem_secret, x25519_secret.secret_bytes()),
+            secret: hybrid_secret(mlkem_secret.as_ref(), x25519_secret.as_bytes()),
         })
     }
 }
 
 /// ML-KEM's secret, then X25519's
-fn hybrid_secret(mlkem: &[u8], x25519: &[u8]) -> SharedSecret {
-    // rustls's SharedSecret wipes it when dropped
-    SharedSecret::from(concat(mlkem, x25519))
+fn hybrid_secret(mlkem: &[u8; 32], x25519: &[u8; 32]) -> SharedSecret {
+    let mut secret = Zeroizing::new([0; 64]);
+    put_together(&mut secret, mlkem, x25519);
+    // rustls's SharedSecret wipes its copy when dropped
+    SharedSecret::from(&secret[..])
+}
+
+/// The two secrets side by side, copied without looking at them. Out of line, so its machine
+/// code can be checked for branches (`ct-asm.sh`).
+#[inline(never)]
+fn put_together(secret: &mut [u8; 64], mlkem: &[u8; 32], x25519: &[u8; 32]) {
+    let (first, second) = secret.split_at_mut(32);
+    first.copy_from_slice(mlkem);
+    second.copy_from_slice(x25519);
 }
 
 impl SupportedKxGroup for X25519MlKem768Group {
@@ -671,8 +707,10 @@ impl SupportedKxGroup for X25519MlKem768Group {
     }
 
     fn start_and_complete(&self, client_share: &[u8]) -> Result<CompletedKeyExchange, Error> {
-        let m = random::<32>()?;
-        Self::respond(client_share, &ml_kem::B32::from(*m), X25519Exchange::new()?)
+        // `m` gives away ML-KEM's secret, so it is made where it is wiped and only lent out
+        let mut m = Zeroizing::new(ml_kem::B32::default());
+        fill_random(&mut m)?;
+        Self::respond(client_share, &m, X25519Exchange::new()?)
     }
 
     fn name(&self) -> NamedGroup {
@@ -700,8 +738,11 @@ impl ActiveKeyExchange for X25519MlKem768Exchange {
         // A ciphertext that was tampered with gives an unrelated secret (FIPS 203's implicit
         // rejection), so the handshake fails at the Finished messages
         let mlkem_secret = Zeroizing::new(self.decapsulation.decapsulate(&ciphertext));
-        let x25519_secret = Box::new(self.x25519).complete(x25519_share)?;
-        Ok(hybrid_secret(&mlkem_secret, x25519_secret.secret_bytes()))
+        let x25519_secret = self.x25519.agree(x25519_share)?;
+        Ok(hybrid_secret(
+            mlkem_secret.as_ref(),
+            x25519_secret.as_bytes(),
+        ))
     }
 
     /// The X25519 part is offered on its own too, so a server without ML-KEM can pick it with

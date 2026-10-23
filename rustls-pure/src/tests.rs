@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use super::*;
 
+mod constant_time;
 mod properties;
 
 const VECTORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wycheproof");
