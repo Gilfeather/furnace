@@ -127,7 +127,56 @@ impl From<&IoSpec> for TensorInfo {
 /// The number of elements of a tensor of `shape`; `None` when it does not fit in a `usize`,
 /// as a client's shape may not
 pub(crate) fn element_count(shape: &[usize]) -> Option<usize> {
-    shape.iter().try_fold(1usize, |n, &d| n.checked_mul(d))
+    shape.iter().try_fold(1usize, |n, &d| times(n, d))
+}
+
+/// Why two tensors cannot be joined along the batch dimension
+#[derive(Debug, PartialEq)]
+#[cfg_attr(kani, derive(kani::Arbitrary))]
+enum Unjoinable {
+    /// Either has no batch dimension, or their items' shapes differ
+    Shapes,
+    /// Their batches together do not fit in a `usize`
+    TooMany,
+}
+
+/// The batch of tensors of shapes `a` and `b` joined: each needs a batch dimension and the
+/// same per-item shape. Its contract is what the proof of [`HostTensor::concat_batch`] builds
+/// on.
+#[cfg_attr(kani, kani::ensures(|joined: &std::result::Result<usize, Unjoinable>| match joined {
+    Ok(batch) => {
+        same_items(a, b) && *batch as u128 == a[0] as u128 + b[0] as u128
+    }
+    Err(Unjoinable::Shapes) => !same_items(a, b),
+    Err(Unjoinable::TooMany) => {
+        same_items(a, b) && a[0] as u128 + b[0] as u128 > usize::MAX as u128
+    }
+}))]
+fn joined_batch(a: &[usize], b: &[usize]) -> std::result::Result<usize, Unjoinable> {
+    match (a.split_first(), b.split_first()) {
+        (Some((&n, item)), Some((&m, other))) if item == other => {
+            n.checked_add(m).ok_or(Unjoinable::TooMany)
+        }
+        _ => Err(Unjoinable::Shapes),
+    }
+}
+
+/// Whether shapes `a` and `b` both have a batch dimension and the same dimensions after it,
+/// compared one by one (for the contracts: a slice comparison is a `memcmp` Kani unwinds byte
+/// by byte)
+#[cfg(kani)]
+fn same_items(a: &[usize], b: &[usize]) -> bool {
+    !a.is_empty() && a.len() == b.len() && (1..a.len()).all(|i| a[i] == b[i])
+}
+
+/// One step of [`element_count`]: `n * d`, `None` past a `usize`. Its contract, the exact
+/// product, is what the proofs of the whole count build on.
+#[cfg_attr(kani, kani::ensures(|product: &Option<usize>| match product {
+    Some(product) => *product as u128 == n as u128 * d as u128,
+    None => n as u128 * d as u128 > usize::MAX as u128,
+}))]
+fn times(n: usize, d: usize) -> Option<usize> {
+    n.checked_mul(d)
 }
 
 /// Tensor elements in host memory
@@ -203,21 +252,22 @@ impl HostTensor {
         for part in parts {
             // The parts are an engine's outputs, not checked yet: without a batch dimension
             // there is nothing to join along
-            if joined.shape.is_empty()
-                || part.shape.is_empty()
-                || part.shape[1..] != joined.shape[1..]
-            {
-                return Err(ModelError::InferenceFailed(format!(
-                    "chunks of one batch returned shapes {:?} and {:?}",
-                    joined.shape, part.shape
-                ))
-                .into());
-            }
-            joined.shape[0] = joined.shape[0].checked_add(part.shape[0]).ok_or_else(|| {
-                ModelError::InferenceFailed(
-                    "chunks of one batch returned more items than fit in a usize".to_string(),
-                )
-            })?;
+            joined.shape[0] = match joined_batch(&joined.shape, &part.shape) {
+                Ok(batch) => batch,
+                Err(Unjoinable::Shapes) => {
+                    return Err(ModelError::InferenceFailed(format!(
+                        "chunks of one batch returned shapes {:?} and {:?}",
+                        joined.shape, part.shape
+                    ))
+                    .into());
+                }
+                Err(Unjoinable::TooMany) => {
+                    return Err(ModelError::InferenceFailed(
+                        "chunks of one batch returned more items than fit in a usize".to_string(),
+                    )
+                    .into());
+                }
+            };
             match (&mut joined.values, part.values) {
                 (Values::F32(a), Values::F32(b)) => a.extend(b),
                 (Values::I64(a), Values::I64(b)) => a.extend(b),
@@ -239,10 +289,18 @@ impl HostTensor {
 mod verification {
     use super::*;
 
+    /// `times` is the exact product of any two `usize`s, or `None` when it does not fit
+    #[kani::proof_for_contract(times)]
+    fn times_is_the_exact_product() {
+        times(kani::any(), kani::any());
+    }
+
     /// `element_count` of any shape of up to four dimensions, each of any size, never
     /// overflows: it is the exact product when that fits in a `usize`, and `None` only when the
-    /// product of the dimensions up to one of them does not
+    /// product of the dimensions up to one of them does not. Each step stands on `times`'s
+    /// proven contract.
     #[kani::proof]
+    #[kani::stub_verified(times)]
     #[kani::unwind(6)]
     fn element_count_is_the_exact_product() {
         let dims: [usize; 4] = kani::any();
@@ -302,9 +360,21 @@ mod verification {
         assert_eq!(element_count(&part.shape), Some(part.values.len()));
     }
 
+    /// `joined_batch` of any two shapes of up to three dimensions is its contract
+    #[kani::proof_for_contract(joined_batch)]
+    #[kani::unwind(26)]
+    fn joined_batch_keeps_its_contract() {
+        let a: [usize; 3] = kani::any();
+        let b: [usize; 3] = kani::any();
+        let a = &a[..kani::any_where(|&len: &usize| len <= 3)];
+        let b = &b[..kani::any_where(|&len: &usize| len <= 3)];
+        let _ = joined_batch(a, b);
+    }
+
     /// `concat_batch` of up to three parts, even of other ranks, types or shapes or none at
     /// all, never panics; what it joins has every part's items and values
     #[kani::proof]
+    #[kani::stub_verified(joined_batch)]
     #[kani::unwind(8)]
     fn concat_batch_never_panics() {
         let count = kani::any_where(|&n: &usize| n <= 3);
