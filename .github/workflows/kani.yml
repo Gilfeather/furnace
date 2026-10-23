@@ -95,6 +95,15 @@ jobs:
         - { package: kamui, harness: 'verification::keep_keeps_a_block_or_refuses_it_4_slots' }
         - { package: kamui, harness: 'verification::alloc_and_dealloc_stay_in_bounds_4_slots' }
         - { package: kamui, harness: 'verification::realloc_keeps_the_contents_4_slots' }
+        - { package: furnace-server, harness: 'api::infer::verification::raw_fp32_decodes_lengths_0_to_5' }
+        - { package: furnace-server, harness: 'api::infer::verification::raw_int64_decodes_lengths_0_to_5' }
+        - { package: furnace-server, harness: 'api::infer::verification::raw_int32_decodes_lengths_0_to_5' }
+        - { package: furnace-server, harness: 'api::infer::verification::raw_fp32_decodes_lengths_6_to_11' }
+        - { package: furnace-server, harness: 'api::infer::verification::raw_int64_decodes_lengths_6_to_11' }
+        - { package: furnace-server, harness: 'api::infer::verification::raw_int32_decodes_lengths_6_to_11' }
+        - { package: furnace-server, harness: 'api::infer::verification::raw_fp32_decodes_lengths_12_to_17' }
+        - { package: furnace-server, harness: 'api::infer::verification::raw_int64_decodes_lengths_12_to_17' }
+        - { package: furnace-server, harness: 'api::infer::verification::raw_int32_decodes_lengths_12_to_17' }
         - { package: furnace-server, harness: 'json_fast::verification::number_lengths_take_json_numbers_only' }
         - { package: furnace-server, harness: 'json_fast::verification::cut_pieces_join_back_into_the_span' }
         - { package: furnace-server, harness: 'json_fast::verification::array_spans_lie_between_brackets' }
