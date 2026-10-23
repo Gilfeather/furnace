@@ -7,9 +7,8 @@ reviewed on 2026-10-23, against rustls-pure 0.15.2 and the versions in the repos
 In short: rustls-pure's own code compares no secret with `==` and branches on no secret, and
 its machine code for the two places it touches secrets has no branch on x86_64 or aarch64; the
 primitives under it are written to run in constant time and say so; statistical timing tests
-of every secret-dependent operation find no difference on x86_64 and on Apple silicon, and
-none on aarch64 Linux but for one that is not yet explained (below). None of this is a proof,
-and there has been no outside audit.
+of every secret-dependent operation find no difference on x86_64, aarch64 Linux and Apple
+silicon. None of this is a proof, and there has been no outside audit.
 
 ## 1. rustls-pure's own code
 
@@ -119,6 +118,9 @@ How the harness avoids differences that are not the secret's, each found on a re
   `op` takes its input by value, so it finds it in the same place in memory whatever the
   class. A pool of inputs per class put each class in its own memory, and on aarch64 Linux
   that alone gave the control |t| of 24.
+- Where inputs come from a table, both classes' entries are read and a mask keeps one, so the
+  class decides no memory access, not even before the timer starts. On Neoverse N2, reading
+  only the sample's class's entry was enough to make the X25519 all-zero check differ (below).
 - Signing signs a random message in both classes. With one message a fixed key gives the same
   signature every time, and encoding it (ECDSA's DER is 70 to 72 bytes for P-256, depending on
   the signature) took a different time from the random keys' signatures: |t| up to 19 for
@@ -142,45 +144,51 @@ cargo test --release -p rustls-pure --lib constant_time -- --ignored --nocapture
 The run of 2026-10-23 on the code as it is here, |t| per target (the largest over the crops;
 4.5 or more counts as a difference):
 
-| Target | x86_64 Linux (AMD EPYC 9V45) | aarch64 Linux (Neoverse N2) | Apple silicon (macOS) |
+| Target | x86_64 Linux (AMD EPYC 7763) | aarch64 Linux (Neoverse N2) | Apple silicon (macOS) |
 |---|---|---|---|
-| **Control** | 1.02 | 1.42 | 1.90 |
-| X25519 key exchange | 2.19 | 2.46 | 2.10 |
-| X25519 all-zero check | 2.36 | **12.91** | 1.60 |
-| P-256 key exchange | 3.12 | 1.63 | 1.26 |
-| P-384 key exchange | 1.55 | 1.87 | 1.27 |
-| ML-KEM-768 decapsulation, valid vs tampered | 1.30 | 1.56 | 1.75 |
-| X25519MLKEM768, client, valid vs tampered | 1.50 | 2.09 | 1.50 |
-| ML-KEM-768 encapsulation | 1.43 | 3.34 | 1.83 |
-| ECDSA P-256 signing | 2.56 | 1.72 | 1.25 |
-| ECDSA P-384 signing | 1.48 | 1.07 | 1.28 |
-| Ed25519 signing | 2.16 | 1.12 | 1.51 |
-| AES-128-GCM open, wrong tag | 1.28 | 0.80 | 2.11 |
-| AES-256-GCM open, wrong tag | 1.70 | 2.53 | 1.52 |
-| ChaCha20-Poly1305 open, wrong tag | 1.52 | 1.09 | 1.70 |
+| **Control** | 2.15 | 2.65 | 1.39 |
+| X25519 key exchange | 0.77 | 1.46 | 2.30 |
+| X25519 all-zero check | 1.52 | 1.17 | 1.45 |
+| P-256 key exchange | 2.50 | 1.24 | 2.42 |
+| P-384 key exchange | 1.79 | 1.40 | 1.45 |
+| ML-KEM-768 decapsulation, valid vs tampered | 1.38 | 1.47 | 1.59 |
+| X25519MLKEM768, client, valid vs tampered | 0.88 | 2.49 | 1.06 |
+| ML-KEM-768 encapsulation | 1.93 | 1.36 | 1.49 |
+| ECDSA P-256 signing | 2.01 | 1.68 | 1.05 |
+| ECDSA P-384 signing | 1.29 | 0.61 | 1.92 |
+| Ed25519 signing | 1.90 | 0.90 | 4.22 |
+| AES-128-GCM open, wrong tag | 0.85 | 1.81 | 1.90 |
+| AES-256-GCM open, wrong tag | 2.36 | 1.83 | 1.39 |
+| ChaCha20-Poly1305 open, wrong tag | 1.07 | 1.87 | 0.98 |
 
 Each target took 56,000 to 2,000,000 samples; the clocks' steps were 20 ns (x86_64), 24 ns
-(Neoverse N2, a 1 GHz counter) and 41 ns (Apple silicon). The run before it, with the same
-harness on an AMD EPYC 9V74, also found no difference in any target on x86_64 or Apple silicon.
+(Neoverse N2, a 1 GHz counter) and 41 ns (Apple silicon). Earlier runs with the same
+harness but for the change below, on AMD EPYC 9V45 and 9V74, found no difference in any target
+on x86_64 or Apple silicon either.
 
-**Not explained: X25519's all-zero check on Neoverse N2.** Over ten runs on GitHub's aarch64
-Linux runners its |t| was between 0.8 and 58, at 4.5 or more in seven of them, with the means
-of the two classes within a few nanoseconds of 44 µs and the difference in the tail (the
-samples below the 88th to 94th percentile). Nothing like it showed on x86_64 or Apple silicon.
-What is known:
+**Explained: X25519's all-zero check on Neoverse N2.** Before the harness read both classes'
+entries, this target's |t| on GitHub's aarch64 Linux runners was between 0.8 and 58 over ten
+runs, at 4.5 or more in seven, with the means within a few nanoseconds of 44 µs and the
+difference in the tail; never on x86_64 or Apple silicon. It came from the harness, not from
+the secret. On Neoverse N2 (runs of 2026-10-23, |t|):
 
-- rustls-pure's own part is straight-line code (section 3), and timed on its own, with first
-  bytes zero against not zero, it gave 0.75; so did rustls's copy of the secret (1.83).
-- x25519-dalek's Diffie-Hellman on its own, with the same two sets of peer keys, gave 3.44, and
-  two halves of one set against each other 1.30; but in that run the whole check gave 0.80 too.
-- The runners do not offer Arm's DIT (data-independent timing), so whether it changes anything
-  could not be tried there. On Apple silicon, with DIT and without, everything passed.
+| Variant | \|t\| |
+|---|---|
+| Peer keys of the two classes side by side, only the class's one read (as before) | 9.36, 9.57 |
+| The two classes' peer keys in separate vectors, only the class's one read | 19.74, 1.18, 1.91 |
+| Side by side, both read, a mask keeps one | 1.08, 1.29 |
+| Separate vectors, both read, a mask keeps one | 0.86, 1.13 |
+| The labels swapped / the same peers in both classes (A/A) | 1.61 / 2.03, 2.12 |
+| Classes by private key instead of by result, with one peer | 2.48 |
+| Without the all-zero step (Diffie-Hellman and the copy) | 1.86 |
+| x25519-dalek's Diffie-Hellman alone | 2.52, 1.95 |
+| `all_zero` alone / rustls's copy alone | 0.75 / 1.83 |
 
-So it is not yet known whether this is X25519 (x25519-dalek's field arithmetic on this core),
-the virtual machine, or the harness. The next step is to run it on a machine of one's own with
-Neoverse cores and DIT (AWS Graviton), and, if it follows x25519-dalek there, to report it to
-dalek-cryptography. Until then the weekly run on aarch64 Linux keeps failing on it, which is
-what it should do.
+Whether the result starts with a zero byte makes no difference however it is timed; where the
+harness read the public peer key from, outside the timing, did, by an amount and in a direction
+that changed with where the vectors happened to lie in memory. Reading both entries removed it
+in every layout. The classes' timings were also checked against a run order effect (each half
+of a run alone) and against the null (the labels shuffled: |t| at most 3.6).
 
 ## 5. What this does not show
 
