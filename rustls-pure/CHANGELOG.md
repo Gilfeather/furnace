@@ -6,10 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 a breaking change, a new minimum Rust version or a new rustls minor version is a new minor
 version.
 
-## [0.15.1] - Unreleased
+## [0.15.2] - 2026-10-23
 
-Less work and fewer dependencies for the same behaviour; nothing measured, all found by reading
-the code.
+Hardening: ML-KEM's encapsulation randomness is wiped, X25519's all-zero check is branch-free
+code of rustls-pure's own, and the peer's bytes and constant time are checked in CI.
 
 ### Added
 - Kani proofs (`cargo kani -p rustls-pure`, run in CI on changes to rustls-pure) of the code
@@ -27,18 +27,6 @@ the code.
 - P-256 and P-384 key shares are checked for the uncompressed point's exact size by
   rustls-pure before the curve crates parse them, as well as for its first byte; the same
   shares are refused as before.
-- Dependencies without the default features rustls-pure does not use: `aes-gcm` and
-  `chacha20poly1305` without OS randomness for nonces and the allocating API, `p256` and
-  `p384` without PEM, `std` and their precomputed base-point tables (memory traded for time),
-  `sha2` without allocation and OIDs. Every RustCrypto crate still picks AES-NI / ARMv8 AES,
-  CLMUL / PMULL, AVX2 and SHA-NI / ARMv8 SHA at run time by itself.
-- The README recommends X25519 (the default) and Ed25519 certificates for speed.
-- Nonces are built without a length check at run time: the 12-byte nonce and 16-byte tag
-  are now type bounds on the AEADs, checked at compile time.
-- ECDSA signature verification hashes the message on the stack instead of into a `Vec`, and
-  only after the key and the signature have parsed.
-- The server's private key is shared with each handshake's signer instead of copied into it,
-  so the secret exists once in memory.
 - X25519's all-zero check is rustls-pure's own branch-free code instead of x25519-dalek's
   `was_contributory` (which is also constant time), so that its machine code can be checked;
   the same results are refused.
@@ -51,6 +39,25 @@ the code.
 - RUSTSEC-2026-0385: `ctutils` below 0.4.4, under the AEADs, ML-KEM and the curve crates, has
   masks that could compile to a branch on a secret. The repository's lockfile has 0.4.4; an
   application's own lockfile needs `cargo update -p ctutils`.
+
+## [0.15.1] - 2026-10-22
+
+Less work and fewer dependencies for the same behaviour; nothing measured, all found by reading
+the code.
+
+### Changed
+- Dependencies without the default features rustls-pure does not use: `aes-gcm` and
+  `chacha20poly1305` without OS randomness for nonces and the allocating API, `p256` and
+  `p384` without PEM, `std` and their precomputed base-point tables (memory traded for time),
+  `sha2` without allocation and OIDs. Every RustCrypto crate still picks AES-NI / ARMv8 AES,
+  CLMUL / PMULL, AVX2 and SHA-NI / ARMv8 SHA at run time by itself.
+- The README recommends X25519 (the default) and Ed25519 certificates for speed.
+- Nonces are built without a length check at run time: the 12-byte nonce and 16-byte tag
+  are now type bounds on the AEADs, checked at compile time.
+- ECDSA signature verification hashes the message on the stack instead of into a `Vec`, and
+  only after the key and the signature have parsed.
+- The server's private key is shared with each handshake's signer instead of copied into it,
+  so the secret exists once in memory.
 
 ## [0.15.0] - 2026-10-22
 

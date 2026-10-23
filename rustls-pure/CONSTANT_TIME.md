@@ -1,7 +1,7 @@
 # Constant time in rustls-pure
 
 What has been checked about timing side channels, how, and what that does not prove. Last
-reviewed on 2026-10-23, against rustls-pure 0.15.1 and the versions in the repository's
+reviewed on 2026-10-23, against rustls-pure 0.15.2 and the versions in the repository's
 `Cargo.lock`.
 
 In short: rustls-pure's own code compares no secret with `==` and branches on no secret, and
