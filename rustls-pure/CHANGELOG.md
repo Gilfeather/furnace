@@ -8,6 +8,11 @@ version.
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-10-24
+
+The license text in the package, builds checked for RISC-V, WASI and the browser, and the
+constant-time notes brought up to date. The library's code is unchanged.
+
 ### Added
 - CI builds it for RISC-V, WASI and the browser (`wasm32-unknown-unknown`); the README's
   "Targets" says what an application in the browser turns on.

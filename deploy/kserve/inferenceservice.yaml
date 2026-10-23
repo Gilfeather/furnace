@@ -16,4 +16,4 @@ spec:
         name: furnace
       runtime: furnace
       protocolVersion: v2
-      storageUri: https://github.com/Gilfeather/furnace/releases/download/v0.16.0/resnet18.bpk
+      storageUri: https://github.com/Gilfeather/furnace/releases/download/v0.16.1/resnet18.bpk

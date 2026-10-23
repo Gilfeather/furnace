@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-24
+
+Every published crate carries its license text.
+
 ### Fixed
 - amate, kuebiko, kamui, furnace-burn and furnace-cli's packages include the license text
   (LICENSE), as the MIT license asks; before, only furnace-server's did.
