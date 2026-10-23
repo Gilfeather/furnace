@@ -36,7 +36,8 @@ in
     cargoLock.lockFile = ./Cargo.lock;
 
     meta = {
-      inherit (toml) homepage description;
+      inherit (toml) description;
+      homepage = toml.repository;
       license = lib.licenses.mit;
       mainProgram = "furnace";
     };
