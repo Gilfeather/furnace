@@ -86,8 +86,13 @@ impl Batching for Summing {
             .map_or(1, |t| t.batch().max(1))
     }
 
-    /// A signal that exists to answer a request nobody waits for any more is skipped
+    /// A command is skipped once whoever sent it stops waiting, and not before: it is an act
+    /// to carry out, whether or not the request behind it is still waited for. Any other
+    /// signal that exists to answer a request nobody waits for any more is skipped.
     fn wanted(&self, signal: &Signal) -> bool {
+        if signal.payload.as_command().is_some() {
+            return !signal.abandoned();
+        }
         signal.reply.as_ref().is_none_or(ReplyHandle::wanted)
     }
 
