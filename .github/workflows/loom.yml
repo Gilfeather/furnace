@@ -1,0 +1,72 @@
+name: Loom
+
+# Model checks of the concurrent parts with loom: every interleaving of a few threads sharing
+# amate's queue (submitters, arrivals, workers), a nerve's lane, an effector's local loop and a
+# motor neuron's program slot. They are the `model_check` modules, built only with the cfg that
+# makes each crate's `sync` module swap std's locks and atomics for loom's: `loom` for amate,
+# which has no dependencies, and `furnace_loom` for the server, whose tokio reads `loom` too
+# (and leaves out its networking under it). On pull requests that change those parts, and on
+# main.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'amate/**'
+      - 'src/nerve/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/loom.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'amate/**'
+      - 'src/nerve/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/loom.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Interleavings with up to three preemptions: enough for every bug these models have found,
+  # and minutes rather than hours
+  LOOM_MAX_PREEMPTIONS: 3
+
+# A newer push to the same branch or pull request makes an older run redundant
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  loom:
+    name: Loom models
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: stable
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+
+    # Under loom amate's other tests are left out: its parts work only inside a model
+    - name: amate
+      env:
+        RUSTFLAGS: --cfg loom
+      run: cargo test -p amate --release --lib
+
+    # The server's other tests build too but do not run (their lanes and effectors would be
+    # loom's, outside a model). The ci profile: release optimizations without the whole-program
+    # LTO, which only slows the link.
+    - name: Nerve lanes, effectors and motor neurons
+      env:
+        RUSTFLAGS: --cfg furnace_loom
+      run: cargo test -p furnace-server --profile ci --lib model_check
