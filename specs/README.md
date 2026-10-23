@@ -10,7 +10,7 @@ requests that touch `specs/` or `src/nerve/`, and on main.
 | Spec | Models | The Rust code |
 | --- | --- | --- |
 | [`Motor.tla`](Motor.tla) | [`MCMotor.cfg`](MCMotor.cfg), [`MCMotorPreempt.cfg`](MCMotorPreempt.cfg) | `src/nerve/motor/mod.rs` (`Motor::stimulate`, `Started::run`, `Motion::{command, together}`), `src/nerve/effector/local_loop.rs` (`run`), `Fabric::stop` |
-| [`Lanes.tla`](Lanes.tla) | [`MCLanesCross.cfg`](MCLanesCross.cfg), [`MCLanesSelf.cfg`](MCLanesSelf.cfg), [`MCLanesOrder.cfg`](MCLanesOrder.cfg) | `src/nerve/fabric/nerve.rs` (`Fabric::{enter, release}`, `Ticket`, `Held::drop`) |
+| [`Lanes.tla`](Lanes.tla) | [`MCLanesCross.cfg`](MCLanesCross.cfg), [`MCLanesCycle.cfg`](MCLanesCycle.cfg), [`MCLanesFull.cfg`](MCLanesFull.cfg), [`MCLanesOrder.cfg`](MCLanesOrder.cfg) | `src/nerve/fabric/nerve.rs` (`Fabric::{enter, release}`, `Ticket`, `Held::drop`), with `Motor::stimulate` |
 | [`Routing.tla`](Routing.tla) | [`MCRouting.cfg`](MCRouting.cfg) | `src/nerve/fabric/route.rs` (`Fabric::{drive, route, select, emit}`), `summing.rs` (`fire_summed`) |
 
 The `MC*.tla` modules give the models their constants (the parts, their wiring, the programs).
@@ -37,21 +37,29 @@ two commands to `dress`, the second preempting the first.
 | `TogetherStopsTheRest` | invariant | After a failure, `together` waits for none of the rest (which then stop, by the two above) |
 | `ActionsOnly` | invariant | A brain's command reaches declared actions only |
 
-**Nerve lanes** (`Lanes.tla`). Parts in two nerves, A and B, with one place each.
-`MCLanesCross`: each nerve's part commands into the other, both under a deadline.
-`MCLanesSelf`: a part commands into its own nerve, directly and through a motor neuron in no
-nerve, without a deadline. `MCLanesOrder`: commands of different urgency queue for one part.
+**Nerve lanes** (`Lanes.tla`). A lane counts effector acts only: every act entering a nerve
+takes a place, from inside the part or outside, and an act never waits for another command.
+Motor programs never take a place; the latest command to a motor neuron stops its program at
+once. No model has a deadline but `MCLanesOrder`, so nothing ends because time ran out.
+`MCLanesCross`: two parts in nerves A and B, one place each, command each other's acts while
+the brain floods both lanes. `MCLanesCycle`: two motor neurons command each other round and
+round. `MCLanesFull`: commands to a part whose lane is full. `MCLanesOrder`: acts of different
+urgency queue for one effector.
 
 | Property | Kind | Says |
 | --- | --- | --- |
-| `Bounded` | invariant | No more places taken than `in_flight`, no more commands waiting than the lane holds |
-| `CountIsTrue` | invariant | The lane's count is the places held by tickets not yet given back |
-| `NoIdlePlace` | invariant | No place stays free while a command waits |
-| `InsideNeverWaits` | invariant | A part's command to its own nerve never takes the lane |
-| `WaitingHoldsNoPlace` | invariant | A waiting command holds no place anywhere: a flooded nerve never keeps another nerve's places taken |
-| `UrgentFirst` | action | A freed place goes to the most urgent waiting command, never to one past its deadline |
-| `LeastUrgentDropped` | action | A full lane drops its least urgent command, the newcomer included |
-| `EveryCommandEnds`, `PlacesComeBack` | liveness | No deadlock: every command ends and every place is given back (in `MCLanesCross` thanks to the deadlines; see below) |
+| `Bounded` | invariant | No more places taken than `in_flight`, no more acts waiting than the lane holds |
+| `CountIsTrue` | invariant | The lane's count is the acts holding a place |
+| `NoIdlePlace` | invariant | No place stays free while an act waits |
+| `ProgramsNeverWait` | invariant | Only acts wait in a lane or hold a place, never a program |
+| `LatestWins` | invariant | One program per motor neuron, the latest command's: it starts at once, full lane or not, stopping the one before |
+| `HeardIsTrue` | invariant | What a commander hears is how the command really ended |
+| `OneOutcome` | action | A command ends once, and its commander hears at most once |
+| `UrgentFirst` | action | A freed place goes to the most urgent waiting act, never to one past its deadline |
+| `LeastUrgentDropped` | action | A full lane drops its least urgent act, the newcomer included, which fails, and its program hears it |
+| `EveryCommandEnds`, `PlacesComeBack` | liveness | No deadlock, without deadlines: every command ends and every place comes back |
+| `ReportGoesUp` | liveness | Every brain command to a motor neuron reports up how it ended |
+| `DropReachesBrain` | liveness | A failed act's failure (a dropped one's among them) goes up to the brain through the program that commanded it: as `failed`, or `cancelled` if a newer command preempted the program first |
 
 **Routing** (`Routing.tla`). A receptor feeds a reflex junction that loops to itself, acts,
 or asks a brain through a queue; the brain commands its one action, a motor neuron, whose
@@ -75,9 +83,10 @@ TLC 2.19 (`tla2tools.jar` v1.7.4), every state explored:
 | --- | ---: | ---: | ---: |
 | `MCMotor` | 4,321 | 9,622 | 26 |
 | `MCMotorPreempt` | 48,824 | 110,933 | 24 |
-| `MCLanesCross` | 798 | 1,294 | 17 |
-| `MCLanesSelf` | 202 | 316 | 27 |
-| `MCLanesOrder` | 9,984 | 18,738 | 17 |
+| `MCLanesCross` | 49,884 | 116,914 | 17 |
+| `MCLanesCycle` | 698 | 1,126 | 13 |
+| `MCLanesFull` | 38,152 | 70,955 | 22 |
+| `MCLanesOrder` | 27,195 | 54,204 | 13 |
 | `MCRouting` | 69,604 | 143,072 | 10 |
 
 ## Running
@@ -89,13 +98,13 @@ cd specs
 java -cp tla2tools.jar tlc2.TLC -workers auto -lncheck final -config MCLanesCross.cfg MCLanes
 ```
 
-The workflow runs the six models this way; TLC exits non-zero on a violation and prints the
+The workflow runs the seven models this way; TLC exits non-zero on a violation and prints the
 behavior that leads to it.
 
 ## What the models abstract
 
 - Time is a small clock that ticks; a deadline is a tick. Latencies are a few p99 values.
-- Constants are small (one or two places per nerve, two or three commands, `MAX_HOPS` 4
+- Constants are small (one or two places per nerve, a few commands, `MAX_HOPS` 4
   instead of 32): the properties do not depend on the sizes, and TLC sees every interleaving
   of the steps.
 - A program's command that takes no queue is delivered within the program's step, as
@@ -130,43 +139,39 @@ The checks found these in the design as it was. The fixed ones have a regression
    `arm` → `hand` acting; the clock reaches 1; `hand` fails in a retryable way and tries
    again. Now no try starts after the deadline; the command times out.
    Test: `no_try_starts_after_the_deadline`.
-3. *A waiting command kept its own nerve's place taken* (`EveryCommandEnds`, `PlacesComeBack`
-   in `MCLanesCross`). A command from a part in nerve A to a part in nerve B inherits A's
-   ticket, and kept it while it waited in B's lane. Trace: the hand (A) commands the foot (B)
-   while the leg (B) commands the finger (A); both commands wait; both programs time out, but
-   the waiting commands still hold A's and B's places, so neither lane frees again: both nerves
-   are stuck for good, deadlines or not. B's flood held up A, too. Now a command entering a
-   nerve from outside leaves the place it holds elsewhere behind. The loom models found the
-   same change from another side, with the signals that leave a lane (dropped,
-   expired, given up on) now dropped outside its lock, where freeing a place takes a lane's
-   lock again; `Lanes.tla` releases a place in one step, so it does not model the lock.
-   Test: `a_part_waiting_at_another_nerve_holds_no_place_in_its_own`.
-4. *A part's own work coming back through a part outside the nerve waited for itself*
-   (`EveryCommandEnds` in `MCLanesSelf`). Trace: the hand (A, one place) commands `spine`, a
-   motor neuron in no nerve, which commands the hand's finger: the command enters A from
-   outside and waits for the place the hand itself holds, for ever, or until a deadline
-   (the loom models bounded it by the deadline). Now a command whose signal holds a place in the nerve
-   already goes straight on, as a command from inside it does, deadline or not.
-   Test: `a_command_that_leaves_a_nerve_and_comes_back_never_wedges_it` (from the loom models, now
-   expecting no wait).
-5. *A half-open circuit's trial given up on stayed a trial for good*, found reading the local
-   loop for `Motor.tla` and fixed with the loom models for an abandoned command; a command that times out
-   before its next try (2. above) clears the trial the same way.
+3. *Lanes counted motor programs, which deadlocked and blocked preemption*. A command taken
+   held its nerve's place until its program ended, everything it commanded inside the nerve
+   included. The models found, in turn:
+   - a command waiting in another nerve's lane kept its own nerve's place: two parts
+     commanding each other's nerves stuck both lanes for good, deadlines or not (the loom
+     models found the same from another side, and moved the drops out of the lane's lock);
+   - a part's own work coming back to its nerve through a motor neuron in no nerve waited for
+     the place the part itself held;
+   - two parts commanding into each other deadlocked without deadlines: each program held
+     its nerve's place and waited for the other's;
+   - a newer command to a motor neuron in a full nerve waited behind the program it should
+     preempt (with `in_flight(1)` it never could), and stopping the program when the newer
+     command started to wait still ran two waiting commands oldest first;
+   - a brain's command to a motor neuron that a lane dropped, or that timed out waiting,
+     ended with no report: the report comes from the program, which never started.
 
-**Open** (design decisions, not changed here)
+   Now a lane counts effector acts only, from inside the part or outside, and an act waits for
+   no other command and always ends. Programs never wait in a lane: the latest command stops
+   the running program at once. A dropped act fails, and the program that commanded it reports
+   the failure up like any outcome. `MCLanesCross`, `MCLanesCycle` and `MCLanesFull` check it
+   without deadlines.
+   Tests: `two_parts_commanding_each_other_never_deadlock`,
+   `motor_neurons_commanding_each_other_in_a_cycle_end`,
+   `a_newer_command_preempts_at_once_when_the_lane_is_full`,
+   `an_act_a_full_lane_drops_fails_and_the_brain_hears_it`,
+   `inside_a_nerve_acts_take_the_lane_and_programs_do_not`,
+   `a_part_waiting_at_another_nerve_holds_no_place_in_its_own`,
+   `a_command_that_leaves_a_nerve_and_comes_back_never_wedges_it`.
+4. *A half-open circuit's trial given up on stayed a trial for good*, found reading the local
+   loop for `Motor.tla` and fixed with the loom models for an abandoned command; a command
+   that times out before its next try (2. above) clears the trial the same way.
+**Not covered**
 
-6. *Preemption stops at a full lane* (`PreemptedAtTheLane` in `Lanes.tla`, not checked in CI).
-   A newer command to a motor neuron preempts its program when it arrives, but in a nerve whose
-   places are all taken it waits in the lane, behind the very program it should preempt; with
-   `in_flight(1)` it can never preempt. Trace: the brain commands the hand (A, one place), and
-   commands it again: the second command waits until the first program ends. Stopping the
-   program when the newer command starts to wait is not enough: two commands waiting for the
-   same motor neuron then run one after the other, the older first.
-7. *Two parts commanding into each other deadlock without deadlines* (`EveryCommandEnds` in
-   `MCLanesCross` with no deadline). The hand (A) holds A's place and waits for the foot (B);
-   the leg (B) holds B's place and waits for the finger (A). With deadlines both time out and
-   the lanes recover (3. above); without, nothing ends.
-8. *A brain is not told when a lane drops its command*. A brain's command to a motor neuron
-   that a full lane drops, or whose deadline passes while it waits, ends without a report: the
-   report up the pathways comes from the program, which never started. (Not modelled: found
-   reading `nerve.rs` for `Lanes.tla`.)
+- An effector a brain commands directly reports to nobody, whether its act is done, failed or
+  dropped by its lane: only a program hears an act's outcome. Declare a motor neuron as the
+  action for an act whose outcome the brain should hear.

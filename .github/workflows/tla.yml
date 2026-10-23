@@ -39,7 +39,8 @@ jobs:
           - { module: MCMotor, model: MCMotor }
           - { module: MCMotor, model: MCMotorPreempt }
           - { module: MCLanes, model: MCLanesCross }
-          - { module: MCLanes, model: MCLanesSelf }
+          - { module: MCLanes, model: MCLanesCycle }
+          - { module: MCLanes, model: MCLanesFull }
           - { module: MCLanes, model: MCLanesOrder }
           - { module: MCRouting, model: MCRouting }
     steps:
