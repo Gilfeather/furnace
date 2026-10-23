@@ -188,14 +188,29 @@ impl EffectorInner {
 
     /// The motor program that sent the command stopped waiting: no more tries
     fn abandoned(&self) {
-        self.counters.inflight.fetch_sub(1, Ordering::Relaxed);
-        // A trial command given up on decides nothing: the next command is the trial. Left
-        // out, the circuit would stay half open, refusing every command, for good.
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).trial = false;
+        self.given_up();
         debug!(
             "nerve: effector '{}': nobody waits for the command any more",
             self.act.name()
         );
+    }
+
+    /// The command's deadline passed before the next try: no more tries
+    fn expired(&self, signal: &Signal) {
+        self.given_up();
+        debug!(
+            "nerve: effector '{}': the deadline passed before the next try",
+            self.act.name()
+        );
+        signal.report(Err(MotionError::TimedOut));
+    }
+
+    /// A command given up on before its last try
+    fn given_up(&self) {
+        self.counters.inflight.fetch_sub(1, Ordering::Relaxed);
+        // A trial command given up on decides nothing: the next command is the trial. Left
+        // out, the circuit would stay half open, refusing every command, for good.
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).trial = false;
     }
 
     pub(super) fn backoff(&self, attempt: u32) -> Duration {
@@ -232,6 +247,13 @@ pub(super) async fn run(
         let result = match pending.take() {
             Some(future) => future.await,
             None if signal.abandoned() => return inner.abandoned(),
+            None if signal
+                .urgency
+                .deadline
+                .is_some_and(|d| tokio::time::Instant::now() >= d.into()) =>
+            {
+                return inner.expired(&signal);
+            }
             None => match inner.act.act(&command, &signal) {
                 Action::Done(result) => result,
                 Action::Pending(future) => future.await,
@@ -267,6 +289,7 @@ mod tests {
     use super::*;
     use crate::nerve::fabric::Fabric;
     use crate::nerve::neuron::{Cx, Firing, Neuron};
+    use crate::nerve::signal::Urgency;
     use crate::nerve::testing::{command, fabric_with, wait_until};
     use std::sync::atomic::AtomicUsize;
 
@@ -350,6 +373,26 @@ mod tests {
         let m = effector.metrics();
         assert_eq!((m.retries, m.failed, m.inflight), (2, 0, 0));
         assert_eq!(m.breaker, BreakerState::Closed);
+    }
+
+    #[test]
+    fn no_try_starts_after_the_deadline() {
+        let effector = Effector::new(Flaky::new(100, true)).retry(Retry {
+            attempts: 5,
+            backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_millis(100),
+        });
+        let (fabric, r) = fabric_with(effector.clone());
+        let urgency = Urgency::within(Duration::from_millis(10));
+        fabric.stimulate(
+            r,
+            command("flaky", serde_json::Value::Null).with_urgency(urgency),
+        );
+        wait_until(|| effector.metrics().inflight == 0);
+        // One try, then the backoff outlasts the deadline: no second try (it would fail
+        // and back off again)
+        let m = effector.metrics();
+        assert_eq!((m.retries, m.failed, m.acted), (1, 0, 0));
     }
 
     #[test]

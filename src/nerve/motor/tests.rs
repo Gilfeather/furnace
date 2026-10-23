@@ -576,6 +576,34 @@ async fn a_question_waits_in_a_deliberative_queue_for_the_brain() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_command_in_a_deliberative_queue_is_carried_out_after_the_request_is_gone() {
+    let (log, mut parts) = mpsc::unbounded_channel();
+    let mut b = builder();
+    let r = b.neuron(pass("in"));
+    let dress = b.motor("dress", |m| async move {
+        m.command("sleeve", Value::Null).await
+    });
+    let (brain, mut reports) = recorder("brain");
+    let brain = b.neuron(brain);
+    b.reflex(dress, brain);
+    let sleeve = b.effector(part("sleeve", &log).value(json!("worn")).once());
+    // Lighter than the way up to the brain, so the report goes there
+    b.deliberative(dress, sleeve).weight(0.5);
+    let fabric = b.build().unwrap();
+
+    // The request behind the stimulus is no longer waited for: the sleeve is still put on,
+    // and the program hears what it measured, not a "done" for a command never carried out
+    let (reply, receiver) = crate::nerve::signal::ReplyHandle::required();
+    drop(receiver);
+    fabric.stimulate(r, command("dress", Value::Null).with_reply(reply));
+    assert_eq!(parts.recv().await.unwrap(), "sleeve null");
+    assert_eq!(
+        reports.recv().await.unwrap(),
+        json!({"action": "dress", "status": "done", "result": "worn"})
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_brain_and_a_body_part_answering_each_other_forever_are_cut() {
     let mut b = builder();
     let r = b.neuron(pass("in"));
@@ -786,8 +814,8 @@ async fn inside_a_nerve_a_part_s_own_commands_never_wait() {
     );
 }
 
-/// A command that leaves a nerve and comes back in from outside waits for a place of its own
-/// without holding the one it came from: once what holds the lane gives up, the lane is free
+/// A command that leaves a nerve and comes back in from outside is the nerve's own work: it
+/// holds the nerve's place already, and goes straight on rather than wait for it
 #[tokio::test(start_paused = true)]
 async fn a_command_that_leaves_a_nerve_and_comes_back_never_wedges_it() {
     let mut b = builder();
@@ -818,16 +846,44 @@ async fn a_command_that_leaves_a_nerve_and_comes_back_never_wedges_it() {
             .unwrap()
     };
 
-    // The arm takes the nerve's one place and waits for the relay, which waits for the
-    // wrist, which waits in the lane for the arm's place: until the deadline
-    let due = Urgency::within(Duration::from_secs(5));
-    fabric.stimulate(r, command("arm", json!("relay")).with_urgency(due));
-    assert_eq!(report(&mut reports).await["status"], "timed_out");
+    // The arm takes the nerve's one place and commands the relay, which commands the wrist:
+    // the wrist's command holds the arm's place, and never waits for it, deadline or not
+    fabric.stimulate(r, command("arm", json!("relay")));
+    assert_eq!(report(&mut reports).await["result"], "turned");
     // The place is free again, and the next command goes straight on
     assert_eq!(fabric.stimulate(r, command("arm", Value::Null)).acted, 1);
     assert_eq!(report(&mut reports).await["result"], "moved");
     let lane = &fabric.metrics().nerves[0];
-    assert_eq!((lane.in_flight, lane.waiting, lane.waited), (0, 0, 1));
+    assert_eq!((lane.in_flight, lane.waiting, lane.waited), (0, 0, 0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_part_waiting_at_another_nerve_holds_no_place_in_its_own() {
+    let (log, mut parts) = mpsc::unbounded_channel();
+    let mut b = builder();
+    let r = b.neuron(pass("in"));
+    b.nerve(Nerve::new("right_arm").in_flight(1), |b| {
+        b.motor(
+            "hand",
+            |m| async move { m.command("foot", Value::Null).await },
+        );
+    });
+    b.nerve(Nerve::new("left_leg").in_flight(1), |b| {
+        b.effector(part("foot", &log).delay(Duration::from_secs(3600)).once());
+    });
+    let fabric = b.build().unwrap();
+
+    // The leg's one place is taken for an hour, so the hand's command waits in its lane
+    fabric.stimulate(r, command("foot", json!(1)));
+    assert_eq!(parts.recv().await.unwrap(), "foot 1");
+    let soon = Urgency::within(Duration::from_secs(1));
+    fabric.stimulate(r, command("hand", Value::Null).with_urgency(soon));
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    // The hand gave up at its deadline: the arm's place is free, though the command it
+    // sent still waits at the leg
+    let lanes = fabric.metrics().nerves;
+    assert_eq!((lanes[0].in_flight, lanes[1].waiting), (0, 1));
+    assert_eq!(motor_metrics(&fabric, "hand")["timed_out"], 1);
 }
 
 #[tokio::test(start_paused = true)]

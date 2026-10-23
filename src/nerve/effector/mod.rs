@@ -18,7 +18,8 @@
 //!
 //! When a motor neuron's program sent the command, the outcome goes back to it: the value
 //! the act returned (what a device measured, a service's JSON answer), or why it failed for
-//! good. A program that stops waiting stops the retries too.
+//! good. A program that stops waiting stops the retries too, and so does the command's
+//! deadline: no try starts after it.
 
 mod channel;
 mod file_append;

@@ -6,7 +6,8 @@
 //! the rest wait, the most urgent (the nearest deadline) first. An idle lane costs nothing:
 //! the signal goes straight on. A part that is flooded makes its own signals wait and no
 //! other part's. What stays inside the nerve (the hand commanding its fingers, a fingertip's
-//! pressure reaching the hand) never takes the lane: the part's own loops close there.
+//! pressure reaching the hand) never takes the lane: the part's own loops close there. Nor
+//! does the nerve's own work coming back to it through a part outside every nerve.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -251,8 +252,8 @@ impl std::fmt::Debug for Ticket {
 
 impl Fabric {
     /// Let `signal` from `from` into `to`'s nerve: `Ok` to carry it on now, or what became of
-    /// it (waiting in the lane, or dropped). Signals within one nerve, and to neurons in no
-    /// nerve, always go on.
+    /// it (waiting in the lane, or dropped). Signals within one nerve, signals that hold a
+    /// place in the nerve already, and signals to neurons in no nerve always go on.
     pub(super) fn enter(
         &self,
         from: NeuronId,
@@ -262,12 +263,15 @@ impl Fabric {
         let Some(nerve) = self.0.cells[to.index()].nerve else {
             return Ok(signal);
         };
-        if self.0.cells[from.index()].nerve == Some(nerve) {
+        // From inside the nerve, or the nerve's own work coming back to it through a part
+        // outside it: its signal holds one of the nerve's places already
+        if self.0.cells[from.index()].nerve == Some(nerve)
+            || signal.ticket.as_ref().is_some_and(|t| t.0.nerve == nerve)
+        {
             return Ok(signal);
         }
-        // Entering from outside, it lets go of the place it held: in another nerve, or in
-        // this one when it left and came back. Waiting with that place, it could keep taken
-        // the very place it waits for.
+        // Entering from outside, it lets go of the place it holds in another nerve: waiting
+        // here with it, a flooded nerve would keep another's places taken
         signal.ticket = None;
         let lane = &self.0.nerves[nerve];
         match lane.enter(signal.urgency.deadline, (to, signal)) {
