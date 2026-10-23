@@ -1,0 +1,80 @@
+# Which changes each workflow's jobs check, for .github/changed-files.sh.
+#
+#   <workflow> <output> <rule>...
+#
+# A rule is a path pattern in the syntax of GitHub's `paths` filters, applied in order with a
+# later one overriding an earlier one (`**` matches any part of a path, `*` and `?` stay within
+# one directory, a leading `!` leaves the files it matches out again), or `crate:<package>`: a
+# change to a Cargo.toml or Cargo.lock counts when <package>'s dependencies or the manifests that
+# decide how it is built differ (.github/dependency-tree.py), not when a release bumps the
+# workspace's versions or a dependency <package> does not reach is updated. Lines with the same
+# workflow and output add up. A pattern with a leading `~` counts the files it matches only when
+# they change other than in their version numbers (1.2.3, v1.2.3): a release moves the image
+# tags, chart versions and download URLs, which a check of the manifests' content need not see.
+# Every output also counts the workflow's own file (.github/workflows/<workflow>.yml) and the
+# three files that decide relevance (this one, changed-files.sh and dependency-tree.py); another
+# workflow's file counts for none.
+#
+# A line `<workflow> schedule since-last-success` makes that workflow's scheduled runs check
+# the changes since its last successful scheduled run on main, for checks whose tools are
+# pinned, so that an unchanged main is not checked again; every other scheduled run checks
+# everything. Manual runs check everything.
+#
+# The docs, licences and changelogs are left out everywhere, but for CI's doc-tests: the Markdown
+# files it compiles the Rust examples of (src/lib.rs, furnace-burn's and furnace-candle's
+# src/lib.rs include them) and docs/API.md and docs/openapi.json, which its tests compare with
+# the server. `bash .github/changed-files-test.sh` checks these rules against examples.
+
+# CI: the workspace's tests, lints and doc-tests (test, features). The jobs only the nightly
+# run has (other platforms, the bench harnesses, the Kubernetes manifests, ...) skip pull
+# requests anyway.
+ci relevant ** !**.md !**/LICENSE* !**/CHANGELOG* !docs/**
+ci relevant README.md CONTRIBUTING.md examples/README.md docs/*.md docs/openapi.json
+ci relevant !.github/** !specs/** !deploy/** !benches/** !dev/** !packaging/**
+ci relevant !rustls-pure/interop/** !rustls-pure/ct-asm.sh
+ci relevant !Dockerfile !default.nix !flake.nix !deny.toml !.gitignore !.dockerignore
+# The self-test of these rules: only the files every output counts
+ci selftest
+
+# Kani: the proofs sit next to the code they check, in these files
+kani rustls-pure crate:rustls-pure rustls-pure/src/**
+kani kamui crate:kamui kamui/src/**
+kani server crate:furnace-server build.rs src/tensor.rs src/model.rs src/api/infer.rs
+kani server src/json_fast.rs src/nerve/wire.rs
+kani schedule since-last-success
+kani-nightly kamui crate:kamui kamui/src/**
+kani-nightly server crate:furnace-server build.rs src/tensor.rs src/model.rs src/api/infer.rs
+kani-nightly server src/json_fast.rs src/nerve/wire.rs
+kani-nightly schedule since-last-success
+
+# Miri: kamui's unit tests and its integration tests
+miri relevant crate:kamui kamui/src/** kamui/tests/**
+miri schedule since-last-success
+
+# Loom: amate's queue, and the nerve's lanes, effectors and motor neurons
+loom amate crate:amate amate/src/**
+loom server crate:furnace-server build.rs src/nerve/**
+loom schedule since-last-success
+
+# TLA+: TLC reads the specs and their models only
+tla relevant specs/** !**.md
+tla schedule since-last-success
+
+# rustls-pure: the check of its own machine code; interoperability (the examples are the
+# client and server the script drives); the builds for other targets
+rustls-pure machine-code crate:rustls-pure rustls-pure/src/** rustls-pure/ct-asm.sh
+rustls-pure interop crate:rustls-pure rustls-pure/src/** rustls-pure/examples/**
+rustls-pure interop rustls-pure/interop/**
+rustls-pure targets crate:rustls-pure rustls-pure/src/**
+
+# Security Audit: cargo-deny reads the workspace's lockfile and manifests (the benchmark
+# harnesses are workspaces of their own) and deny.toml; dependency review every manifest and
+# lockfile; CodeQL the Rust sources it scans on a pull request
+security advisories Cargo.lock deny.toml
+security deny Cargo.lock **/Cargo.toml !benches/** deny.toml
+security dependency-review **/Cargo.toml **/Cargo.lock
+security codeql **.rs !furnace-burn/vendor/** !benches/compare/**
+
+# KServe end-to-end: the manifests it deploys, but not a release's new version in them (the
+# released image they then name does not exist until the release is published)
+kserve-e2e relevant ~deploy/kserve/** !**.md

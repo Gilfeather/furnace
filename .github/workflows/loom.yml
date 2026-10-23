@@ -5,8 +5,10 @@ name: Loom
 # motor neuron's program slot. They are the `model_check` modules, built only with the cfg that
 # makes each crate's `sync` module swap std's locks and atomics for loom's: `loom` for amate,
 # which has no dependencies, and `furnace_loom` for the server, whose tokio reads `loom` too
-# (and leaves out its networking under it). On pull requests that change those parts, and
-# nightly on main. Every pull request runs `Loom required`, the job to require before merging.
+# (and leaves out its networking under it). On pull requests that change those parts or what
+# they are built from (.github/relevance), and nightly on main when they changed since the last
+# successful nightly run. Every pull request runs `Loom required`, the job to require before
+# merging.
 on:
   pull_request:
     branches: [ main ]
@@ -31,11 +33,17 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Which jobs this run needs (.github/relevance)
   changes:
     name: Changed files
     runs-on: ubuntu-latest
+    # actions: read, to find the last successful scheduled run
+    permissions:
+      contents: read
+      actions: read
     outputs:
-      relevant: ${{ steps.changes.outputs.relevant }}
+      amate: ${{ steps.changes.outputs.amate }}
+      server: ${{ steps.changes.outputs.server }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
@@ -48,14 +56,13 @@ jobs:
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      run: >-
-        bash .github/changed-files.sh 'amate/**' 'src/nerve/**' 'Cargo.toml' 'Cargo.lock'
-        '.github/workflows/loom.yml' '.github/changed-files.sh'
+        GH_TOKEN: ${{ github.token }}
+      run: bash .github/changed-files.sh loom
 
   loom:
     name: Loom models
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.amate == 'true' || needs.changes.outputs.server == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -72,6 +79,7 @@ jobs:
 
     # Under loom amate's other tests are left out: its parts work only inside a model
     - name: amate
+      if: needs.changes.outputs.amate == 'true'
       env:
         RUSTFLAGS: --cfg loom
       run: cargo test -p amate --release --lib
@@ -80,6 +88,7 @@ jobs:
     # loom's, outside a model). The ci profile: release optimizations without the whole-program
     # LTO, which only slows the link.
     - name: Nerve lanes, effectors and motor neurons
+      if: needs.changes.outputs.server == 'true'
       env:
         RUSTFLAGS: --cfg furnace_loom
       run: cargo test -p furnace-server --profile ci --lib model_check

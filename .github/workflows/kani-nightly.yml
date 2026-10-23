@@ -3,8 +3,9 @@ name: Kani nightly
 # The Kani proofs that take longer than a pull request should wait (kani.yml runs the rest), at
 # the same bounds: kamui's proofs at the allocator's own 64 slots, the status line parser on any
 # 14 bytes, element counts of four dimensions, joining three tensors and raw tensor data of
-# every length up to 17 bytes. One harness per job, each with up to six hours. Also by hand
-# (workflow_dispatch), on any branch.
+# every length up to 17 bytes. One harness per job, each with up to six hours. A package's
+# harnesses run when it changed since the last successful nightly run (.github/relevance), so an
+# unchanged main is not proved again. Also by hand (workflow_dispatch), on any branch, all of them.
 on:
   schedule:
     # Every night, 02:53 UTC
@@ -18,8 +19,36 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  harness:
+  # Which jobs this run needs (.github/relevance)
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    # actions: read, to find the last successful scheduled run
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      kamui: ${{ steps.changes.outputs.kamui }}
+      server: ${{ steps.changes.outputs.server }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        filter: blob:none
+
+    - name: Files this workflow checks
+      id: changes
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        GH_TOKEN: ${{ github.token }}
+      run: bash .github/changed-files.sh kani-nightly
+
+  harness-kamui:
     name: Kani ${{ matrix.package }} ${{ matrix.harness }}
+    needs: changes
+    if: needs.changes.outputs.kamui == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
@@ -30,6 +59,27 @@ jobs:
         - { package: kamui, harness: 'verification::keep_keeps_a_block_or_refuses_it_64_slots' }
         - { package: kamui, harness: 'verification::alloc_and_dealloc_stay_in_bounds_64_slots' }
         - { package: kamui, harness: 'verification::realloc_keeps_the_contents_64_slots' }
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Prove
+      uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+      with:
+        kani-version: '0.68.0'
+        # Function contracts (`proof_for_contract`, `stub_verified`) are unstable in Kani 0.68
+        args: -p ${{ matrix.package }} --harness ${{ matrix.harness }} --exact -Z function-contracts -Z stubbing
+
+  harness-server:
+    name: Kani ${{ matrix.package }} ${{ matrix.harness }}
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
         - { package: furnace-server, harness: 'tensor::verification::element_count_is_the_exact_product' }
         - { package: furnace-server, harness: 'tensor::verification::concat_batch_never_panics' }
     steps:

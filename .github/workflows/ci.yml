@@ -8,9 +8,9 @@ name: CI
 # main (`?branch=main&event=schedule`), so it is always a finished run, never a cancelled one.
 #
 # Every pull request runs `CI required`, the job to require before merging. Its jobs are skipped
-# when the pull request changes only docs, except the Markdown files whose Rust examples compile
-# as doc-tests (src/lib.rs, furnace-burn's and furnace-candle's src/lib.rs); the patterns in
-# `changes` are in GitHub's `paths` syntax, later ones overriding earlier ones.
+# when the pull request changes none of the files they read (.github/relevance): docs, licences
+# and changelogs alone (but the Markdown files whose Rust examples compile as doc-tests), or only
+# another workflow's files, the TLA+ specs, the deploy manifests or the benchmark harnesses.
 #
 # The workspace's default members are furnace-server (the root), furnace-burn and furnace-cli:
 # `cargo test`, `cargo clippy` and `cargo check` without `-p` cover those three (furnace-demo is
@@ -38,11 +38,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Which jobs this run needs (.github/relevance)
   changes:
     name: Changed files
     runs-on: ubuntu-latest
     outputs:
       relevant: ${{ steps.changes.outputs.relevant }}
+      selftest: ${{ steps.changes.outputs.selftest }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
@@ -55,9 +57,7 @@ jobs:
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      run: >-
-        bash .github/changed-files.sh '**' '!**.md' '!docs/**' '!LICENSE*'
-        'README.md' 'CONTRIBUTING.md' 'examples/README.md' 'docs/*.md'
+      run: bash .github/changed-files.sh ci
 
   test:
     name: Test Suite
@@ -489,10 +489,23 @@ jobs:
   # The check to require before merging: every job above passed, or was skipped as not needed
   # (a pull request that changes only docs, or a nightly job). Also on a nightly run, where
   # nothing is skipped.
+  # The rules that decide which jobs a pull request needs, against examples
+  relevance:
+    name: Relevance rules
+    needs: changes
+    if: needs.changes.outputs.selftest == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Self-test
+      run: bash .github/changed-files-test.sh
+
   required:
     name: CI required
     if: always()
-    needs: [changes, test, features, toolchains, metal, bench-harnesses, llm-candle, kubernetes, vendored-kernels, coverage, benchmarks]
+    needs: [changes, test, features, relevance, toolchains, metal, bench-harnesses, llm-candle, kubernetes, vendored-kernels, coverage, benchmarks]
     runs-on: ubuntu-latest
     steps:
     - name: Every job passed or was skipped

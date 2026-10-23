@@ -89,20 +89,56 @@ cargo deny check
 
 - **Pull requests to main** run every verification workflow: CI, Kani, TLA+, Loom, Miri,
   rustls-pure, Security Audit and KServe end-to-end. Each starts with a `Changed files` job
-  (`.github/changed-files.sh`, the pull request's diff from its merge base against the
-  workflow's patterns) and runs its heavy jobs only when the pull request changes a file they
-  check. Each ends in one gate job, `<Workflow> required`, which passes when every job passed
-  or was skipped as not needed, and fails when one failed or was cancelled. A newer push to
-  the same pull request cancels the older run.
+  (`bash .github/changed-files.sh <workflow>`) that decides which of its jobs the pull request
+  needs, from the diff since the pull request's merge base and the rules in
+  `.github/relevance`. Each ends in one gate job, `<Workflow> required`, which passes when
+  every job passed or was skipped as not needed, and fails when one failed or was cancelled. A
+  newer push to the same pull request cancels the older run.
 - **Pushes to main** run nothing: what is merged has passed as a pull request. Only the
   release workflows run on tags.
 - **Nightly on main** CI runs everything pull requests leave out (Windows and macOS, beta and
   the MSRV, Metal, the vendored kernels, the bench harnesses, furnace-candle, the Kubernetes
-  manifests, coverage); Kani, TLA+ and Loom run nightly too, and `kani-nightly.yml` runs the
-  Kani harnesses too long for a pull request. Miri, rustls-pure (with the newest rustls and its
-  MSRV), Security Audit, KServe end-to-end, the constant-time tests, the soak test and the
-  benchmarks run weekly. Scheduled runs are never cancelled. The README's CI badge shows the
-  last nightly CI run on main.
+  manifests, coverage). Kani, TLA+, Loom and `kani-nightly.yml` (the Kani harnesses too long
+  for a pull request) run nightly, Miri weekly, each on what changed since its last successful
+  scheduled run: their tools are pinned, so an unchanged main gives the same result. Weekly and
+  in full: rustls-pure (the newest rustls, its MSRV, interoperability), Security Audit (new
+  advisories), KServe end-to-end, the constant-time tests (with the machine-code check), the
+  soak test and the benchmarks. Scheduled runs are never cancelled. The README's CI badge shows
+  the last nightly CI run on main.
+
+### Which changes run which jobs
+
+`.github/relevance` holds the rules, one line per workflow and output: path patterns in the
+syntax of GitHub's `paths` filters, and `crate:<package>`. The rules follow what each job
+reads:
+
+- **Docs, licences and changelogs run nothing**, except in CI: the Markdown files whose Rust
+  examples compile as doc-tests (README.md, CONTRIBUTING.md, examples/README.md, docs/*.md)
+  and docs/openapi.json, which the server's tests compare with its routes.
+- **Each check counts only the files it reads.** Kani a package's proofs: `rustls-pure/src`,
+  `kamui/src`, and furnace-server's files with proofs (`src/tensor.rs`, `src/model.rs`,
+  `src/api/infer.rs`, `src/json_fast.rs`, `src/nerve/wire.rs`) and `build.rs`. Miri
+  `kamui/src` and `kamui/tests`. Loom `amate/src` and `src/nerve`, each for its own models. TLA+
+  `specs/`. rustls-pure's machine-code check `rustls-pure/src` and `ct-asm.sh`; its
+  interoperability tests `rustls-pure/src`, `rustls-pure/examples` and `rustls-pure/interop`.
+  CI everything else in the workspace, but other workflows' files, `specs/`, `deploy/`,
+  `benches/` (workspaces of their own, which the nightly run checks), `dev/` and packaging.
+  cargo-deny the lockfile, the workspace's manifests and `deny.toml`; CodeQL Rust code.
+- **Cargo.toml and Cargo.lock count by what a package is built from.** For `crate:<package>`,
+  `.github/dependency-tree.py` lists the package's resolved dependencies from the lockfile and
+  the manifests that decide its build (its own and those of the workspace packages it reaches,
+  and the workspace's profiles, lints and patches) at both commits, without the workspace's
+  version numbers and the manifests' descriptive fields. A release's version bump, or an
+  update of a dependency the package does not reach, leaves it unchanged.
+- **The deploy manifests count by more than their versions.** KServe end-to-end runs when
+  `deploy/kserve` changes other than in its version numbers (`~` in the rules): a release's
+  new image tag and download URL name what is published only after the merge.
+- A workflow's own file and the three relevance files count for all of its jobs; another
+  workflow's file counts for none.
+
+`bash .github/changed-files-test.sh` checks the rules against example pull requests (which
+outputs each must turn on); CI runs it when they change. Change the rules and the examples
+together.
 
 ## GitHub Branch Protection
 

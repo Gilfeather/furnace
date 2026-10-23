@@ -1,8 +1,9 @@
 name: Security Audit
 
-# On pull requests that change the dependencies, and weekly on main for new advisories against
-# unchanged ones. Every pull request runs `Security Audit required`, the job to require before
-# merging.
+# On pull requests that change what each job reads (.github/relevance): the advisories and
+# cargo-deny when the lockfile, the manifests or deny.toml change, CodeQL when Rust code does;
+# and weekly on main, for new advisories against unchanged dependencies. Every pull request runs
+# `Security Audit required`, the job to require before merging.
 on:
   schedule:
     # Mondays, 00:00 UTC
@@ -18,11 +19,15 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Which jobs this run needs (.github/relevance)
   changes:
     name: Changed files
     runs-on: ubuntu-latest
     outputs:
-      relevant: ${{ steps.changes.outputs.relevant }}
+      advisories: ${{ steps.changes.outputs.advisories }}
+      deny: ${{ steps.changes.outputs.deny }}
+      dependency-review: ${{ steps.changes.outputs['dependency-review'] }}
+      codeql: ${{ steps.changes.outputs.codeql }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
@@ -35,14 +40,12 @@ jobs:
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      run: >-
-        bash .github/changed-files.sh '**/Cargo.toml' '**/Cargo.lock' 'deny.toml'
-        '.github/workflows/security.yml' '.github/changed-files.sh'
+      run: bash .github/changed-files.sh security
 
   security_audit:
     name: Security Audit
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.advisories == 'true'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -60,7 +63,7 @@ jobs:
   cargo_deny:
     name: cargo-deny (licenses, bans, sources)
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.deny == 'true'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -75,7 +78,7 @@ jobs:
     name: Dependency Review
     runs-on: ubuntu-latest
     needs: changes
-    if: github.event_name == 'pull_request' && needs.changes.outputs.relevant == 'true'
+    if: github.event_name == 'pull_request' && needs.changes.outputs['dependency-review'] == 'true'
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
@@ -91,7 +94,7 @@ jobs:
   codeql:
     name: CodeQL Analysis
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.codeql == 'true'
     runs-on: ubuntu-latest
     permissions:
       actions: read

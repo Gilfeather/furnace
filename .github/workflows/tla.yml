@@ -1,8 +1,8 @@
 name: TLA+
 
 # Model-check the nervous system's design (specs/README.md): on pull requests that change the
-# specs or the code they model, and nightly on main. Every pull request runs `TLA+ required`, the
-# job to require before merging.
+# specs (TLC reads nothing else), and nightly on main when they changed since the last successful
+# nightly run. Every pull request runs `TLA+ required`, the job to require before merging.
 on:
   pull_request:
     branches: [ main ]
@@ -27,9 +27,14 @@ env:
   TLA_TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 
 jobs:
+  # Which jobs this run needs (.github/relevance)
   changes:
     name: Changed files
     runs-on: ubuntu-latest
+    # actions: read, to find the last successful scheduled run
+    permissions:
+      contents: read
+      actions: read
     outputs:
       relevant: ${{ steps.changes.outputs.relevant }}
     steps:
@@ -44,9 +49,8 @@ jobs:
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      run: >-
-        bash .github/changed-files.sh 'specs/**' 'src/nerve/**' '.github/workflows/tla.yml'
-        '.github/changed-files.sh'
+        GH_TOKEN: ${{ github.token }}
+      run: bash .github/changed-files.sh tla
 
   tlc:
     name: TLC ${{ matrix.model }}
