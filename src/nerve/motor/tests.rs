@@ -779,7 +779,7 @@ async fn a_flooded_nerve_holds_up_only_itself_and_lets_the_urgent_go_first() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn inside_a_nerve_a_part_s_own_commands_never_wait() {
+async fn inside_a_nerve_acts_take_the_lane_and_programs_do_not() {
     let (log, mut parts) = mpsc::unbounded_channel();
     let mut b = builder();
     let r = b.neuron(pass("in"));
@@ -802,20 +802,21 @@ async fn inside_a_nerve_a_part_s_own_commands_never_wait() {
     b.reflex(hand, brain);
     let fabric = b.build().unwrap();
 
-    // One place in the nerve, taken by the hand: its finger and knuckle go on all the same
+    // One place in the nerve: the hand and the finger take none, and the knuckle's two
+    // acts, though both from inside, take it in turn
     fabric.stimulate(r, command("hand", Value::Null));
     assert_eq!(reports.recv().await.unwrap()["result"], "closed");
     assert_eq!(drain(&mut parts).len(), 4);
     let lane = &fabric.metrics().nerves[0];
-    assert_eq!((lane.in_flight, lane.waited), (0, 0));
+    assert_eq!((lane.in_flight, lane.waited), (0, 1));
     assert_eq!(
         fabric.describe().neurons[1].nerve.as_deref(),
         Some("right_arm")
     );
 }
 
-/// A command that leaves a nerve and comes back in from outside is the nerve's own work: it
-/// holds the nerve's place already, and goes straight on rather than wait for it
+/// A command that leaves a nerve and comes back in from outside never waits for itself: the
+/// programs on the way hold no place in the lane
 #[tokio::test(start_paused = true)]
 async fn a_command_that_leaves_a_nerve_and_comes_back_never_wedges_it() {
     let mut b = builder();
@@ -846,8 +847,8 @@ async fn a_command_that_leaves_a_nerve_and_comes_back_never_wedges_it() {
             .unwrap()
     };
 
-    // The arm takes the nerve's one place and commands the relay, which commands the wrist:
-    // the wrist's command holds the arm's place, and never waits for it, deadline or not
+    // The arm commands the relay, which commands the wrist: programs all, none takes the
+    // nerve's one place or waits for it, deadline or not
     fabric.stimulate(r, command("arm", json!("relay")));
     assert_eq!(report(&mut reports).await["result"], "turned");
     // The place is free again, and the next command goes straight on
@@ -884,6 +885,136 @@ async fn a_part_waiting_at_another_nerve_holds_no_place_in_its_own() {
     let lanes = fabric.metrics().nerves;
     assert_eq!((lanes[0].in_flight, lanes[1].waiting), (0, 1));
     assert_eq!(motor_metrics(&fabric, "hand")["timed_out"], 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn two_parts_commanding_each_other_never_deadlock() {
+    let (log, mut parts) = mpsc::unbounded_channel();
+    let mut b = builder();
+    let r = b.neuron(pass("in"));
+    let hand = b.nerve(Nerve::new("right_arm").in_flight(1), |b| {
+        b.effector(part("finger", &log).delay(Duration::from_secs(1)).once());
+        b.motor(
+            "hand",
+            |m| async move { m.command("toe", Value::Null).await },
+        )
+    });
+    let leg = b.nerve(Nerve::new("left_leg").in_flight(1), |b| {
+        b.effector(part("toe", &log).delay(Duration::from_secs(1)).once());
+        b.motor(
+            "leg",
+            |m| async move { m.command("finger", Value::Null).await },
+        )
+    });
+    let (brain, mut reports) = recorder("brain");
+    let brain = b.neuron(brain);
+    b.reflex(hand, brain);
+    b.reflex(leg, brain);
+    let fabric = b.build().unwrap();
+
+    // Each part commands an act in the other's nerve, without a deadline: the programs
+    // hold no place, so neither waits for the other
+    fabric.stimulate(r, command("hand", Value::Null));
+    fabric.stimulate(r, command("leg", Value::Null));
+    let mut done = [reports.recv().await.unwrap(), reports.recv().await.unwrap()]
+        .map(|report| (report["action"].clone(), report["status"].clone()));
+    done.sort_by_key(|(action, _)| action.to_string());
+    assert_eq!(
+        done,
+        [
+            (json!("hand"), json!("done")),
+            (json!("leg"), json!("done"))
+        ]
+    );
+    assert_eq!(drain(&mut parts).len(), 4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn motor_neurons_commanding_each_other_in_a_cycle_end() {
+    let mut b = builder();
+    let r = b.neuron(pass("in"));
+    let ping = b.motor(
+        "ping",
+        |m| async move { m.command("pong", Value::Null).await },
+    );
+    b.motor(
+        "pong",
+        |m| async move { m.command("ping", Value::Null).await },
+    );
+    let (brain, mut reports) = recorder("brain");
+    let brain = b.neuron(brain);
+    b.reflex(ping, brain);
+    let fabric = b.build().unwrap();
+
+    // Ping's command comes back to ping and stops the program that sent it on its way
+    fabric.stimulate(r, command("ping", Value::Null));
+    assert_eq!(reports.recv().await.unwrap()["status"], "cancelled");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    for name in ["ping", "pong"] {
+        assert_eq!(motor_metrics(&fabric, name)["running"], 0, "{name}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_newer_command_preempts_at_once_when_the_lane_is_full() {
+    let (log, mut parts) = mpsc::unbounded_channel();
+    let mut b = builder();
+    let r = b.neuron(pass("in"));
+    let hand = b.nerve(Nerve::new("right_arm").in_flight(1), |b| {
+        b.effector(part("finger", &log).delay(Duration::from_secs(3600)).once());
+        b.motor("hand", |m| async move {
+            m.command("finger", m.args().clone()).await
+        })
+    });
+    let (brain, mut reports) = recorder("brain");
+    let brain = b.neuron(brain);
+    b.reflex(hand, brain);
+    let fabric = b.build().unwrap();
+
+    // The finger's one place is taken for an hour, so the hand's act waits
+    fabric.stimulate(r, command("finger", json!(0)));
+    assert_eq!(parts.recv().await.unwrap(), "finger 0");
+    assert_eq!(fabric.stimulate(r, command("hand", json!(1))).acted, 1);
+    // A newer command to the hand stops the first program now, not after the hour
+    assert_eq!(fabric.stimulate(r, command("hand", json!(2))).acted, 1);
+    assert_eq!(
+        reports.recv().await.unwrap(),
+        json!({"action": "hand", "status": "cancelled", "reason": "stopped"})
+    );
+    assert_eq!(motor_metrics(&fabric, "hand")["cancelled"], 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_act_a_full_lane_drops_fails_and_the_brain_hears_it() {
+    let (log, mut parts) = mpsc::unbounded_channel();
+    let mut b = builder();
+    let r = b.neuron(pass("in"));
+    let hand = b.nerve(Nerve::new("right_arm").in_flight(1), |b| {
+        b.effector(part("finger", &log).delay(Duration::from_secs(3600)).once());
+        b.motor(
+            "hand",
+            |m| async move { m.command("finger", Value::Null).await },
+        )
+    });
+    let (brain, mut reports) = recorder("brain");
+    let brain = b.neuron(brain);
+    b.reflex(hand, brain);
+    let fabric = b.build().unwrap();
+
+    // One act holds the place for an hour; the lane fills up behind it with urgent ones
+    fabric.stimulate(r, command("finger", json!(0)));
+    assert_eq!(parts.recv().await.unwrap(), "finger 0");
+    let urgent = Urgency::within(Duration::from_secs(36_000));
+    for i in 1..=1024 {
+        let act = command("finger", json!(i)).with_urgency(urgent);
+        assert_eq!(fabric.stimulate(r, act).queued, 1);
+    }
+    // The hand's act is the least urgent: dropped, it fails, and the failure goes up
+    fabric.stimulate(r, command("hand", Value::Null));
+    assert_eq!(
+        reports.recv().await.unwrap(),
+        json!({"action": "hand", "status": "failed", "reason": "the nerve 'right_arm' is full"})
+    );
 }
 
 #[tokio::test(start_paused = true)]
