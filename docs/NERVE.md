@@ -173,7 +173,7 @@ action ended.
 new command preempts the program running. `fabric.stop(name)` (or `m.stop(name)` from another
 program, a `stop` action say) stops it. A stopped program stops everything it commanded and
 still waits for, all the way down, and an effector whose commander stopped waiting gives up
-its retries.
+its retries, as it does once the command's deadline has passed.
 
 **Actions: what the brain sees.** `b.action(id, description, args)` offers a motor neuron or an
 effector to brains, with what it does and the shape of its arguments. An LLM brain's prompt
@@ -239,10 +239,15 @@ at most `Nerve::in_flight` of them are carried out at once (16 unless
 `b.nerve(Nerve::new("right_arm").in_flight(4), ..)`), each until its act or program ends, and
 the rest wait, the nearest deadline first. An idle lane costs nothing; a part that is flooded
 makes its own signals wait and no other part's, so a jam in the right arm does not stop the
-left. What stays inside the nerve never waits there: the hand commanding its fingers, the
-fingertip's pressure reaching the hand. That is where a part's own loops close. `GET /metrics`
-shows each nerve's lane (`in_flight`, `waiting`, `waited`, `dropped`); a lane holds up to 1,024
-waiting signals and then drops the least urgent.
+left: a command waiting in one nerve's lane holds no place in another. What stays inside the
+nerve never waits there: the hand commanding its fingers, the fingertip's pressure reaching the
+hand, and the arm's own work coming back to it through a motor neuron in no nerve. That is
+where a part's own loops close. `GET /metrics` shows each nerve's lane (`in_flight`, `waiting`,
+`waited`, `dropped`); a lane holds up to 1,024 waiting signals and then drops the least urgent.
+
+The motor side's design, the nerves' lanes and how a signal is routed are specified in TLA+
+and model-checked with TLC in CI: [`specs/`](../specs/README.md) lists the properties checked
+and what the checks found.
 
 ```rust,no_run
 use furnace::nerve::prelude::*;
