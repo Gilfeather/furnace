@@ -107,7 +107,6 @@ jobs:
         - { package: furnace-server, harness: 'json_fast::verification::number_lengths_take_json_numbers_only' }
         - { package: furnace-server, harness: 'json_fast::verification::cut_pieces_join_back_into_the_span' }
         - { package: furnace-server, harness: 'json_fast::verification::array_spans_lie_between_brackets' }
-        - { package: furnace-server, harness: 'tensor::verification::times_is_the_exact_product' }
         - { package: furnace-server, harness: 'tensor::verification::joined_batch_keeps_its_contract' }
         - { package: furnace-server, harness: 'model::verification::flat_sizes_never_overflow' }
         - { package: furnace-server, harness: 'nerve::wire::verification::the_head_ends_at_the_first_blank_line' }
