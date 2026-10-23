@@ -31,8 +31,8 @@ mod webhook;
 use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -42,6 +42,7 @@ use super::latency::Latency;
 use super::motor::MotionError;
 use super::neuron::{Cx, Firing, Neuron, NeuronKind};
 use super::signal::{Command, Signal};
+use super::sync;
 use kuebiko::{render_family, render_labelled};
 
 pub use channel::{ChannelOut, Delivery};
@@ -212,8 +213,8 @@ struct EffectorInner {
     refractory: Option<Duration>,
     epoch: Instant,
     /// Nanoseconds since `epoch` of the last command admitted; 0 before any
-    last_acted: AtomicU64,
-    state: Mutex<LoopState>,
+    last_acted: sync::AtomicU64,
+    state: sync::Mutex<LoopState>,
     counters: LoopCounters,
     latency: Latency,
 }
@@ -241,8 +242,8 @@ impl Effector {
                 rate: None,
                 refractory: None,
                 epoch: now,
-                last_acted: AtomicU64::new(0),
-                state: Mutex::new(LoopState {
+                last_acted: sync::AtomicU64::new(0),
+                state: sync::Mutex::new(LoopState {
                     consecutive_failures: 0,
                     open_until: None,
                     trial: false,

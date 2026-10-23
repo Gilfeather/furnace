@@ -165,6 +165,7 @@ checksum = "c880a97d28a3681c0267bd29cff89621202715b065127cd445fa0f0fe0aa2880"
 name = "amate"
 version = "0.15.0"
 dependencies = [
+ "loom",
  "proptest",
 ]
 
@@ -3396,6 +3397,7 @@ dependencies = [
  "hyper-util",
  "image",
  "kuebiko",
+ "loom",
  "minijinja",
  "minijinja-contrib",
  "proptest",

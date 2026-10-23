@@ -94,21 +94,34 @@ pub enum BreakerState {
 }
 
 impl EffectorInner {
+    /// Whether `now` is in the refractory period of the last command admitted; counted if so
+    fn refractory(&self, now: Instant) -> bool {
+        let Some(refractory) = self.refractory else {
+            return false;
+        };
+        let last = self.last_acted.load(Ordering::Relaxed);
+        let quiet = last != 0
+            && now.saturating_duration_since(self.epoch + Duration::from_nanos(last)) < refractory;
+        if quiet {
+            self.counters
+                .quiet_refractory
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        quiet
+    }
+
     /// Whether to act now, after how long, or not at all
     pub(super) fn admit(&self, now: Instant) -> Admission {
-        if let Some(refractory) = self.refractory {
-            let last = self.last_acted.load(Ordering::Relaxed);
-            if last != 0
-                && now.saturating_duration_since(self.epoch + Duration::from_nanos(last))
-                    < refractory
-            {
-                self.counters
-                    .quiet_refractory
-                    .fetch_add(1, Ordering::Relaxed);
-                return Admission::Refractory;
-            }
+        // Looked at before the lock, so that a command in the refractory period goes without
+        // taking it, and again under it, where the command admitted is recorded: of two
+        // commands at once, only one is admitted
+        if self.refractory(now) {
+            return Admission::Refractory;
         }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if self.refractory(now) {
+            return Admission::Refractory;
+        }
         match state.open_until {
             Some(until) if now < until || state.trial => {
                 self.counters.dropped_open.fetch_add(1, Ordering::Relaxed);
@@ -176,6 +189,9 @@ impl EffectorInner {
     /// The motor program that sent the command stopped waiting: no more tries
     fn abandoned(&self) {
         self.counters.inflight.fetch_sub(1, Ordering::Relaxed);
+        // A trial command given up on decides nothing: the next command is the trial. Left
+        // out, the circuit would stay half open, refusing every command, for good.
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).trial = false;
         debug!(
             "nerve: effector '{}': nobody waits for the command any more",
             self.act.name()
@@ -241,6 +257,9 @@ pub(super) async fn run(
         }
     }
 }
+
+#[cfg(all(test, furnace_loom))]
+mod model_check;
 
 #[cfg(test)]
 mod tests {
@@ -405,6 +424,54 @@ mod tests {
         inner.succeeded(later);
         assert_eq!(admitted(inner.admit(later)), Some(Duration::ZERO));
         assert_eq!(effector.metrics().dropped_open, 2);
+    }
+
+    #[test]
+    fn a_trial_given_up_on_lets_the_next_command_be_the_trial() {
+        let effector = Effector::new(Flaky::new(0, false)).breaker(Breaker {
+            failures: 1,
+            cooldown: HOUR,
+        });
+        let inner = &effector.inner;
+        let t0 = Instant::now();
+        assert_eq!(admitted(inner.admit(t0)), Some(Duration::ZERO));
+        inner.failed(&ActError::fatal("down"));
+        let later = t0 + 2 * HOUR;
+        assert_eq!(admitted(inner.admit(later)), Some(Duration::ZERO));
+        // The trial's commander stops waiting before it is tried again: it decides nothing,
+        // and the next command is the trial, not dropped as if one were still out
+        inner.abandoned();
+        assert_eq!(admitted(inner.admit(later)), Some(Duration::ZERO));
+        assert!(matches!(inner.admit(later), Admission::Open));
+    }
+
+    /// Commands at the same moment on several threads: the refractory period lets one through
+    /// (src/nerve/effector/local_loop/model_check.rs checks every interleaving)
+    #[test]
+    fn of_commands_at_once_the_refractory_period_lets_one_through() {
+        for _ in 0..200 {
+            let effector = Effector::new(Flaky::new(0, false)).refractory(HOUR);
+            let inner = &effector.inner;
+            let now = Instant::now();
+            let start = std::sync::Barrier::new(4);
+            let admitted = std::thread::scope(|scope| {
+                let threads: Vec<_> = (0..4)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            start.wait();
+                            admitted(inner.admit(now)).is_some()
+                        })
+                    })
+                    .collect();
+                threads
+                    .into_iter()
+                    .map(|t| t.join().unwrap())
+                    .filter(|&admitted| admitted)
+                    .count()
+            });
+            assert_eq!(admitted, 1);
+            assert_eq!(effector.metrics().quiet_refractory, 3);
+        }
     }
 
     #[test]

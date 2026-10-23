@@ -146,6 +146,17 @@ rand = "0.10"
 # `fork` and `timeout` features, which the tests do not use
 proptest = { version = "1.12", default-features = false, features = ["std"] }
 
+# Model checking with `RUSTFLAGS="--cfg furnace_loom"`: every interleaving of the threads
+# sharing a nerve's lane, an effector's local loop or a motor neuron's program
+# (src/nerve/sync.rs). Not part of a normal build. A cfg of furnace's own rather than `loom`,
+# which tokio reads too: under it tokio leaves out its networking, and the server's tree
+# does not build.
+[target.'cfg(furnace_loom)'.dev-dependencies]
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(furnace_loom)"] }
+
 [[test]]
 name = "llm"
 required-features = ["llm"]

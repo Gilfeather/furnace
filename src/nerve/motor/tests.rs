@@ -786,6 +786,50 @@ async fn inside_a_nerve_a_part_s_own_commands_never_wait() {
     );
 }
 
+/// A command that leaves a nerve and comes back in from outside waits for a place of its own
+/// without holding the one it came from: once what holds the lane gives up, the lane is free
+#[tokio::test(start_paused = true)]
+async fn a_command_that_leaves_a_nerve_and_comes_back_never_wedges_it() {
+    let mut b = builder();
+    let r = b.neuron(pass("in"));
+    // In no nerve: commands the wrist from outside the arm
+    b.motor(
+        "relay",
+        |m| async move { m.command("wrist", Value::Null).await },
+    );
+    let arm = b.nerve(Nerve::new("arm").in_flight(1), |b| {
+        b.motor("wrist", |_| async move { Ok(json!("turned")) });
+        b.motor("arm", |m| async move {
+            if m.args() == &json!("relay") {
+                m.command("relay", Value::Null).await
+            } else {
+                Ok(json!("moved"))
+            }
+        })
+    });
+    let (brain, mut reports) = recorder("brain");
+    let brain = b.neuron(brain);
+    b.reflex(arm, brain);
+    let fabric = b.build().unwrap();
+    let report = async |reports: &mut mpsc::UnboundedReceiver<Value>| {
+        tokio::time::timeout(Duration::from_secs(60), reports.recv())
+            .await
+            .expect("a report within a minute")
+            .unwrap()
+    };
+
+    // The arm takes the nerve's one place and waits for the relay, which waits for the
+    // wrist, which waits in the lane for the arm's place: until the deadline
+    let due = Urgency::within(Duration::from_secs(5));
+    fabric.stimulate(r, command("arm", json!("relay")).with_urgency(due));
+    assert_eq!(report(&mut reports).await["status"], "timed_out");
+    // The place is free again, and the next command goes straight on
+    assert_eq!(fabric.stimulate(r, command("arm", Value::Null)).acted, 1);
+    assert_eq!(report(&mut reports).await["result"], "moved");
+    let lane = &fabric.metrics().nerves[0];
+    assert_eq!((lane.in_flight, lane.waiting, lane.waited), (0, 0, 1));
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_brain_reaches_its_actions_and_not_the_parts_below_them() {
     let (log, mut parts) = mpsc::unbounded_channel();
