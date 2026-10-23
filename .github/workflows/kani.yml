@@ -103,6 +103,7 @@ jobs:
         - { package: furnace-server, harness: 'nerve::wire::verification::content_lengths_are_digits_only' }
         - { package: furnace-server, harness: 'nerve::wire::verification::chunk_sizes_are_hex_only' }
         - { package: furnace-server, harness: 'tensor::verification::slice_batch_stays_in_bounds' }
+        - { package: furnace-server, harness: 'nerve::wire::verification::status_codes_are_three_digits_in_range' }
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
