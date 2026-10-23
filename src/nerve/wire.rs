@@ -549,13 +549,11 @@ fn parse_head<S>(head: &str, stream: S, rest: Vec<u8>) -> Result<Streaming<S>> {
 
 /// The code of an `HTTP/1.x` status line: the version, then three digits, 100 to 599
 fn status_code(line: &[u8]) -> Option<u16> {
-    let mut parts = line
-        .split(u8::is_ascii_whitespace)
-        .filter(|part| !part.is_empty());
-    if !parts.next()?.starts_with(b"HTTP/1.") {
+    let (version, rest) = first_word(line);
+    if !version.starts_with(b"HTTP/1.") {
         return None;
     }
-    let &[a, b, c] = parts.next()? else {
+    let (&[a, b, c], _) = first_word(rest) else {
         return None;
     };
     let code = [a, b, c].iter().try_fold(0u16, |n, &digit| {
@@ -564,6 +562,20 @@ fn status_code(line: &[u8]) -> Option<u16> {
             .then(|| n * 10 + u16::from(digit - b'0'))
     })?;
     (100..600).contains(&code).then_some(code)
+}
+
+/// The first word of `bytes`, past any ASCII whitespace, and what follows it
+fn first_word(bytes: &[u8]) -> (&[u8], &[u8]) {
+    let start = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let rest = &bytes[start..];
+    let end = rest
+        .iter()
+        .position(u8::is_ascii_whitespace)
+        .unwrap_or(rest.len());
+    rest.split_at(end)
 }
 
 /// A `Content-Length` value: decimal digits only, no sign or space, within a `usize`
@@ -645,34 +657,62 @@ mod verification {
 
     /// Any status line of up to 14 bytes: a code exactly when, past any whitespace, a word
     /// starting `HTTP/1.` comes before a word of three digits from 100 to 599. The expected
-    /// answer is found by index, apart from the iterators `status_code` uses.
+    /// answer comes from a state machine of that grammar, apart from the word splitting
+    /// `status_code` does.
     #[kani::proof]
     #[kani::unwind(16)]
     fn status_codes_are_three_digits_in_range() {
         let bytes: [u8; 14] = kani::any();
         let line = any_bytes(&bytes);
-        let space = |i: usize| line[i].is_ascii_whitespace();
-        let mut i = 0;
-        while i < line.len() && space(i) {
-            i += 1;
+        // The grammar as a state machine, one byte at a time: whitespace, the version (its
+        // first seven bytes `HTTP/1.`), whitespace, then three digits ended by whitespace or
+        // the end of the line; what follows is not looked at
+        enum State {
+            Lead,
+            Version(usize),
+            Gap,
+            Code(u16, usize),
+            Done(u16),
+            Refused,
         }
-        let version = i;
-        while i < line.len() && !space(i) {
-            i += 1;
+        let mut state = State::Lead;
+        for &b in line {
+            let space = b.is_ascii_whitespace();
+            state = match state {
+                State::Lead if space => State::Lead,
+                State::Lead | State::Version(_) if !space => {
+                    let seen = match state {
+                        State::Version(seen) => seen,
+                        _ => 0,
+                    };
+                    match b"HTTP/1.".get(seen) {
+                        Some(&want) if want != b => State::Refused,
+                        _ => State::Version(seen + 1),
+                    }
+                }
+                State::Version(seen) => {
+                    if seen >= 7 {
+                        State::Gap
+                    } else {
+                        State::Refused
+                    }
+                }
+                State::Gap if space => State::Gap,
+                State::Gap if b.is_ascii_digit() => State::Code(u16::from(b - b'0'), 1),
+                State::Code(code, 3) if space => State::Done(code),
+                State::Code(code, n) if n < 3 && b.is_ascii_digit() => {
+                    State::Code(code * 10 + u16::from(b - b'0'), n + 1)
+                }
+                State::Done(code) => State::Done(code),
+                _ => State::Refused,
+            };
         }
-        let version_ok = line[version..i].starts_with(b"HTTP/1.");
-        while i < line.len() && space(i) {
-            i += 1;
+        let expected = match state {
+            State::Code(code, 3) | State::Done(code) => Some(code),
+            _ => None,
         }
-        let code = i;
-        while i < line.len() && !space(i) {
-            i += 1;
-        }
-        let expected = (version_ok && i - code == 3)
-            .then(|| value(&line[code..i], 10))
-            .flatten()
-            .filter(|c| (100..600).contains(c));
-        assert_eq!(status_code(line).map(u128::from), expected);
+        .filter(|code| (100..600).contains(code));
+        assert_eq!(status_code(line), expected);
     }
 
     /// Any `Content-Length` of up to 21 bytes: exactly the decimal numbers that fit in a
