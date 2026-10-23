@@ -7,9 +7,10 @@
 #
 # A pull request's changes are those since its merge base with the base branch (BASE_SHA and
 # HEAD_SHA, from the event). A scheduled run of a workflow with `schedule since-last-success`
-# takes those since the commit of its last successful scheduled run on main (gh, with GH_TOKEN
-# and `actions: read`); every other run checks everything. The checkout needs the history of
-# both commits (`fetch-depth: 0`).
+# takes those since the commit of its last successful scheduled run on main; one with `schedule
+# unless-passed` checks nothing when the workflow already passed on this commit, and everything
+# otherwise (both with gh, GH_TOKEN and `actions: read`). Every other run checks everything. The
+# checkout needs the history of both commits (`fetch-depth: 0`).
 set -euo pipefail
 
 workflow=$1
@@ -20,11 +21,11 @@ output=${GITHUB_OUTPUT:-/dev/stdout}
 # and the files that decide relevance
 declare -A rules=()
 outputs=()
-since_last_success=false
+schedule=everything
 while read -r name out rest; do
   [ "$name" = "$workflow" ] || continue
   if [ "$out" = schedule ]; then
-    [ "$rest" = since-last-success ] && since_last_success=true
+    schedule=$rest
     continue
   fi
   if [ -z "${rules[$out]+set}" ]; then
@@ -44,6 +45,11 @@ everything() {
   for out in "${outputs[@]}"; do echo "$out=true" >> "$output"; done
   exit 0
 }
+nothing() {
+  echo "$1"
+  for out in "${outputs[@]}"; do echo "$out=false" >> "$output"; done
+  exit 0
+}
 
 event=${GITHUB_EVENT_NAME:-pull_request}
 case $event in
@@ -52,13 +58,21 @@ case $event in
     head=$HEAD_SHA
     ;;
   schedule)
-    $since_last_success || everything "A scheduled run of $workflow: everything is checked"
+    head=${HEAD_SHA:-$(git rev-parse HEAD)}
+    case $schedule in
+      everything)
+        everything "A scheduled run of $workflow: everything is checked" ;;
+      unless-passed)
+        passed=$(gh run list --workflow "$workflow.yml" --branch main --commit "$head" \
+          --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+        [ -z "$passed" ] || nothing "$workflow already passed on $head (run $passed): nothing to check"
+        everything "$workflow has not passed on $head yet: everything is checked" ;;
+    esac
     base=$(gh run list --workflow "$workflow.yml" --branch main --event schedule \
       --status success --limit 1 --json headSha --jq '.[0].headSha // empty')
     [ -n "$base" ] || everything "No successful scheduled run yet: everything is checked"
     git cat-file -e "$base^{commit}" 2>/dev/null ||
       everything "$base, the last successful scheduled run, is not on main: everything is checked"
-    head=${HEAD_SHA:-$(git rev-parse HEAD)}
     echo "Changes since $base, the last successful scheduled run"
     ;;
   *)

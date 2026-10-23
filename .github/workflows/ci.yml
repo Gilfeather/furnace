@@ -3,8 +3,8 @@ name: CI
 # Pull requests run the few jobs that catch almost everything: tests and lints on Linux, and
 # every feature combination type-checked in one job. The rest (other platforms, toolchains,
 # the GPU and Metal backends, the vendored kernels, the bench harnesses, furnace-candle,
-# coverage) runs nightly on main, with the pull request jobs too. A push to main runs nothing:
-# what is merged has passed as a pull request. The README's badge shows the last nightly run on
+# coverage) runs nightly on main, with the pull request jobs too, unless CI already passed on
+# that commit. A push to main runs nothing: what is merged has passed as a pull request. The README's badge shows the last nightly run on
 # main (`?branch=main&event=schedule`), so it is always a finished run, never a cancelled one.
 #
 # Every pull request runs `CI required`, the job to require before merging. Its jobs are skipped
@@ -42,6 +42,10 @@ jobs:
   changes:
     name: Changed files
     runs-on: ubuntu-latest
+    # actions: read, to find whether CI already passed on the commit a nightly run is for
+    permissions:
+      contents: read
+      actions: read
     outputs:
       relevant: ${{ steps.changes.outputs.relevant }}
       selftest: ${{ steps.changes.outputs.selftest }}
@@ -57,6 +61,7 @@ jobs:
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        GH_TOKEN: ${{ github.token }}
       run: bash .github/changed-files.sh ci
 
   test:
@@ -208,7 +213,8 @@ jobs:
   toolchains:
     name: Type check (${{ matrix.rust }})
     # Nightly only: pull requests run the checks above
-    if: github.event_name != 'pull_request'
+    needs: changes
+    if: github.event_name != 'pull_request' && needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -238,7 +244,8 @@ jobs:
   metal:
     name: Features (metal, macOS)
     # Nightly only: pull requests run the checks above
-    if: github.event_name != 'pull_request'
+    needs: changes
+    if: github.event_name != 'pull_request' && needs.changes.outputs.relevant == 'true'
     runs-on: macos-latest
     steps:
     - name: Checkout code
@@ -267,7 +274,8 @@ jobs:
   bench-harnesses:
     name: Benchmark harnesses
     # Nightly only: pull requests run the checks above
-    if: github.event_name != 'pull_request'
+    needs: changes
+    if: github.event_name != 'pull_request' && needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -313,7 +321,8 @@ jobs:
   llm-candle:
     name: furnace-candle (GGUF LLMs through candle)
     # Nightly only: pull requests run the checks above
-    if: github.event_name != 'pull_request'
+    needs: changes
+    if: github.event_name != 'pull_request' && needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -338,7 +347,8 @@ jobs:
   kubernetes:
     name: Kubernetes manifests
     # Nightly only: pull requests run the checks above
-    if: github.event_name != 'pull_request'
+    needs: changes
+    if: github.event_name != 'pull_request' && needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
@@ -376,7 +386,8 @@ jobs:
   vendored-kernels:
     name: Vendored CPU kernels (${{ matrix.os }})
     # Nightly only: pull requests run the checks above
-    if: github.event_name != 'pull_request'
+    needs: changes
+    if: github.event_name != 'pull_request' && needs.changes.outputs.relevant == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -404,17 +415,12 @@ jobs:
     - name: Run tests
       run: cargo test --manifest-path furnace-burn/vendor/burn-flex/Cargo.toml --release --lib
 
-    # Rough single-threaded numbers for this runner's CPU, for the log only
-    - name: Kernel throughput
-      env:
-        RAYON_NUM_THREADS: "1"
-      run: cargo test --manifest-path furnace-burn/vendor/burn-flex/Cargo.toml --release --lib throughput -- --ignored --nocapture --test-threads 1
-
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
     # Ten minutes of instrumented build; nightly only, not on every pull request
-    if: github.event_name != 'pull_request'
+    needs: changes
+    if: github.event_name != 'pull_request' && needs.changes.outputs.relevant == 'true'
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
@@ -454,41 +460,6 @@ jobs:
         token: ${{ secrets.CODECOV_TOKEN }}
       continue-on-error: true
 
-  # Nightly only: that the benchmark compiles (bench.yml runs the benchmarks)
-  benchmarks:
-    name: Benchmarks
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v5
-
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
-      with:
-        toolchain: stable
-
-    - name: Cache cargo
-      uses: Swatinem/rust-cache@v2
-
-    - name: Cache ONNX models
-      uses: actions/cache@v5
-      with:
-        path: furnace-burn/models
-        key: onnx-models-resnet18-v1-7-mnist-8
-
-    - name: Download ONNX models
-      run: |
-        mkdir -p furnace-burn/models
-        [ -f furnace-burn/models/resnet18.onnx ] || curl -fsSL "$RESNET18_URL" -o furnace-burn/models/resnet18.onnx
-        [ -f furnace-burn/models/mnist.onnx ] || curl -fsSL "$MNIST_URL" -o furnace-burn/models/mnist.onnx
-
-    - name: Run benchmarks
-      run: cargo bench -p furnace-burn --bench inference_benchmark --features onnx --no-run
-
-  # The check to require before merging: every job above passed, or was skipped as not needed
-  # (a pull request that changes only docs, or a nightly job). Also on a nightly run, where
-  # nothing is skipped.
   # The rules that decide which jobs a pull request needs, against examples
   relevance:
     name: Relevance rules
@@ -502,10 +473,13 @@ jobs:
     - name: Self-test
       run: bash .github/changed-files-test.sh
 
+  # The check to require before merging: every job above passed, or was skipped as not needed
+  # (a pull request that changes none of the files a job reads, a nightly job, or a nightly run
+  # on a commit CI already passed on)
   required:
     name: CI required
     if: always()
-    needs: [changes, test, features, relevance, toolchains, metal, bench-harnesses, llm-candle, kubernetes, vendored-kernels, coverage, benchmarks]
+    needs: [changes, test, features, relevance, toolchains, metal, bench-harnesses, llm-candle, kubernetes, vendored-kernels, coverage]
     runs-on: ubuntu-latest
     steps:
     - name: Every job passed or was skipped

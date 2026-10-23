@@ -17,8 +17,12 @@
 #
 # A line `<workflow> schedule since-last-success` makes that workflow's scheduled runs check
 # the changes since its last successful scheduled run on main, for checks whose tools are
-# pinned, so that an unchanged main is not checked again; every other scheduled run checks
-# everything. Manual runs check everything.
+# pinned, so that an unchanged main is not checked again. `<workflow> schedule unless-passed`
+# makes them check nothing when the workflow already passed on that commit of main, and
+# everything otherwise. Without either line a scheduled run checks everything: the checks whose
+# point is what changes outside the repository (new advisories, the newest rustls, the tools
+# the interoperability tests run against, the compiler's code for the timing tests). Manual
+# runs check everything.
 #
 # The docs, licences and changelogs are left out everywhere, but for CI's doc-tests: the Markdown
 # files it compiles the Rust examples of (src/lib.rs, furnace-burn's and furnace-candle's
@@ -35,13 +39,15 @@ ci relevant !rustls-pure/interop/** !rustls-pure/ct-asm.sh
 ci relevant !Dockerfile !default.nix !flake.nix !deny.toml !.gitignore !.dockerignore
 # The self-test of these rules: only the files every output counts
 ci selftest
+# The nightly run: everything, unless CI already passed on that commit (the jobs only the
+# nightly run has follow `relevant`, which a scheduled run sets for all of CI)
+ci schedule unless-passed
 
 # Kani: the proofs sit next to the code they check, in these files
 kani rustls-pure crate:rustls-pure rustls-pure/src/**
 kani kamui crate:kamui kamui/src/**
 kani server crate:furnace-server build.rs src/tensor.rs src/model.rs src/api/infer.rs
 kani server src/json_fast.rs src/nerve/wire.rs
-kani schedule since-last-success
 kani-nightly kamui crate:kamui kamui/src/**
 kani-nightly server crate:furnace-server build.rs src/tensor.rs src/model.rs src/api/infer.rs
 kani-nightly server src/json_fast.rs src/nerve/wire.rs
@@ -78,3 +84,8 @@ security codeql **.rs !furnace-burn/vendor/** !benches/compare/**
 # KServe end-to-end: the manifests it deploys, but not a release's new version in them (the
 # released image they then name does not exist until the release is published)
 kserve-e2e relevant ~deploy/kserve/** !**.md
+
+# Soak: the server under load for hours, weekly unless it already passed on that commit. It
+# never runs on pull requests, so its rules name no files.
+soak run
+soak schedule unless-passed

@@ -1,8 +1,9 @@
 name: Soak
 
 # The server and the nervous system under a steady load for hours (tests/soak.rs): they keep
-# answering, without errors, and their resident memory levels off. By hand, or weekly; never on
-# pull requests. The per-interval numbers are kept as an artifact, for the record only.
+# answering, without errors, and their resident memory levels off. By hand, or weekly unless it
+# already passed on that commit; never on pull requests. The per-interval numbers are kept as an
+# artifact, for the record only.
 on:
   workflow_dispatch:
     inputs:
@@ -27,8 +28,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # A weekly run is skipped when the soak test already passed on that commit (.github/relevance)
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run: ${{ steps.changes.outputs.run }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        filter: blob:none
+
+    - name: Whether to run
+      id: changes
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: bash .github/changed-files.sh soak
+
   soak:
     name: Soak
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-latest
     # The run itself, plus building
     timeout-minutes: 360
