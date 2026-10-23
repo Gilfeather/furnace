@@ -8,14 +8,16 @@
 (* and waits for their outcomes. A command to an effector is an act, tried *)
 (* again with backoff while it fails in a retryable way.                   *)
 (*                                                                         *)
-(* One program runs per motor neuron: a newer command preempts it, and     *)
-(* Fabric::stop stops it. A program ends when it is done or fails, when it *)
+(* One program runs per motor neuron: a newer command stops it at once,    *)
+(* and so does Fabric::stop. A program ends when it is done or fails, when it *)
 (* is stopped, when its commander stops waiting, or when its deadline      *)
 (* passes (Started::run's biased select, in that order). A command below   *)
 (* keeps its commander's deadline.                                         *)
 (*                                                                         *)
 (* A command between two neurons travels directly, or through a            *)
 (* deliberative pathway's queue (Queued), whose worker may run it later.   *)
+(* An act's failure includes a full lane dropping it; Lanes.tla has the    *)
+(* lanes, which hold acts only and never a program.                        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
