@@ -11,7 +11,16 @@ version.
 Less work and fewer dependencies for the same behaviour; nothing measured, all found by reading
 the code.
 
+### Added
+- Kani proofs (`cargo kani -p rustls-pure`, run in CI on changes to rustls-pure) of the code
+  that takes the peer's bytes before the RustCrypto crates do: the size and shape of every
+  group's key shares, how the X25519MLKEM768 shares are split and put together in both
+  directions, the hybrid secret's order, record lengths and Ed25519 key and signature sizes.
+
 ### Changed
+- P-256 and P-384 key shares are checked for the uncompressed point's exact size by
+  rustls-pure before the curve crates parse them, as well as for its first byte; the same
+  shares are refused as before.
 - Dependencies without the default features rustls-pure does not use: `aes-gcm` and
   `chacha20poly1305` without OS randomness for nonces and the allocating API, `p256` and
   `p384` without PEM, `std` and their precomputed base-point tables (memory traded for time),

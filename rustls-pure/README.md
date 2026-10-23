@@ -162,6 +162,15 @@ strictest provider, checked against test vectors and other implementations witho
   signatures and records. This takes the place of fuzzing: cargo-fuzz runs on libFuzzer, which
   is C++
 
+`cargo kani -p rustls-pure` (Linux, with [Kani](https://github.com/model-checking/kani)) proves,
+for every input up to its bounds rather than samples, what rustls-pure itself does with the
+peer's bytes before the RustCrypto crates see them: exactly the key shares of each group's size
+and shape are taken (uncompressed points only for P-256 and P-384), the X25519MLKEM768 shares
+split where ML-KEM's part ends and put back together the same way in both directions, the
+hybrid secret is ML-KEM's then X25519's, record lengths never underflow, and Ed25519 keys and
+signatures have their sizes. The cryptography itself is the RustCrypto crates' and the protocol
+rustls's. It runs on pull requests that change rustls-pure.
+
 `bash rustls-pure/interop/run.sh` checks it against other TLS implementations on the same
 machine, with certificates it makes for the run: OpenSSL, and GnuTLS and curl when installed,
 each as a client of rustls-pure's server and as a server for its client, with every cipher

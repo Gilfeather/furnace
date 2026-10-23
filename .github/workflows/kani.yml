@@ -1,0 +1,52 @@
+name: Kani
+
+# Kani's bounded model checking of the code that takes untrusted input: rustls-pure's checks of
+# the peer's key shares, records and signatures before they reach the RustCrypto crates. The
+# proofs are the `#[cfg(kani)] mod verification` next to the code; each is bounded with
+# `#[kani::unwind]` so the whole run stays within minutes. Kani runs on Linux only. Locally:
+# `cargo install --locked kani-verifier --version 0.68.0 && cargo kani setup`, then
+# `cargo kani -p rustls-pure`.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'rustls-pure/**'
+      - 'Cargo.lock'
+      - '.github/workflows/kani.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'rustls-pure/**'
+      - 'Cargo.lock'
+      - '.github/workflows/kani.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# A newer push to the same pull request makes an older run redundant
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kani:
+    name: Kani (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [rustls-pure]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Prove
+      uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+      with:
+        kani-version: '0.68.0'
+        args: -p ${{ matrix.package }}
