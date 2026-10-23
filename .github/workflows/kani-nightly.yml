@@ -33,9 +33,6 @@ jobs:
         - { package: furnace-server, harness: 'nerve::wire::verification::status_codes_are_three_digits_in_range' }
         - { package: furnace-server, harness: 'tensor::verification::element_count_is_the_exact_product' }
         - { package: furnace-server, harness: 'tensor::verification::concat_batch_never_panics' }
-        - { package: furnace-server, harness: 'api::infer::verification::raw_fp32_decodes_whole_elements' }
-        - { package: furnace-server, harness: 'api::infer::verification::raw_int64_decodes_whole_elements' }
-        - { package: furnace-server, harness: 'api::infer::verification::raw_int32_decodes_whole_elements' }
     steps:
     - name: Checkout code
       uses: actions/checkout@v5

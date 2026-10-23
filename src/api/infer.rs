@@ -353,11 +353,15 @@ mod verification {
         let bytes: [u8; N] = kani::any();
         let size = datatype.size();
         let values = decode_raw(datatype, &bytes);
-        assert_eq!(values.len(), N / size);
-        if values.is_empty() {
+        let count = N / size;
+        assert_eq!(values.len(), count);
+        // On the count known from `N` (equal to the length just asserted), not the vector's own
+        // length: for no values, CBMC then does not go on to index an empty vector's dangling
+        // pointer, which runs it out of memory
+        if count == 0 {
             return;
         }
-        let i = kani::any_where(|&i: &usize| i < values.len());
+        let i = kani::any_where(|&i: &usize| i < count);
         let at: [u8; 8] = std::array::from_fn(|k| bytes.get(i * size + k).copied().unwrap_or(0));
         let at4 = [at[0], at[1], at[2], at[3]];
         match (&values, datatype) {
@@ -383,43 +387,117 @@ mod verification {
         }
     }
 
-    /// [`decodes_whole_elements`] for every length up to 17 bytes
-    fn every_length(datatype: DataType) {
-        decodes_whole_elements::<0>(datatype);
-        decodes_whole_elements::<1>(datatype);
-        decodes_whole_elements::<2>(datatype);
-        decodes_whole_elements::<3>(datatype);
-        decodes_whole_elements::<4>(datatype);
-        decodes_whole_elements::<5>(datatype);
-        decodes_whole_elements::<6>(datatype);
-        decodes_whole_elements::<7>(datatype);
-        decodes_whole_elements::<8>(datatype);
-        decodes_whole_elements::<9>(datatype);
-        decodes_whole_elements::<10>(datatype);
-        decodes_whole_elements::<11>(datatype);
-        decodes_whole_elements::<12>(datatype);
-        decodes_whole_elements::<13>(datatype);
-        decodes_whole_elements::<14>(datatype);
-        decodes_whole_elements::<15>(datatype);
-        decodes_whole_elements::<16>(datatype);
-        decodes_whole_elements::<17>(datatype);
+    /// [`decodes_whole_elements`] for every length from `FROM` to `TO` bytes. The proofs below
+    /// cover every length up to 17 in three ranges, one proof each, so that no one proof holds
+    /// all the lengths' formulas at once (a runner runs out of memory on the whole range).
+    fn lengths<const FROM: usize, const TO: usize>(datatype: DataType) {
+        if FROM == 0 {
+            decodes_whole_elements::<0>(datatype);
+        }
+        if FROM <= 1 && 1 <= TO {
+            decodes_whole_elements::<1>(datatype);
+        }
+        if FROM <= 2 && 2 <= TO {
+            decodes_whole_elements::<2>(datatype);
+        }
+        if FROM <= 3 && 3 <= TO {
+            decodes_whole_elements::<3>(datatype);
+        }
+        if FROM <= 4 && 4 <= TO {
+            decodes_whole_elements::<4>(datatype);
+        }
+        if FROM <= 5 && 5 <= TO {
+            decodes_whole_elements::<5>(datatype);
+        }
+        if FROM <= 6 && 6 <= TO {
+            decodes_whole_elements::<6>(datatype);
+        }
+        if FROM <= 7 && 7 <= TO {
+            decodes_whole_elements::<7>(datatype);
+        }
+        if FROM <= 8 && 8 <= TO {
+            decodes_whole_elements::<8>(datatype);
+        }
+        if FROM <= 9 && 9 <= TO {
+            decodes_whole_elements::<9>(datatype);
+        }
+        if FROM <= 10 && 10 <= TO {
+            decodes_whole_elements::<10>(datatype);
+        }
+        if FROM <= 11 && 11 <= TO {
+            decodes_whole_elements::<11>(datatype);
+        }
+        if FROM <= 12 && 12 <= TO {
+            decodes_whole_elements::<12>(datatype);
+        }
+        if FROM <= 13 && 13 <= TO {
+            decodes_whole_elements::<13>(datatype);
+        }
+        if FROM <= 14 && 14 <= TO {
+            decodes_whole_elements::<14>(datatype);
+        }
+        if FROM <= 15 && 15 <= TO {
+            decodes_whole_elements::<15>(datatype);
+        }
+        if FROM <= 16 && 16 <= TO {
+            decodes_whole_elements::<16>(datatype);
+        }
+        if FROM <= 17 && 17 <= TO {
+            decodes_whole_elements::<17>(datatype);
+        }
     }
 
     #[kani::proof]
     #[kani::unwind(19)]
-    fn raw_fp32_decodes_whole_elements() {
-        every_length(DataType::Fp32);
+    fn raw_fp32_decodes_lengths_0_to_5() {
+        lengths::<0, 5>(DataType::Fp32);
     }
 
     #[kani::proof]
     #[kani::unwind(19)]
-    fn raw_int64_decodes_whole_elements() {
-        every_length(DataType::Int64);
+    fn raw_int64_decodes_lengths_0_to_5() {
+        lengths::<0, 5>(DataType::Int64);
     }
 
     #[kani::proof]
     #[kani::unwind(19)]
-    fn raw_int32_decodes_whole_elements() {
-        every_length(DataType::Int32);
+    fn raw_int32_decodes_lengths_0_to_5() {
+        lengths::<0, 5>(DataType::Int32);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(19)]
+    fn raw_fp32_decodes_lengths_6_to_11() {
+        lengths::<6, 11>(DataType::Fp32);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(19)]
+    fn raw_int64_decodes_lengths_6_to_11() {
+        lengths::<6, 11>(DataType::Int64);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(19)]
+    fn raw_int32_decodes_lengths_6_to_11() {
+        lengths::<6, 11>(DataType::Int32);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(19)]
+    fn raw_fp32_decodes_lengths_12_to_17() {
+        lengths::<12, 17>(DataType::Fp32);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(19)]
+    fn raw_int64_decodes_lengths_12_to_17() {
+        lengths::<12, 17>(DataType::Int64);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(19)]
+    fn raw_int32_decodes_lengths_12_to_17() {
+        lengths::<12, 17>(DataType::Int32);
     }
 }
