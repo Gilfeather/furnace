@@ -3,8 +3,8 @@
 ## Measured on GitHub's runners
 
 The numbers below come from one laptop. The same comparisons also run on GitHub's own hosted
-runners, x86_64 (`ubuntu-latest`) and Arm (`ubuntu-24.04-arm`), every week, on every release
-and on demand: the [Benchmarks workflow](https://github.com/Gilfeather/furnace/actions/workflows/bench.yml).
+runners, x86_64 (`ubuntu-latest`) and Arm (`ubuntu-24.04-arm`), when a maintainer runs the
+[Benchmarks workflow](https://github.com/Gilfeather/furnace/actions/workflows/bench.yml) by hand.
 Open its latest run: the *Ratios, all runners* job summary has, for each runner:
 
 - requests/s of Furnace over a hand-written axum server for every Burn model below, and over
@@ -24,7 +24,7 @@ figures) are not typed by hand: they sit between `<!-- bench:NAME:start -->` and
 with *update_readme* ticked (Actions → Benchmarks → Run workflow, or
 `gh workflow run bench.yml -f update_readme=true`): its last job rewrites them with
 [`benches/readme-numbers.sh`](../benches/readme-numbers.sh) and opens a pull request from a
-`bench/readme-<date>` branch. The weekly and release runs leave README.md alone. The repository
+`bench/readme-<date>` branch; a run without it leaves README.md alone. The repository
 has to allow it once, in Settings → Actions → General → *Allow GitHub Actions to create and
 approve pull requests*. A pull request opened by the workflow starts no CI: close and reopen it
 to run the checks. From a run's `bench-x86_64` artifact, `benches/readme-numbers.sh DIR` does

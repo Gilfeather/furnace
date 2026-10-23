@@ -78,24 +78,11 @@ check() {
         sed -i 's/0\.1\.0/0.2.0/g' deploy/kserve/*.yaml deploy/helm/furnace/Chart.yaml
         echo 'furnace 0.2.0' >> README.md ;;
       @kserve-resources)
-        printf '    resources:
-      limits:
-        memory: 2Gi
-' >> deploy/kserve/servingruntime.yaml ;;
+        printf '    resources:\n      limits:\n        memory: 2Gi\n' >> deploy/kserve/servingruntime.yaml ;;
       @kamui-dependency)  # a new dependency of kamui, in its manifest and the lockfile
-        sed -i 's/^\[dependencies\]$/[dependencies]
-libm = "0.2"/' kamui/Cargo.toml
-        printf '
-[[package]]
-name = "libm"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbb0"
-' >> Cargo.lock
-        sed -i '/^name = "kamui"/{n;s/$/
-dependencies = [
- "libm",
-]/}' Cargo.lock ;;
+        sed -i 's/^\[dependencies\]$/[dependencies]\nlibm = "0.2"/' kamui/Cargo.toml
+        lock_package libm 0.2.0 bbb0 '' >> Cargo.lock
+        sed -i '/^name = "kamui"/{n;s/$/\ndependencies = [\n "libm",\n]/}' Cargo.lock ;;
       @update-tokio)
         sed -i 's/^version = "1\.0\.0"/version = "1.0.1"/; s/ccc0/ccc1/' Cargo.lock ;;
       @update-aes)
@@ -176,7 +163,8 @@ check 'furnace-burn/vendor/burn-flex/src/lib.rs' 'ci.relevant'
 # A workflow's own file runs all of it; the relevance files run everything
 check '.github/workflows/kani.yml' 'kani.rustls-pure kani.kamui kani.server'
 check '.github/workflows/kserve-e2e.yml' 'kserve-e2e.relevant'
-check '.github/workflows/release.yml .github/workflows/soak.yml' ''
+check '.github/workflows/release.yml .github/workflows/bench.yml' ''
+check '.github/workflows/soak.yml' 'soak.run'
 check '.github/workflows/ci.yml' 'ci.relevant ci.selftest'
 check '.github/relevance' "${all[*]}"
 

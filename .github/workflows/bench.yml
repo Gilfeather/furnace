@@ -2,9 +2,9 @@ name: Benchmarks
 
 # Furnace against a hand-written axum server and FastAPI, on GitHub's own runners, so anyone can
 # see the hardware and rerun the comparison. Shared runners are noisy: the ratios between servers
-# measured on the same runner matter, not the absolute numbers. Too slow for every pull request.
-# A manual run with `update_readme` also opens a pull request with README.md's numbers from the
-# x86_64 runner (benches/readme-numbers.sh); the weekly and release runs never change it.
+# measured on the same runner matter, not the absolute numbers. By hand only: nothing measures
+# on a schedule or a release. A run with `update_readme` also opens a pull request with
+# README.md's numbers from the x86_64 runner (benches/readme-numbers.sh).
 on:
   workflow_dispatch:
     inputs:
@@ -12,20 +12,14 @@ on:
         description: Open a pull request that updates README.md with the x86_64 results
         type: boolean
         default: false
-  schedule:
-    # Mondays, 04:23 UTC
-    - cron: '23 4 * * 1'
-  release:
-    types: [published]
 
 permissions:
   contents: read
 
-# A newer manual run on a branch makes an older one redundant; a weekly or release run is a group
-# of its own and runs to the end
+# A newer run on the same branch makes an older one redundant
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -195,7 +189,7 @@ jobs:
     needs: bench
     # Only a manual run that asks for it. The x86_64 results are enough, even when the Arm runner
     # failed
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.update_readme }}
+    if: ${{ !cancelled() && inputs.update_readme }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
