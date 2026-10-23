@@ -1,13 +1,14 @@
 //! Nerves: the trunks that carry signals into one part of the body (the right arm, the left
 //! leg), and the spine between the brain and them.
 //!
-//! What enters a nerve from outside it (a command from the brain's side, from another part)
-//! takes the nerve's lane: at most [`Nerve::in_flight`] of them are carried out at once, and
-//! the rest wait, the most urgent (the nearest deadline) first. An idle lane costs nothing:
-//! the signal goes straight on. A part that is flooded makes its own signals wait and no
-//! other part's. What stays inside the nerve (the hand commanding its fingers, a fingertip's
-//! pressure reaching the hand) never takes the lane: the part's own loops close there. Nor
-//! does the nerve's own work coming back to it through a part outside every nerve.
+//! A nerve's lane counts the acts of its effectors, nothing else: every act entering the
+//! nerve takes a place in the lane, whoever commanded it, from inside the part or outside.
+//! At most [`Nerve::in_flight`] acts are carried out at once, and the rest wait, the most
+//! urgent (the nearest deadline) first. An idle lane costs nothing: the act goes straight
+//! on. A part that is flooded makes its own acts wait and no other part's. An act waits for
+//! no other command and always ends, so the places it holds always come back. A motor
+//! neuron's program never takes a place and never waits in a lane: one runs per motor
+//! neuron, and a newer command stops it at once.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{Fabric, Inner, Outcome};
 use crate::nerve::motor::MotionError;
+use crate::nerve::neuron::NeuronKind;
 use crate::nerve::signal::{NeuronId, Signal};
 use crate::nerve::sync::{Mutex, MutexGuard};
 
@@ -33,7 +35,7 @@ pub struct Nerve {
 }
 
 impl Nerve {
-    /// A nerve named `name` that carries out 16 signals from outside at once
+    /// A nerve named `name` that carries out 16 acts at once
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -41,8 +43,7 @@ impl Nerve {
         }
     }
 
-    /// Signals from outside carried out at once (at least 1): a command taken counts until
-    /// its act or program ends, everything it commands inside the nerve included
+    /// Acts carried out at once (at least 1): an act counts until it ends, retries included
     pub fn in_flight(mut self, n: usize) -> Self {
         self.in_flight = n.max(1);
         self
@@ -213,7 +214,7 @@ impl<T> Lane<T> {
 pub struct NerveLaneMetrics {
     /// The nerve's name
     pub name: String,
-    /// Signals from outside being carried out now
+    /// Acts being carried out now
     pub in_flight: u64,
     /// How many may be at once
     pub limit: u64,
@@ -225,9 +226,8 @@ pub struct NerveLaneMetrics {
     pub dropped: u64,
 }
 
-/// A place in a nerve's lane, held by the signal that took it and every signal derived from
-/// it, until it enters a nerve from outside: the place is free again once the last of them is
-/// gone
+/// A place in a nerve's lane, held by the act that took it (every copy of its signal, its
+/// retries' included): the place is free again once the act ends
 #[derive(Clone)]
 pub(crate) struct Ticket(Arc<Held>);
 
@@ -251,27 +251,15 @@ impl std::fmt::Debug for Ticket {
 }
 
 impl Fabric {
-    /// Let `signal` from `from` into `to`'s nerve: `Ok` to carry it on now, or what became of
-    /// it (waiting in the lane, or dropped). Signals within one nerve, signals that hold a
-    /// place in the nerve already, and signals to neurons in no nerve always go on.
-    pub(super) fn enter(
-        &self,
-        from: NeuronId,
-        to: NeuronId,
-        mut signal: Signal,
-    ) -> Result<Signal, Outcome> {
-        let Some(nerve) = self.0.cells[to.index()].nerve else {
+    /// Let `signal` into `to`'s nerve: `Ok` to carry it on now, or what became of it
+    /// (waiting in the lane, or dropped, which fails it). Only an effector's act takes the
+    /// lane; signals to any other neuron, and to neurons in no nerve, always go on.
+    pub(super) fn enter(&self, to: NeuronId, mut signal: Signal) -> Result<Signal, Outcome> {
+        let cell = &self.0.cells[to.index()];
+        let Some(nerve) = cell.nerve.filter(|_| cell.kind == NeuronKind::Effector) else {
             return Ok(signal);
         };
-        // From inside the nerve, or the nerve's own work coming back to it through a part
-        // outside it: its signal holds one of the nerve's places already
-        if self.0.cells[from.index()].nerve == Some(nerve)
-            || signal.ticket.as_ref().is_some_and(|t| t.0.nerve == nerve)
-        {
-            return Ok(signal);
-        }
-        // Entering from outside, it lets go of the place it holds in another nerve: waiting
-        // here with it, a flooded nerve would keep another's places taken
+        // Its place is its own: one a signal it derives from held is not carried in
         signal.ticket = None;
         let lane = &self.0.nerves[nerve];
         match lane.enter(signal.urgency.deadline, (to, signal)) {

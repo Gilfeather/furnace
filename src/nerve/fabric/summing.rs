@@ -20,10 +20,16 @@ impl Fabric {
         let mut admitted = Vec::with_capacity(batch.len());
         let mut queued_at = Vec::with_capacity(batch.len());
         for Queued {
-            item: mut signal,
+            item: signal,
             queued_at: at,
         } in batch
         {
+            // An act takes its nerve's lane, as on any other way in; one that waits there is
+            // carried on from it
+            let mut signal = match self.enter(pathway.to, signal) {
+                Ok(signal) => signal,
+                Err(_) => continue,
+            };
             cell.counters.received.fetch_add(1, Ordering::Relaxed);
             match cell.gate.admit(&mut signal, nanos) {
                 Ok(()) => {

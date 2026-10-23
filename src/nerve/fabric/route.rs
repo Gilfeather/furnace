@@ -219,7 +219,7 @@ impl Fabric {
                         Some(pathway) => Some(pathway),
                         None => {
                             self.0.commands_direct.fetch_add(1, Ordering::Relaxed);
-                            return match self.enter(from, target, signal) {
+                            return match self.enter(target, signal) {
                                 Ok(signal) => self.drive(target, signal, depth, announced, now),
                                 Err(outcome) => outcome,
                             };
@@ -256,7 +256,7 @@ impl Fabric {
         pathway.signals.fetch_add(1, Ordering::Relaxed);
         match &pathway.queue {
             None => {
-                let signal = match self.enter(from, pathway.to, signal) {
+                let signal = match self.enter(pathway.to, signal) {
                     Ok(signal) => signal,
                     Err(outcome) => return outcome,
                 };

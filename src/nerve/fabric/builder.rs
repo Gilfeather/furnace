@@ -141,11 +141,10 @@ impl FabricBuilder {
     }
 
     /// A nerve: the trunk to one part of the body. Every neuron `parts` adds (motor
-    /// neurons, effectors, receptors, reflexes) belongs to it. What enters the nerve from
-    /// outside takes its lane, a few at a time and the most urgent first, so a part that is
-    /// flooded holds up nothing else; what stays inside (the hand commanding its fingers, a
-    /// fingertip's pressure reaching the hand) never waits there. `nerve` is a [`Nerve`] or
-    /// just its name.
+    /// neurons, effectors, receptors, reflexes) belongs to it. Its effectors' acts take its
+    /// lane, a few at a time and the most urgent first, whoever commanded them, so a part
+    /// that is flooded holds up nothing else; its motor programs never wait there. `nerve`
+    /// is a [`Nerve`] or just its name.
     ///
     /// ```no_run
     /// # use furnace::nerve::prelude::*;

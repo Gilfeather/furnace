@@ -170,7 +170,8 @@ neuron's pathways as `{"action": "get_dressed", "status": "done", "result": ...}
 action ended.
 
 **Stopping.** One program runs per motor neuron, as one body part does one thing at a time: a
-new command preempts the program running. `fabric.stop(name)` (or `m.stop(name)` from another
+new command stops the program running at once (its commander hears `cancelled`) and starts its
+own. `fabric.stop(name)` (or `m.stop(name)` from another
 program, a `stop` action say) stops it. A stopped program stops everything it commanded and
 still waits for, all the way down, and an effector whose commander stopped waiting gives up
 its retries, as it does once the command's deadline has passed.
@@ -233,17 +234,19 @@ model names one. The motor neurons that are not in a nerve, and the reflexes, ru
 spine, never in the brain.
 
 **Nerve.** `b.nerve("right_arm", |b| { ... })` is the trunk to one part of the body: every
-neuron the closure adds (motor neurons, effectors, receptors, reflexes) belongs to it. What
-enters the nerve from outside it (an action's command, another part's) takes the nerve's lane:
-at most `Nerve::in_flight` of them are carried out at once (16 unless
-`b.nerve(Nerve::new("right_arm").in_flight(4), ..)`), each until its act or program ends, and
-the rest wait, the nearest deadline first. An idle lane costs nothing; a part that is flooded
-makes its own signals wait and no other part's, so a jam in the right arm does not stop the
-left: a command waiting in one nerve's lane holds no place in another. What stays inside the
-nerve never waits there: the hand commanding its fingers, the fingertip's pressure reaching the
-hand, and the arm's own work coming back to it through a motor neuron in no nerve. That is
-where a part's own loops close. `GET /metrics` shows each nerve's lane (`in_flight`, `waiting`,
-`waited`, `dropped`); a lane holds up to 1,024 waiting signals and then drops the least urgent.
+neuron the closure adds (motor neurons, effectors, receptors, reflexes) belongs to it. Its
+lane bounds the part's acts: every act of one of its effectors takes a place in the lane,
+whoever commanded it, from inside the part or outside. At most `Nerve::in_flight` acts are
+carried out at once (16 unless `b.nerve(Nerve::new("right_arm").in_flight(4), ..)`), each
+until it ends, retries included, and the rest wait, the nearest deadline first. An idle lane
+costs nothing; a part that is flooded makes its own acts wait and no other part's, so a jam in
+the right arm does not stop the left. Motor programs never take a place and never wait in a
+lane: one runs per motor neuron and a newer command stops it at once, full lane or not. An act
+waits for no other command and always ends, so parts commanding each other, or motor neurons
+commanding each other in a cycle, never deadlock, deadlines or not. A lane holds up to 1,024
+waiting acts and then drops the least urgent, which fails: the program that commanded it hears
+the failure, and from there it goes up to the brain as any outcome. `GET /metrics` shows each
+nerve's lane (`in_flight`, `waiting`, `waited`, `dropped`).
 
 The motor side's design, the nerves' lanes and how a signal is routed are specified in TLA+
 and model-checked with TLC in CI: [`specs/`](../specs/README.md) lists the properties checked
