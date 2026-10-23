@@ -2,13 +2,15 @@ name: KServe end-to-end
 
 # deploy/kserve on a real cluster: KServe in standard (RawDeployment) mode on kind, the
 # published image, the weights from the release through KServe's storage initializer, and a v2
-# inference request answered by Furnace.
+# inference request answered by Furnace. On pull requests that change deploy/kserve, and weekly
+# on main, since the image, the weights and KServe's charts are all downloaded. Every pull request
+# runs `KServe end-to-end required`, the job to require before merging.
 on:
   pull_request:
     branches: [ main ]
-    paths:
-      - deploy/kserve/**
-      - .github/workflows/kserve-e2e.yml
+  schedule:
+    # Wednesdays, 04:11 UTC
+    - cron: '11 4 * * 3'
   workflow_dispatch:
     inputs:
       image:
@@ -16,8 +18,10 @@ on:
         required: false
         default: ""
 
+# On a pull request a newer push makes an older run redundant; every other run (scheduled, by
+# hand) is a group of its own and runs to the end
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -26,8 +30,31 @@ env:
   KSERVE_VERSION: v0.21.0
 
 jobs:
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.changes.outputs.relevant }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        filter: blob:none
+
+    - name: Files this workflow checks
+      id: changes
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: >-
+        bash .github/changed-files.sh 'deploy/kserve/**' '.github/workflows/kserve-e2e.yml'
+        '.github/changed-files.sh'
+
   kserve:
     name: ResNet-18 on KServe (kind)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -179,3 +206,23 @@ jobs:
         echo "::group::inferenceservice-config"
         kubectl -n kserve get configmap inferenceservice-config -o yaml
         echo "::endgroup::"
+
+  # The check to require before merging: every job above passed, or was skipped as not needed
+  required:
+    name: KServe end-to-end required
+    if: always()
+    needs: [changes, kserve]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Every job passed or was skipped
+      env:
+        NEEDS: ${{ toJSON(needs) }}
+        RESULTS: ${{ join(needs.*.result, ' ') }}
+      run: |
+        echo "$NEEDS"
+        for result in $RESULTS; do
+          case $result in
+            success|skipped) ;;
+            *) echo "::error::A job ended in $result"; exit 1 ;;
+          esac
+        done

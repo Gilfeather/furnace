@@ -1,36 +1,48 @@
 name: Security Audit
 
-# When the dependencies change, and weekly for new advisories against unchanged ones
+# On pull requests that change the dependencies, and weekly on main for new advisories against
+# unchanged ones. Every pull request runs `Security Audit required`, the job to require before
+# merging.
 on:
   schedule:
     # Mondays, 00:00 UTC
     - cron: '0 0 * * 1'
-  push:
-    branches: [ main ]
-    paths:
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-      - 'deny.toml'
-      - '.github/workflows/security.yml'
   pull_request:
     branches: [ main ]
-    paths:
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-      - 'deny.toml'
-      - '.github/workflows/security.yml'
   workflow_dispatch:
 
-
-# On a pull request a newer push makes an older run redundant; on main every commit runs to the
-# end, so the README badge shows a result, never a cancelled run
+# On a pull request a newer push makes an older run redundant; every other run (scheduled, by
+# hand) is a group of its own and runs to the end
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.changes.outputs.relevant }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        filter: blob:none
+
+    - name: Files this workflow checks
+      id: changes
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: >-
+        bash .github/changed-files.sh '**/Cargo.toml' '**/Cargo.lock' 'deny.toml'
+        '.github/workflows/security.yml' '.github/changed-files.sh'
+
   security_audit:
     name: Security Audit
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -47,6 +59,8 @@ jobs:
 
   cargo_deny:
     name: cargo-deny (licenses, bans, sources)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -60,7 +74,8 @@ jobs:
   dependency_review:
     name: Dependency Review
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.relevant == 'true'
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
@@ -75,6 +90,8 @@ jobs:
 
   codeql:
     name: CodeQL Analysis
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -86,8 +103,8 @@ jobs:
       uses: actions/checkout@v5
 
     # Pull requests skip the vendored Burn backend (about 40k lines, mostly upstream code), which
-    # takes the analysis from about 16 minutes to a few. Pushes to main and the weekly run still
-    # scan everything, vendor included.
+    # takes the analysis from about 16 minutes to a few. The weekly run on main still scans
+    # everything, vendor included.
     - name: Initialize CodeQL (pull request)
       if: github.event_name == 'pull_request'
       uses: github/codeql-action/init@v4
@@ -112,3 +129,23 @@ jobs:
       uses: github/codeql-action/analyze@v4
       with:
         category: "/language:rust"
+
+  # The check to require before merging: every job above passed, or was skipped as not needed
+  required:
+    name: Security Audit required
+    if: always()
+    needs: [changes, security_audit, cargo_deny, dependency_review, codeql]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Every job passed or was skipped
+      env:
+        NEEDS: ${{ toJSON(needs) }}
+        RESULTS: ${{ join(needs.*.result, ' ') }}
+      run: |
+        echo "$NEEDS"
+        for result in $RESULTS; do
+          case $result in
+            success|skipped) ;;
+            *) echo "::error::A job ended in $result"; exit 1 ;;
+          esac
+        done

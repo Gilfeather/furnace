@@ -1,22 +1,20 @@
 name: TLA+
 
-# Model-check the nervous system's design (specs/README.md): when the specs or the code they
-# model change, and on every push to main
+# Model-check the nervous system's design (specs/README.md): on pull requests that change the
+# specs or the code they model, and nightly on main. Every pull request runs `TLA+ required`, the
+# job to require before merging.
 on:
-  push:
-    branches: [ main ]
   pull_request:
     branches: [ main ]
-    paths:
-      - 'specs/**'
-      - 'src/nerve/**'
-      - '.github/workflows/tla.yml'
+  schedule:
+    # Every night, 03:47 UTC
+    - cron: '47 3 * * *'
   workflow_dispatch:
 
-# On a pull request a newer push makes an older run redundant; on main every commit runs to the
-# end, so the README badge shows a result, never a cancelled run
+# On a pull request a newer push makes an older run redundant; every other run (scheduled, by
+# hand) is a group of its own and runs to the end
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -29,8 +27,31 @@ env:
   TLA_TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 
 jobs:
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.changes.outputs.relevant }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        filter: blob:none
+
+    - name: Files this workflow checks
+      id: changes
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: >-
+        bash .github/changed-files.sh 'specs/**' 'src/nerve/**' '.github/workflows/tla.yml'
+        '.github/changed-files.sh'
+
   tlc:
     name: TLC ${{ matrix.model }}
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -67,3 +88,23 @@ jobs:
         java -XX:+UseParallelGC -cp "$RUNNER_TEMP/tla2tools.jar" tlc2.TLC \
           -workers auto -lncheck final -metadir "$RUNNER_TEMP/states" \
           -config "${{ matrix.model }}.cfg" "${{ matrix.module }}"
+
+  # The check to require before merging: every job above passed, or was skipped as not needed
+  required:
+    name: TLA+ required
+    if: always()
+    needs: [changes, tlc]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Every job passed or was skipped
+      env:
+        NEEDS: ${{ toJSON(needs) }}
+        RESULTS: ${{ join(needs.*.result, ' ') }}
+      run: |
+        echo "$NEEDS"
+        for result in $RESULTS; do
+          case $result in
+            success|skipped) ;;
+            *) echo "::error::A job ended in $result"; exit 1 ;;
+          esac
+        done

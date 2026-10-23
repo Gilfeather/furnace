@@ -9,35 +9,16 @@ name: Kani
 # on Linux only. Locally: `cargo install --locked kani-verifier --version 0.68.0 && cargo kani
 # setup`, then `cargo kani -p rustls-pure`, `-p kamui` or `-p furnace-server` (with
 # `--harness <name> --exact` for one proof).
+#
+# Every pull request runs `Kani required`, the job to require before merging; the proofs run
+# when it changes the files in `changes`, the list of harnesses always. Nightly on main too, with
+# kani-nightly.yml's longer harnesses.
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'kamui/**'
-      - 'rustls-pure/**'
-      - 'src/tensor.rs'
-      - 'src/model.rs'
-      - 'src/api/infer.rs'
-      - 'src/json_fast.rs'
-      - 'src/nerve/wire.rs'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/kani.yml'
-      - '.github/workflows/kani-nightly.yml'
   pull_request:
     branches: [ main ]
-    paths:
-      - 'kamui/**'
-      - 'rustls-pure/**'
-      - 'src/tensor.rs'
-      - 'src/model.rs'
-      - 'src/api/infer.rs'
-      - 'src/json_fast.rs'
-      - 'src/nerve/wire.rs'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/kani.yml'
-      - '.github/workflows/kani-nightly.yml'
+  schedule:
+    # Every night, 02:41 UTC
+    - cron: '41 2 * * *'
   workflow_dispatch:
 
 permissions:
@@ -46,14 +27,40 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-# A newer push to the same pull request makes an older run redundant
+# On a pull request a newer push makes an older run redundant; every other run (scheduled, by
+# hand) is a group of its own and runs to the end
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.changes.outputs.relevant }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        filter: blob:none
+
+    - name: Files this workflow checks
+      id: changes
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: >-
+        bash .github/changed-files.sh 'kamui/**' 'rustls-pure/**' 'src/tensor.rs' 'src/model.rs'
+        'src/api/infer.rs' 'src/json_fast.rs' 'src/nerve/wire.rs' 'Cargo.toml' 'Cargo.lock'
+        '.github/workflows/kani.yml' '.github/workflows/kani-nightly.yml'
+        '.github/changed-files.sh'
+
   kani:
     name: Kani (${{ matrix.package }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -76,6 +83,8 @@ jobs:
   # a line here or there; `check-list` fails the run until it has one.
   harness:
     name: Kani ${{ matrix.package }} ${{ matrix.harness }}
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -105,7 +114,8 @@ jobs:
         args: -p ${{ matrix.package }} --harness ${{ matrix.harness }} --exact
 
   # Every `#[kani::proof]` of kamui and furnace-server is in the matrix above or in
-  # kani-nightly.yml's (rustls-pure's run all at once, in the first job)
+  # kani-nightly.yml's (rustls-pure's run all at once, in the first job). On every pull request: a
+  # new harness can be anywhere in src.
   check-list:
     name: Every Kani harness runs
     runs-on: ubuntu-latest
@@ -123,3 +133,23 @@ jobs:
           diff <(echo "$listed") <(echo "$found")
           exit 1
         fi
+
+  # The check to require before merging: every job above passed, or was skipped as not needed
+  required:
+    name: Kani required
+    if: always()
+    needs: [changes, kani, harness, check-list]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Every job passed or was skipped
+      env:
+        NEEDS: ${{ toJSON(needs) }}
+        RESULTS: ${{ join(needs.*.result, ' ') }}
+      run: |
+        echo "$NEEDS"
+        for result in $RESULTS; do
+          case $result in
+            success|skipped) ;;
+            *) echo "::error::A job ended in $result"; exit 1 ;;
+          esac
+        done

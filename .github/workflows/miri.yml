@@ -7,27 +7,16 @@ name: Miri
 # own but furnace-burn's weight mapping, which Miri cannot run (it maps a file), and
 # rustls-pure forbids it. Both aliasing models Rust may adopt: Stacked Borrows, and Tree
 # Borrows. Strict provenance under both: a pointer is never made up from an integer. On pull
-# requests that change kamui, on main, and weekly.
+# requests that change kamui, and weekly on main. Every pull request runs `Miri required`, the
+# job to require before merging.
 #
 # On Linux only: there `System` hands over-aligned blocks to `posix_memalign`, which Miri
 # models. Windows' `System` keeps a header in front of an over-aligned block and reads it on
 # free, outside the bytes the freed `Box` may touch; Miri reports that as undefined behaviour
 # in std itself, with std's `System` as the only allocator and no kamui at all.
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'kamui/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/miri.yml'
   pull_request:
     branches: [ main ]
-    paths:
-      - 'kamui/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/miri.yml'
   schedule:
     # Mondays, 04:30 UTC
     - cron: '30 4 * * 1'
@@ -39,14 +28,38 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-# On a pull request a newer push makes an older run redundant; on main every commit runs to the end
+# On a pull request a newer push makes an older run redundant; every other run (scheduled, by
+# hand) is a group of its own and runs to the end
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.changes.outputs.relevant }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        filter: blob:none
+
+    - name: Files this workflow checks
+      id: changes
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: >-
+        bash .github/changed-files.sh 'kamui/**' 'Cargo.toml' 'Cargo.lock'
+        '.github/workflows/miri.yml' '.github/changed-files.sh'
+
   miri:
     name: Miri (${{ matrix.model.name }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -81,3 +94,23 @@ jobs:
       env:
         MIRIFLAGS: ${{ matrix.model.flags }}
       run: cargo miri test -p kamui
+
+  # The check to require before merging: every job above passed, or was skipped as not needed
+  required:
+    name: Miri required
+    if: always()
+    needs: [changes, miri]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Every job passed or was skipped
+      env:
+        NEEDS: ${{ toJSON(needs) }}
+        RESULTS: ${{ join(needs.*.result, ' ') }}
+      run: |
+        echo "$NEEDS"
+        for result in $RESULTS; do
+          case $result in
+            success|skipped) ;;
+            *) echo "::error::A job ended in $result"; exit 1 ;;
+          esac
+        done

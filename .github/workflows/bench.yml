@@ -21,9 +21,11 @@ on:
 permissions:
   contents: read
 
+# A newer manual run on a branch makes an older one redundant; a weekly or release run is a group
+# of its own and runs to the end
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 env:
   CARGO_TERM_COLOR: always
