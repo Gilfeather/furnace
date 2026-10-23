@@ -16,6 +16,12 @@ the code.
   that takes the peer's bytes before the RustCrypto crates do: the size and shape of every
   group's key shares, how the X25519MLKEM768 shares are split and put together in both
   directions, the hybrid secret's order, record lengths and Ed25519 key and signature sizes.
+- Constant time, checked three ways (CONSTANT_TIME.md): a review of rustls-pure's own code for
+  secret-dependent branches, comparisons and wiping, with a survey of what each primitive crate
+  does and documents; a check of the machine code of rustls-pure's own secret handling on
+  x86_64 and aarch64 (`ct-asm.sh`, on pull requests); and timing tests in the style of dudect
+  of every operation that handles a secret, gated on a control, weekly on x86_64 Linux,
+  aarch64 Linux and Apple silicon.
 
 ### Changed
 - P-256 and P-384 key shares are checked for the uncompressed point's exact size by
@@ -33,6 +39,18 @@ the code.
   only after the key and the signature have parsed.
 - The server's private key is shared with each handshake's signer instead of copied into it,
   so the secret exists once in memory.
+- X25519's all-zero check is rustls-pure's own branch-free code instead of x25519-dalek's
+  `was_contributory` (which is also constant time), so that its machine code can be checked;
+  the same results are refused.
+
+### Fixed
+- ML-KEM's encapsulation randomness, from which the server's ML-KEM secret follows, is made in
+  place and wiped; before, a copy of it was left unwiped on the stack.
+
+### Security
+- RUSTSEC-2026-0385: `ctutils` below 0.4.4, under the AEADs, ML-KEM and the curve crates, has
+  masks that could compile to a branch on a secret. The repository's lockfile has 0.4.4; an
+  application's own lockfile needs `cargo update -p ctutils`.
 
 ## [0.15.0] - 2026-10-22
 

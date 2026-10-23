@@ -1,9 +1,10 @@
 name: rustls-pure
 
 # rustls-pure against other TLS implementations (OpenSSL, GnuTLS, curl), weekly and on pull
-# requests that change it; and, weekly only, against the newest rustls its version range allows
-# and on its minimum supported Rust version, which depend on what others release. Its unit,
-# handshake and property tests run in the CI workflow with the rest.
+# requests that change it, with a check of its own machine code that handles secrets; and, weekly
+# only, against the newest rustls its version range allows and on its minimum supported Rust
+# version, which depend on what others release. Its unit, handshake and property tests run in the
+# CI workflow with the rest.
 on:
   schedule:
     # Mondays, 04:37 UTC
@@ -84,6 +85,28 @@ jobs:
     # The lockfile's versions; a dependency update that needs a newer Rust shows up here
     - name: Test
       run: cargo test -p rustls-pure --locked
+
+  # rustls-pure's own code that handles secrets, as compiled: no branch, call or indexed load
+  # (ct-asm.sh; the timing tests are in rustls-pure-ct.yml)
+  machine-code:
+    name: Constant-time machine code (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: stable
+
+    - name: Check
+      shell: bash
+      run: bash rustls-pure/ct-asm.sh
 
   # REQUIRE_MLKEM: the OpenSSL here must have X25519MLKEM768 (3.5 or later), so the post-quantum
   # checks cannot be skipped quietly

@@ -1,0 +1,87 @@
+name: rustls-pure constant time
+
+# Statistical timing tests (dudect style) of every operation in rustls-pure that handles a
+# secret: key exchanges, ML-KEM decapsulation of valid against tampered ciphertexts, signing and
+# refusing records with a wrong tag (rustls-pure/src/tests/constant_time.rs; what they show and
+# what they do not, rustls-pure/CONSTANT_TIME.md). A control runs first, and a runner whose
+# control fails reports no result. Timing on a shared runner is too noisy for pull requests, so
+# this runs weekly and by hand, on a release build, about a minute per target. The check of
+# rustls-pure's own machine code, which needs no timing, runs on pull requests in rustls-pure.yml
+# and here too, on the same runners.
+on:
+  schedule:
+    # Tuesdays, 05:13 UTC
+    - cron: '13 5 * * 2'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  constant-time:
+    name: Constant time (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # x86_64 (AES-NI, CLMUL, AVX2) and aarch64 on two kinds of machine, a Linux VM and
+        # Apple silicon: the crates pick different code for each, and compilers emit different
+        # code for each architecture
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      with:
+        toolchain: stable
+
+    - name: Machine code of rustls-pure's own secret handling
+      shell: bash
+      run: bash rustls-pure/ct-asm.sh
+
+    - name: Build
+      run: cargo test --release -p rustls-pure --lib --no-run
+
+    # What the timing depends on: the CPU, the clock and how much of the time the VM is not
+    # running (steal), before and after
+    - name: Machine
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = Linux ]; then
+          lscpu
+          cat /sys/devices/system/clocksource/clocksource0/current_clocksource
+          sudo dmesg | grep -iE 'arch_timer|clocksource|tsc' || true
+          grep '^cpu ' /proc/stat
+        else
+          sysctl -n machdep.cpu.brand_string hw.ncpu hw.tbfrequency 2>/dev/null || true
+        fi
+
+    # On Linux on one core, so the samples are not spread over cores that differ; macOS cannot
+    # pin a thread. Every |t| goes to the run's summary, whether it passed or not
+    - name: Timing tests
+      shell: bash
+      run: |
+        set -o pipefail
+        pin=""
+        if [ "$RUNNER_OS" = Linux ]; then pin="taskset -c 1"; fi
+        $pin cargo test --release -p rustls-pure --lib constant_time \
+          -- --ignored --nocapture --test-threads=1 2>&1 | tee ct.log
+
+    - name: Summary
+      if: always()
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = Linux ]; then grep '^cpu ' /proc/stat; fi
+        {
+          echo "### rustls-pure constant time (${{ matrix.os }})"
+          echo "|t| < 4.5 means no difference detected; if the control fails, nothing here counts"
+          echo '```'
+          grep '^ct: ' ct.log || echo "no results"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
