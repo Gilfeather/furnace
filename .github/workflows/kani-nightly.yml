@@ -1,0 +1,47 @@
+name: Kani nightly
+
+# The Kani proofs that take longer than a pull request should wait (kani.yml runs the rest), at
+# the same bounds: kamui's proofs at the allocator's own 64 slots, the status line parser on any
+# 14 bytes, element counts of four dimensions, joining three tensors and raw tensor data of
+# every length up to 17 bytes. One harness per job, each with up to six hours. Also by hand
+# (workflow_dispatch), on any branch.
+on:
+  schedule:
+    # Every night, 02:53 UTC
+    - cron: '53 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  harness:
+    name: Kani ${{ matrix.package }} ${{ matrix.harness }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - { package: kamui, harness: 'verification::take_hands_out_a_block_once_64_slots' }
+        - { package: kamui, harness: 'verification::keep_keeps_a_block_or_refuses_it_64_slots' }
+        - { package: kamui, harness: 'verification::alloc_and_dealloc_stay_in_bounds_64_slots' }
+        - { package: kamui, harness: 'verification::realloc_keeps_the_contents_64_slots' }
+        - { package: furnace-server, harness: 'nerve::wire::verification::status_codes_are_three_digits_in_range' }
+        - { package: furnace-server, harness: 'tensor::verification::element_count_is_the_exact_product' }
+        - { package: furnace-server, harness: 'tensor::verification::concat_batch_never_panics' }
+        - { package: furnace-server, harness: 'api::infer::verification::raw_fp32_decodes_whole_elements' }
+        - { package: furnace-server, harness: 'api::infer::verification::raw_int64_decodes_whole_elements' }
+        - { package: furnace-server, harness: 'api::infer::verification::raw_int32_decodes_whole_elements' }
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Prove
+      uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+      with:
+        kani-version: '0.68.0'
+        args: -p ${{ matrix.package }} --harness ${{ matrix.harness }} --exact

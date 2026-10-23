@@ -20,6 +20,22 @@ const PARALLEL_MIN_BYTES: usize = 64 * 1024;
 
 /// Parse `body` if it is one of the two shapes, else `None`
 pub fn parse(body: &[u8]) -> Option<FastInput> {
+    let (batch, arrays) = array_spans(body)?;
+    let spans: Vec<&[u8]> = arrays
+        .iter()
+        .map(|&(start, end)| &body[start..end])
+        .collect();
+    let mut numbers = numbers(&spans)?;
+    Some(if batch {
+        FastInput::Batch(numbers)
+    } else {
+        FastInput::Single(numbers.pop()?)
+    })
+}
+
+/// Whether `body` is `{"inputs": [...]}` (or `{"input": [...]}`), and where its arrays'
+/// numbers are, between their brackets; `None` for a body of any other shape
+fn array_spans(body: &[u8]) -> Option<(bool, Vec<(usize, usize)>)> {
     let mut s = Scanner { b: body, i: 0 };
     s.ws();
     s.expect(b'{')?;
@@ -34,9 +50,9 @@ pub fn parse(body: &[u8]) -> Option<FastInput> {
     s.ws();
     s.expect(b':')?;
     s.ws();
-    let input = if batch {
+    let mut arrays = Vec::new();
+    if batch {
         s.expect(b'[')?;
-        let mut arrays = Vec::new();
         s.ws();
         if !s.peek_is(b']') {
             loop {
@@ -50,19 +66,13 @@ pub fn parse(body: &[u8]) -> Option<FastInput> {
             }
         }
         s.expect(b']')?;
-        let spans: Vec<&[u8]> = arrays
-            .iter()
-            .map(|&(start, end)| &body[start..end])
-            .collect();
-        FastInput::Batch(numbers(&spans)?)
     } else {
-        let (start, end) = s.array_span()?;
-        FastInput::Single(numbers(&[&body[start..end]])?.pop()?)
-    };
+        arrays.push(s.array_span()?);
+    }
     s.ws();
     s.expect(b'}')?;
     s.ws();
-    (s.i == body.len()).then_some(input)
+    (s.i == body.len()).then_some((batch, arrays))
 }
 
 struct Scanner<'a> {
@@ -133,15 +143,7 @@ fn numbers(spans: &[&[u8]]) -> Option<Vec<Vec<f32>>> {
             pieces.push((array, span, true));
             continue;
         }
-        let mut start = 0;
-        let mut at = target;
-        while at < span.len() {
-            let comma = at + span[at..].iter().position(|&c| c == b',')?;
-            pieces.push((array, &span[start..comma], false));
-            start = comma + 1;
-            at = start + target;
-        }
-        pieces.push((array, &span[start..], false));
+        pieces.extend(cut_after_commas(span, target).map(|text| (array, text, false)));
     }
 
     // Consecutive pieces of about `target` bytes in all make one thread's run
@@ -195,6 +197,30 @@ fn numbers(spans: &[&[u8]]) -> Option<Vec<Vec<f32>>> {
         }
     }
     Some(arrays)
+}
+
+/// `span` cut at commas into pieces of at least `target` bytes, the last one maybe shorter;
+/// joined with commas they are `span` again. A span without a comma after `target` bytes is
+/// one piece.
+fn cut_after_commas(span: &[u8], target: usize) -> impl Iterator<Item = &[u8]> {
+    let mut start = Some(0);
+    std::iter::from_fn(move || {
+        let from = start?;
+        let at = from + target;
+        let comma = span
+            .get(at..)
+            .and_then(|rest| rest.iter().position(|&c| c == b','));
+        match comma {
+            Some(comma) => {
+                start = Some(at + comma + 1);
+                Some(&span[from..at + comma])
+            }
+            None => {
+                start = None;
+                Some(&span[from..])
+            }
+        }
+    })
 }
 
 /// The numbers of a whole array, which may be empty, or of a piece cut after a comma
@@ -276,6 +302,99 @@ fn json_number_len(s: &[u8]) -> Option<usize> {
         }
     }
     Some(i)
+}
+
+/// Kani proofs (`cargo kani`): the scanner on any bytes
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Whether `s` is a JSON number, `-?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?`, by a
+    /// state machine of the grammar
+    fn is_json_number(s: &[u8]) -> bool {
+        // 0 start, 1 sign, 2 zero, 3 integer, 4 point, 5 fraction, 6 e, 7 exponent sign,
+        // 8 exponent
+        let mut state = 0;
+        for &c in s {
+            state = match (state, c) {
+                (0, b'-') => 1,
+                (0 | 1, b'0') => 2,
+                (0 | 1, b'1'..=b'9') => 3,
+                (3, b'0'..=b'9') => 3,
+                (2 | 3, b'.') => 4,
+                (4 | 5, b'0'..=b'9') => 5,
+                (2 | 3 | 5, b'e' | b'E') => 6,
+                (6, b'+' | b'-') => 7,
+                (6..=8, b'0'..=b'9') => 8,
+                _ => return false,
+            };
+        }
+        matches!(state, 2 | 3 | 5 | 8)
+    }
+
+    /// Any bytes: `json_number_len` never reads past them and takes only a whole JSON number,
+    /// all ASCII, as `parse_list` relies on to read it as UTF-8 without checking
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn number_lengths_take_json_numbers_only() {
+        let bytes: [u8; 8] = kani::any();
+        let s = &bytes[..kani::any_where(|&len: &usize| len <= 8)];
+        if let Some(len) = json_number_len(s) {
+            assert!(len <= s.len());
+            assert!(is_json_number(&s[..len]));
+            assert!(s[..len].is_ascii());
+        }
+    }
+
+    /// Any span of up to 8 bytes cut for any target up to 3: the pieces are the span's
+    /// bytes in order, each but the last followed by a comma it was cut at and at least
+    /// `target` bytes long. Checked by where each piece lies in the span, without collecting
+    /// them.
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn cut_pieces_join_back_into_the_span() {
+        let bytes: [u8; 8] = kani::any();
+        let span = &bytes[..kani::any_where(|&len: &usize| len <= 8)];
+        let target = kani::any_where(|&t: &usize| (1..=3).contains(&t));
+        let mut at = 0;
+        let mut pieces = cut_after_commas(span, target);
+        loop {
+            let piece = pieces.next().expect("a piece up to the end of the span");
+            assert_eq!(piece.as_ptr() as usize, span.as_ptr() as usize + at);
+            at += piece.len();
+            if at == span.len() {
+                break;
+            }
+            assert!(piece.len() >= target);
+            assert_eq!(span[at], b',');
+            at += 1;
+        }
+        assert!(pieces.next().is_none());
+    }
+
+    /// Any body of at most 12 bytes: the scan for the arrays never panics, and the spans it
+    /// finds lie within the body, each between brackets and holding none, nor braces or
+    /// quotes, with one for `"input"`. (`parse` itself goes on to threads, which Kani does not
+    /// model.)
+    #[kani::proof]
+    #[kani::unwind(14)]
+    fn array_spans_lie_between_brackets() {
+        let bytes: [u8; 12] = kani::any();
+        let body = &bytes[..kani::any_where(|&len: &usize| len <= 12)];
+        if let Some((batch, spans)) = array_spans(body) {
+            assert!(batch || spans.len() == 1);
+            for (start, end) in spans {
+                assert!(0 < start && start <= end && end < body.len());
+                assert_eq!(body[start - 1], b'[');
+                assert_eq!(body[end], b']');
+                assert!(
+                    body[start..end]
+                        .iter()
+                        .all(|c| !matches!(c, b'[' | b']' | b'{' | b'}' | b'"'))
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -400,6 +519,16 @@ mod tests {
         assert!(rows.len() > 4 * PARALLEL_MIN_BYTES);
         assert!(matches!(parse(rows.as_bytes()), Some(FastInput::Batch(b)) if b.len() == 2001));
         agree(&rows);
+    }
+
+    #[test]
+    fn a_cut_point_inside_the_last_number_keeps_the_rest_whole() {
+        // Large arrays used to be refused (left to serde_json) whenever a cut point fell in
+        // the last number of one, past its last comma
+        let pieces: Vec<&[u8]> = cut_after_commas(b"1, 2, 345", 7).collect();
+        assert_eq!(pieces, [b"1, 2, 345".as_slice()]);
+        let pieces: Vec<&[u8]> = cut_after_commas(b"1, 2, 345, 6", 2).collect();
+        assert_eq!(pieces, [b"1, 2".as_slice(), b" 345", b" 6"]);
     }
 
     mod properties {

@@ -206,7 +206,8 @@ pub struct Model {
     model_type: &'static str,
     inputs: Vec<IoSpec>,
     outputs: Vec<IoSpec>,
-    /// One `f32` tensor in and one out, both with fixed per-item shapes
+    /// One `f32` tensor in and one out, both with fixed per-item shapes that
+    /// [`flat_item_len`] takes
     simple: bool,
     /// The range of the engine's integers, for integer inputs
     int_range: (i64, i64),
@@ -221,6 +222,16 @@ pub struct Model {
 enum Door {
     Named,
     Flat,
+}
+
+/// Values per item of a simple model's input or output of per-item `shape`, when every
+/// dimension is at least 1 and [`MAX_BATCH_SIZE`] items of the widest element (8 bytes) fit in
+/// a `usize`. The flat paths count a batch's values and bytes on this bound, unchecked.
+fn flat_item_len(shape: &[usize]) -> Option<usize> {
+    let len = element_count(shape).filter(|_| shape.iter().all(|&d| d > 0))?;
+    len.checked_mul(MAX_BATCH_SIZE)?
+        .checked_mul(size_of::<i64>())?;
+    Some(len)
 }
 
 /// The legacy single-tensor description: per-item shape (open dimensions as 0) and dtype
@@ -258,7 +269,9 @@ impl Model {
         let simple = match (inputs.as_slice(), outputs.as_slice()) {
             ([input], [output]) => [input, output].iter().all(|spec| {
                 spec.dtype == DataType::Fp32
-                    && spec.static_shape().is_some_and(|shape| !shape.is_empty())
+                    && spec
+                        .static_shape()
+                        .is_some_and(|shape| !shape.is_empty() && flat_item_len(&shape).is_some())
             }),
             _ => false,
         };
@@ -293,7 +306,8 @@ impl Model {
         !self.simple && self.inputs.iter().all(|spec| spec.static_shape().is_some())
     }
 
-    /// Whether the model takes one `f32` tensor and returns one, with fixed per-item shapes.
+    /// Whether the model takes one `f32` tensor and returns one, with fixed per-item shapes of
+    /// at least one value each (and few enough that [`MAX_BATCH_SIZE`] items can be counted).
     /// Such models serve `/predict` and batch concurrent requests together; the others take
     /// named tensors through [`Model::infer`].
     pub fn is_simple(&self) -> bool {
@@ -568,6 +582,18 @@ impl Model {
             ))
             .into());
         }
+        // Splitting the outputs back into requests indexes the values by the shape
+        if let Some(output) = outputs
+            .iter()
+            .find(|o| element_count(&o.shape) != Some(o.values.len()))
+        {
+            return Err(ModelError::InferenceFailed(format!(
+                "model returned shape {:?} with {} values",
+                output.shape,
+                output.values.len()
+            ))
+            .into());
+        }
         Ok(())
     }
 
@@ -637,6 +663,7 @@ impl Model {
     /// A flat request as the one tensor of a simple model, without copying its buffer. The
     /// batch size and length are checked here, first, as the flat methods always have.
     fn flat_request(&self, FlatInput { data, batch_size }: FlatInput) -> Result<Vec<HostTensor>> {
+        self.check_simple()?;
         Self::check_batch_size(batch_size)?;
         let item = &self.info.input_spec.shape;
         if data.len() != batch_size * item.iter().product::<usize>() {
@@ -673,6 +700,18 @@ impl Model {
         }
     }
 
+    /// The flat methods take only a simple model, whose sizes [`flat_item_len`] bounds
+    fn check_simple(&self) -> Result<()> {
+        if self.simple {
+            return Ok(());
+        }
+        Err(ModelError::InvalidInput(
+            "the model does not take one flat f32 tensor: give it its named tensors (Model::infer)"
+                .to_string(),
+        )
+        .into())
+    }
+
     fn check_batch_size(batch_size: usize) -> Result<()> {
         if batch_size == 0 {
             return Err(ModelError::EmptyBatch.into());
@@ -688,6 +727,7 @@ impl Model {
     }
 
     fn flatten_batch(&self, inputs: Vec<Vec<f32>>) -> Result<Vec<f32>> {
+        self.check_simple()?;
         Self::check_batch_size(inputs.len())?;
         let input_size: usize = self.info.input_spec.shape.iter().product();
         let mut flattened = Vec::with_capacity(inputs.len() * input_size);
@@ -709,7 +749,8 @@ impl Model {
     /// page faults on the memory-mapped weights). Returns how long it took.
     ///
     /// A model with an input whose shape is only fixed per request cannot be warmed up without
-    /// guessing it, and is skipped (`Ok(None)`).
+    /// guessing it, and is skipped (`Ok(None)`), as is one whose input has more values than fit
+    /// in a `usize`.
     pub fn warm_up(&self) -> Result<Option<std::time::Duration>> {
         let start = Instant::now();
         // A graph with a fixed batch size runs only that many items at once
@@ -720,7 +761,7 @@ impl Model {
             .map(|spec| {
                 let mut shape = vec![batch];
                 shape.extend(spec.static_shape()?);
-                let len = shape.iter().product();
+                let len = element_count(&shape)?;
                 let values = if spec.dtype.is_int() {
                     Values::I64(vec![0; len])
                 } else {
@@ -748,6 +789,7 @@ impl Model {
 
     /// Whether `input` has one item's worth of values for a simple model's input
     pub fn validate_input_shape(&self, input: &[f32]) -> Result<()> {
+        self.check_simple()?;
         let expected_size: usize = self.info.input_spec.shape.iter().product();
         if input.len() != expected_size {
             return Err(ModelError::InputValidation {
@@ -816,6 +858,47 @@ fn duplicate(error: &FurnaceError) -> FurnaceError {
         },
     }
     .into()
+}
+
+/// Kani proofs (`cargo kani`): the flat paths' sizes
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// `flat_item_len` takes exactly the shapes of positive dimensions whose
+    /// [`MAX_BATCH_SIZE`] items of 8 bytes fit in a `usize`, and for those the unchecked counts
+    /// of the flat paths (`/predict`, binary input, the Open Inference Protocol's one tensor)
+    /// never overflow at any batch size they let through. Shapes of up to three dimensions,
+    /// each of any size.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn flat_sizes_never_overflow() {
+        let dims: [usize; 3] = kani::any();
+        let shape = &dims[..kani::any_where(|&len: &usize| len <= 3)];
+        // The product in 128 bits: no overflow while every partial product fits in 64
+        let mut exact: u128 = 1;
+        let mut huge = false;
+        for &d in shape {
+            exact *= d as u128;
+            if exact > usize::MAX as u128 {
+                huge = true;
+                break;
+            }
+        }
+        let fits =
+            !huge && exact * (MAX_BATCH_SIZE * size_of::<i64>()) as u128 <= usize::MAX as u128;
+        let positive = shape.iter().all(|&d| d > 0);
+        assert_eq!(flat_item_len(shape).is_some(), fits && positive);
+
+        if let Some(item) = flat_item_len(shape) {
+            let product: usize = shape.iter().product();
+            assert_eq!(item, product);
+            assert!(item > 0);
+            let batch = kani::any_where(|&b: &usize| (1..=MAX_BATCH_SIZE).contains(&b));
+            assert!((batch * item * size_of::<f32>()) / size_of::<f32>() == batch * item);
+            assert!((batch * item * size_of::<i64>()) / size_of::<i64>() == batch * item);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -974,6 +1057,60 @@ mod tests {
         }
         fn fixed_batch(&self) -> Option<usize> {
             Some(2)
+        }
+    }
+
+    /// A simple model whose output has one value fewer than its shape holds
+    #[derive(Debug)]
+    struct ShortOutput(DummyModel);
+
+    impl TensorModel for ShortOutput {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        fn backend(&self) -> &str {
+            self.0.backend()
+        }
+        fn inputs(&self) -> Vec<IoSpec> {
+            self.0.inputs()
+        }
+        fn outputs(&self) -> Vec<IoSpec> {
+            self.0.outputs()
+        }
+        fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
+            let mut outputs = self.0.run(inputs)?;
+            if let Values::F32(values) = &mut outputs[0].values {
+                values.pop();
+            }
+            Ok(outputs)
+        }
+    }
+
+    #[test]
+    fn outputs_with_fewer_values_than_their_shape_are_the_models_error() {
+        // Splitting such an output back into requests indexed past its values and panicked
+        let dummy = DummyModel::new("short".to_string(), vec![3], vec![2]);
+        let model = Model::new(Box::new(ShortOutput(dummy)), "dummy", 0);
+        let item = || FlatInput {
+            data: vec![1.0; 3],
+            batch_size: 1,
+        };
+        for result in model.predict_many(vec![item(), item()]) {
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("shape [2, 2] with 3 values"), "{err}");
+        }
+    }
+
+    #[test]
+    fn shapes_with_no_values_or_too_many_to_count_are_not_simple() {
+        // `/predict` counts a batch's values and bytes unchecked; a dimension of 0 made
+        // `predict_batch` split its outputs into chunks of none
+        for shape in [vec![0], vec![2, 0], vec![usize::MAX / MAX_BATCH_SIZE]] {
+            let dummy = DummyModel::new("odd".to_string(), vec![3], shape.clone());
+            let model = Model::new(Box::new(dummy), "dummy", 0);
+            assert!(!model.is_simple(), "{shape:?}");
+            let err = model.predict(vec![1.0; 3]).unwrap_err().to_string();
+            assert!(err.contains("named tensors"), "{shape:?}: {err}");
         }
     }
 

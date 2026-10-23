@@ -17,3 +17,7 @@ readme = "README.md"
 [dev-dependencies]
 # Property tests only; the crate itself has no dependencies
 proptest = { version = "1.12", default-features = false, features = ["std"] }
+
+[lints.rust]
+# Kani's proof harnesses (`#[cfg(kani)] mod verification`); `cargo kani` sets the cfg
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

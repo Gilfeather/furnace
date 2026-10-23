@@ -235,12 +235,8 @@ impl<S: AsyncRead + Unpin> Streaming<S> {
         match self.chunk_left {
             None => {
                 let line = self.read_line().await?;
-                let size = line.split(';').next().unwrap_or("").trim();
-                // Hex digits only: `from_str_radix` alone would take a sign
-                let size = Some(size)
-                    .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit()))
-                    .and_then(|s| usize::from_str_radix(s, 16).ok())
-                    .ok_or_else(|| Error::Protocol(format!("bad chunk size '{size}'")))?;
+                let size = chunk_size(line.as_bytes())
+                    .ok_or_else(|| Error::Protocol(format!("bad chunk size line '{line}'")))?;
                 if size == 0 {
                     // Trailers up to the empty line, within a bound
                     let mut trailers = 0;
@@ -512,14 +508,7 @@ async fn read_head<S: AsyncRead + Unpin>(mut stream: S) -> Result<Streaming<S>> 
 fn parse_head<S>(head: &str, stream: S, rest: Vec<u8>) -> Result<Streaming<S>> {
     let mut lines = head.split("\r\n");
     let status_line = lines.next().unwrap_or("");
-    let mut parts = status_line.split_whitespace();
-    let status = parts
-        .next()
-        .filter(|version| version.starts_with("HTTP/1."))
-        .and(parts.next())
-        .filter(|code| code.len() == 3)
-        .and_then(|code| code.parse::<u16>().ok())
-        .filter(|code| (100..600).contains(code))
+    let status = status_code(status_line.as_bytes())
         .ok_or_else(|| Error::Protocol(format!("bad status line '{status_line}'")))?;
     let headers: Vec<(String, String)> = lines
         .filter_map(|line| {
@@ -538,9 +527,7 @@ fn parse_head<S>(head: &str, stream: S, rest: Vec<u8>) -> Result<Streaming<S>> {
     } else if let Some(first) = all("content-length").next() {
         // Digits only, and the same in every copy of the header: a body whose length is in
         // doubt is not read at all
-        let length = Some(first)
-            .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
-            .and_then(|v| v.parse::<usize>().ok())
+        let length = content_length(first.as_bytes())
             .filter(|_| all("content-length").all(|v| v == first))
             .ok_or_else(|| Error::Protocol(format!("bad content-length '{first}'")))?;
         Framing::Length(length)
@@ -560,8 +547,158 @@ fn parse_head<S>(head: &str, stream: S, rest: Vec<u8>) -> Result<Streaming<S>> {
     })
 }
 
+/// The code of an `HTTP/1.x` status line: the version, then three digits, 100 to 599
+fn status_code(line: &[u8]) -> Option<u16> {
+    let mut parts = line
+        .split(u8::is_ascii_whitespace)
+        .filter(|part| !part.is_empty());
+    if !parts.next()?.starts_with(b"HTTP/1.") {
+        return None;
+    }
+    let &[a, b, c] = parts.next()? else {
+        return None;
+    };
+    let code = [a, b, c].iter().try_fold(0u16, |n, &digit| {
+        digit
+            .is_ascii_digit()
+            .then(|| n * 10 + u16::from(digit - b'0'))
+    })?;
+    (100..600).contains(&code).then_some(code)
+}
+
+/// A `Content-Length` value: decimal digits only, no sign or space, within a `usize`
+fn content_length(value: &[u8]) -> Option<usize> {
+    if value.is_empty() {
+        return None;
+    }
+    value.iter().try_fold(0usize, |n, &digit| {
+        digit.is_ascii_digit().then_some(())?;
+        n.checked_mul(10)?.checked_add(usize::from(digit - b'0'))
+    })
+}
+
+/// The size on a chunk's size line, before any `;` extension, spaces around it allowed: hex
+/// digits only, no sign, within a `usize`
+fn chunk_size(line: &[u8]) -> Option<usize> {
+    let size = match line.iter().position(|&b| b == b';') {
+        Some(end) => &line[..end],
+        None => line,
+    }
+    .trim_ascii();
+    if size.is_empty() {
+        return None;
+    }
+    size.iter().try_fold(0usize, |n, &digit| {
+        let digit = char::from(digit).to_digit(16)?;
+        n.checked_mul(16)?.checked_add(digit as usize)
+    })
+}
+
 fn find_head_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+/// Kani proofs (`cargo kani`): the parts of a response head, from any bytes
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Any bytes, at most `N` of them
+    fn any_bytes<const N: usize>(bytes: &[u8; N]) -> &[u8] {
+        &bytes[..kani::any_where(|&len: &usize| len <= N)]
+    }
+
+    /// The value of `digits` in `radix`, in 128 bits (no overflow for up to 20 hex digits);
+    /// `None` for a byte that is not a digit
+    fn value(digits: &[u8], radix: u32) -> Option<u128> {
+        let mut n = 0u128;
+        for &d in digits {
+            n = n * u128::from(radix) + u128::from(char::from(d).to_digit(radix)?);
+        }
+        Some(n)
+    }
+
+    /// The value of a non-empty `digits`, when it fits in a `usize`
+    fn fitting(digits: &[u8], radix: u32) -> Option<usize> {
+        value(digits, radix)
+            .filter(|_| !digits.is_empty())
+            .and_then(|n| usize::try_from(n).ok())
+    }
+
+    /// The head ends at the first blank line, wherever it is
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn the_head_ends_at_the_first_blank_line() {
+        let bytes: [u8; 10] = kani::any();
+        let buffer = any_bytes(&bytes);
+        let blank = |i: usize| buffer[i..].starts_with(b"\r\n\r\n");
+        match find_head_end(buffer) {
+            Some(i) => {
+                assert!(blank(i));
+                assert!((0..i).all(|j| !blank(j)));
+            }
+            None => {
+                assert!((0..buffer.len()).all(|j| !blank(j)));
+            }
+        }
+    }
+
+    /// Any status line of up to 14 bytes: a code exactly when, past any whitespace, a word
+    /// starting `HTTP/1.` comes before a word of three digits from 100 to 599. The expected
+    /// answer is found by index, apart from the iterators `status_code` uses.
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn status_codes_are_three_digits_in_range() {
+        let bytes: [u8; 14] = kani::any();
+        let line = any_bytes(&bytes);
+        let space = |i: usize| line[i].is_ascii_whitespace();
+        let mut i = 0;
+        while i < line.len() && space(i) {
+            i += 1;
+        }
+        let version = i;
+        while i < line.len() && !space(i) {
+            i += 1;
+        }
+        let version_ok = line[version..i].starts_with(b"HTTP/1.");
+        while i < line.len() && space(i) {
+            i += 1;
+        }
+        let code = i;
+        while i < line.len() && !space(i) {
+            i += 1;
+        }
+        let expected = (version_ok && i - code == 3)
+            .then(|| value(&line[code..i], 10))
+            .flatten()
+            .filter(|c| (100..600).contains(c));
+        assert_eq!(status_code(line).map(u128::from), expected);
+    }
+
+    /// Any `Content-Length` of up to 21 bytes: exactly the decimal numbers that fit in a
+    /// `usize`, with no sign or space (21 digits reach past `usize::MAX`)
+    #[kani::proof]
+    #[kani::unwind(23)]
+    fn content_lengths_are_digits_only() {
+        let bytes: [u8; 21] = kani::any();
+        let v = any_bytes(&bytes);
+        assert_eq!(content_length(v), fitting(v, 10));
+    }
+
+    /// Any chunk size line of up to 20 bytes: exactly the hex numbers that fit in a `usize`,
+    /// spaces around them and a `;` extension after them allowed, no sign (17 digits reach past
+    /// `usize::MAX`)
+    #[kani::proof]
+    #[kani::unwind(22)]
+    fn chunk_sizes_are_hex_only() {
+        let bytes: [u8; 20] = kani::any();
+        let line = any_bytes(&bytes);
+        let mut end = 0;
+        while end < line.len() && line[end] != b';' {
+            end += 1;
+        }
+        assert_eq!(chunk_size(line), fitting(line[..end].trim_ascii(), 16));
+    }
 }
 
 #[cfg(test)]
