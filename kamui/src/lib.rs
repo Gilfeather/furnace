@@ -263,15 +263,24 @@ mod verification {
         cache
     }
 
-    /// Any valid layout: any size, a power-of-two alignment up to 4096
+    /// Any valid layout: any size and any power-of-two alignment `Layout` takes
     fn any_layout() -> Layout {
-        let align = 1usize << kani::any_where(|&shift: &u32| shift <= 12);
+        let align = 1usize << kani::any_where(|&shift: &u32| shift < usize::BITS);
         let layout = Layout::from_size_align(kani::any(), align);
         kani::assume(layout.is_ok());
         layout.unwrap()
     }
 
-    /// Any valid layout of `min..=max` bytes
+    /// Any valid layout of `min..=max` bytes.
+    ///
+    /// The allocator proofs take sizes of 1 to `MIN_SIZE + 64` bytes, which is enough to reach
+    /// every behaviour of `Blocks`. Its code looks at a size only to compare it with
+    /// `MIN_SIZE` (below or not), to compare two layouts for equality, to take the smaller of
+    /// two sizes for `realloc`'s copy, and to pass it on to `System` and `Cache`. This range
+    /// has sizes on both sides of the limit, and pairs of sizes that are smaller, equal or
+    /// larger than each other on each side. A larger size takes the same branches as one of
+    /// these. `Cache`'s byte arithmetic, the only place a size is added up, is proved for
+    /// sizes of any value (the `take` and `keep` proofs).
     fn any_layout_within(min: usize, max: usize) -> Layout {
         let layout = any_layout();
         kani::assume((min..=max).contains(&layout.size()));
@@ -357,6 +366,11 @@ mod verification {
         }
     }
 
+    /// How many blocks the cache keeps
+    fn kept<const N: usize>(blocks: &Blocks<N>) -> usize {
+        blocks.cache.lock().unwrap().blocks.iter().flatten().count()
+    }
+
     /// Give every kept block back to `System`, with the layout it was allocated with
     fn release<const N: usize>(blocks: &Blocks<N>) {
         let mut cache = blocks.cache.lock().unwrap();
@@ -368,7 +382,7 @@ mod verification {
     }
 
     /// A block freed and allocated again, zeroed or not, of any layout around the size limit
-    /// (1 to `MIN_SIZE + 64` bytes, any alignment up to 4096): every write and free stays
+    /// (1 to `MIN_SIZE + 64` bytes, see `any_layout_within`; any alignment): every write and free stays
     /// within live memory `System` handed out, a reused block is the one freed, and a zeroed
     /// one is all zeros (at any byte) even when it is reused
     fn alloc_and_dealloc_stay_in_bounds<const N: usize>() {
@@ -383,6 +397,7 @@ mod verification {
 
         let second = any_layout_within(1, MIN_SIZE + 64);
         let zeroed: bool = kani::any();
+        let kept_before = kept(&blocks);
         let b = unsafe {
             if zeroed {
                 blocks.alloc_zeroed(second)
@@ -391,7 +406,18 @@ mod verification {
             }
         };
         kani::assume(!b.is_null());
-        assert_eq!(b as usize % second.align(), 0);
+        if kept(&blocks) < kept_before {
+            // From the cache: the block freed, and only for the layout `System` allocated it
+            // with, so aligned as `System` aligned it
+            assert_eq!(a, b);
+            assert_eq!(second, first);
+        } else {
+            // Fresh from `System`, whose `GlobalAlloc` contract is to align it. (Not asserted
+            // here: CBMC's `posix_memalign` hands out blocks for alignments as large as 2^62
+            // unaligned, where Linux's refuses them, and `alloc` passes `System`'s pointer on
+            // untouched.)
+            assert_eq!(kept(&blocks), kept_before);
+        }
         if first.size() >= MIN_SIZE && second == first {
             assert_eq!(a, b, "the freed block is handed out again");
         }
