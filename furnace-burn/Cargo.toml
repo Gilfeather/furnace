@@ -6,7 +6,6 @@ rust-version = "1.95"
 authors = ["Furnace Contributors"]
 description = "Serve Burn models with furnace: a forward function, a model of named tensors, Burnpack weights and ONNX models compiled to Burn"
 documentation = "https://docs.rs/furnace-burn"
-homepage = "https://github.com/Gilfeather/furnace"
 repository = "https://github.com/Gilfeather/furnace"
 license = "MIT"
 keywords = ["machine-learning", "inference", "onnx", "server", "burn"]

@@ -5,7 +5,6 @@ edition = "2024"
 rust-version = "1.95"
 authors = ["Furnace Contributors"]
 description = "A one-minute look at furnace's nervous system: reflex or brain at a junction, chosen by deadline and measured latency"
-homepage = "https://github.com/Gilfeather/furnace"
 repository = "https://github.com/Gilfeather/furnace"
 license = "MIT"
 # Installed from the repository (`cargo install --git`) or run as a container image, not from

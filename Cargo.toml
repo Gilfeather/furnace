@@ -9,7 +9,6 @@ rust-version = "1.95"
 authors = ["Furnace Contributors"]
 description = "Fast, unified, Rust-native, Axum-compatible inference endpoints and nervous system for tensor models and LLMs: KServe / Triton and OpenAI APIs from one pure-Rust server"
 documentation = "https://docs.rs/furnace-server"
-homepage = "https://github.com/Gilfeather/furnace"
 repository = "https://github.com/Gilfeather/furnace"
 license = "MIT"
 keywords = ["machine-learning", "inference", "server", "llm", "axum"]

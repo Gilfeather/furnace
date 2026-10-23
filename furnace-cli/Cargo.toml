@@ -6,7 +6,6 @@ rust-version = "1.95"
 authors = ["Furnace Contributors"]
 description = "The furnace command: serve ONNX models compiled to Burn over the KServe / Triton Open Inference Protocol, in pure Rust"
 documentation = "https://github.com/Gilfeather/furnace#readme"
-homepage = "https://github.com/Gilfeather/furnace"
 repository = "https://github.com/Gilfeather/furnace"
 license = "MIT"
 keywords = ["machine-learning", "inference", "onnx", "server", "burn"]
