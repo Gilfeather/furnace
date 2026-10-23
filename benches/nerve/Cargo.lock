@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "amate"
-version = "0.15.0"
+version = "0.16.0"
 
 [[package]]
 name = "atomic-waker"
@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "furnace-server"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "amate",
  "axum",
@@ -413,7 +413,7 @@ dependencies = [
 
 [[package]]
 name = "kuebiko"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "serde",
 ]

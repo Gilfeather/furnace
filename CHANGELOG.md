@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-23
+
+The nervous system, its allocator and its parsers checked by model checking and proof: TLA+
+models of the design, loom models of the concurrency, Kani proofs and Miri. They found about
+fifteen bugs, fixed here, and a lane design that could deadlock, replaced.
+
+### Changed
+- **Breaking:** a nerve's lane counts effector acts only. `Nerve::in_flight` bounds the acts
+  of the part's effectors, whoever commands them, from inside the part or outside, and acts
+  that reach an effector through a deliberative queue take its lane too. Motor programs never
+  take a place or wait in a lane: the latest command to a motor neuron stops its running
+  program at once (its commander hears `cancelled`), even when the lane is full. An act a full
+  lane drops (the least urgent) fails, and the failure goes up to the brain like any outcome.
+  An act never waits on another command, so nothing deadlocks, with or without deadlines.
+- Nerve client parsers (status line, Content-Length, chunk size) work on bytes, with the same
+  grammar and ASCII whitespace only.
+
+### Fixed
+- A deliberative queue skipped a command once the request behind it was gone, and the
+  commanding program heard `done` for a command never carried out; a command nobody waited for
+  any more was carried out. A command is now skipped exactly when nobody waits for it.
+- An effector retried after its command's deadline; it now ends with `timed_out`.
+- Lanes could block for good: two parts commanding each other, or a command leaving its nerve
+  and coming back into it, waited on a place it held itself.
+- Signals leaving a lane were dropped while the lane's lock was held, which could re-enter the
+  lane or deadlock two lanes; they are now dropped outside the lock.
+- Two commands arriving together could both pass an effector's refractory period.
+- A circuit breaker stayed half-open for good when its trial command's commander stopped
+  waiting, and refused every command after it.
+- amate counted a refused item as waiting for a moment, so a queue with room could refuse.
+- kamui kept freed blocks as addresses and turned them back into pointers, losing their
+  provenance; it keeps them as pointers.
+- The JSON fast path refused a large array when a cut point fell inside its last number.
+- A simple model with a 0 dimension in its item shape panicked in `predict_batch`, and a shape
+  too large to count overflowed; such models are no longer simple.
+- An engine output with fewer values than its shape, or without a batch dimension, panicked
+  when split into or joined from requests; both are now the model's error.
+
+### Added
+- TLA+ models of the motor hierarchy, the nerve lanes and routing in `specs/`, checked by TLC
+  in CI (`tla.yml`).
+- loom models of amate's queue, the lanes, the effectors and motor preemption (`loom.yml`).
+- Kani proofs of kamui, the shape arithmetic and the input parsers: per pull request
+  (`kani.yml`), and the heaviest at full bounds nightly (`kani-nightly.yml`).
+- kamui runs under Miri, with Stacked Borrows and Tree Borrows, in CI (`miri.yml`).
+
+### Security
+- `benches/common` and `benches/nerve` use tokio 1.54.1 (RUSTSEC-2026-0384); the workspace was
+  on 1.53.3, which is not affected. The lockfile has ctutils 0.4.4 (RUSTSEC-2026-0385).
+- rustls-pure 0.15.2 (see rustls-pure/CHANGELOG.md).
+
 ## [0.15.0] - 2026-10-23
 
 The motor side of the nervous system as a hierarchy: a spine between the brain and the body,
