@@ -61,8 +61,7 @@ jobs:
       matrix:
         include:
         - { package: furnace-server, harness: 'tensor::verification::element_count_is_the_exact_product' }
-        # tensor::verification::concat_batch_never_panics is parked, not run until it is
-        # decomposed: it never completed on a GitHub runner (see DEVELOPMENT.md)
+        - { package: furnace-server, harness: 'tensor::verification::concat_batch_never_panics' }
     steps:
     - name: Checkout code
       uses: actions/checkout@v5

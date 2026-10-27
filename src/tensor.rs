@@ -229,7 +229,10 @@ impl HostTensor {
 
     /// Join tensors of the same type and per-item shape along the batch dimension
     pub fn concat_batch(parts: Vec<Self>) -> Result<Self> {
-        let total: usize = parts.iter().map(|part| part.values.len()).sum();
+        let mut total = 0;
+        for part in &parts {
+            total += part.values.len();
+        }
         let mut parts = parts.into_iter();
         let mut joined = parts
             .next()
@@ -259,8 +262,8 @@ impl HostTensor {
                 }
             };
             match (&mut joined.values, part.values) {
-                (Values::F32(a), Values::F32(b)) => a.extend(b),
-                (Values::I64(a), Values::I64(b)) => a.extend(b),
+                (Values::F32(a), Values::F32(b)) => a.extend_from_slice(&b),
+                (Values::I64(a), Values::I64(b)) => a.extend_from_slice(&b),
                 _ => {
                     return Err(ModelError::InferenceFailed(
                         "chunks of one batch returned different types".to_string(),
@@ -319,10 +322,13 @@ mod verification {
             vec![batch]
         };
         let len = element_count(&shape).unwrap();
+        // Any values, copied from a slice: `vec![x; len]` fills in a loop Kani unwinds slowly
         let values = if kani::any() {
-            Values::F32(vec![kani::any(); len])
+            let values: [f32; 4] = kani::any();
+            Values::F32(values[..len].to_vec())
         } else {
-            Values::I64(vec![kani::any(); len])
+            let values: [i64; 4] = kani::any();
+            Values::I64(values[..len].to_vec())
         };
         HostTensor { shape, values }
     }
@@ -360,18 +366,24 @@ mod verification {
     #[kani::unwind(8)]
     fn concat_batch_never_panics() {
         let count = kani::any_where(|&n: &usize| n <= 3);
-        let parts: Vec<HostTensor> = (0..count)
-            .map(|_| {
-                let mut part = any_tensor(2);
-                // A part as an engine may return it: without a batch dimension
-                if kani::any() {
-                    part.shape.clear();
-                }
-                part
-            })
-            .collect();
-        let items: Option<usize> = parts.iter().map(|p| p.shape.first().copied()).sum();
-        let values: usize = parts.iter().map(|p| p.values.len()).sum();
+        // Built and counted in plain loops: iterator adapters unwind into far more paths for
+        // Kani
+        let mut parts = Vec::with_capacity(3);
+        let mut items = Some(0);
+        let mut values = 0;
+        for _ in 0..count {
+            let mut part = any_tensor(2);
+            // A part as an engine may return it: without a batch dimension
+            if kani::any() {
+                part.shape.clear();
+            }
+            items = match (items, part.shape.first()) {
+                (Some(sum), Some(&batch)) => Some(sum + batch),
+                _ => None,
+            };
+            values += part.values.len();
+            parts.push(part);
+        }
         if let Ok(joined) = HostTensor::concat_batch(parts) {
             assert_eq!(joined.values.len(), values);
             if count > 1 {
