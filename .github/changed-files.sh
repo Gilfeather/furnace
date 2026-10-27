@@ -20,7 +20,6 @@ here=$(dirname "$0")
 output=${GITHUB_OUTPUT:-/dev/stdout}
 
 # The workflow's outputs and their rules, in order; every output counts the workflow's own file
-# and the files that decide relevance
 declare -A rules=()
 outputs=()
 schedule=everything
@@ -40,7 +39,7 @@ if [ ${#outputs[@]} -eq 0 ]; then
   echo "::error::$workflow has no rules in .github/relevance" >&2
   exit 1
 fi
-common=".github/workflows/$workflow.yml .github/relevance .github/changed-files.sh .github/dependency-tree.py"
+common=".github/workflows/$workflow.yml"
 
 everything() {
   echo "$1"

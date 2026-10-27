@@ -11,13 +11,15 @@
 # only some of <package>'s dependencies' code names them, `crate:<package>=<crate>,...`, and
 # counts only changes to those crates, theirs, and the build manifests; `crate:<package>=`, a
 # check of the package's own code alone (a proof that calls only std), counts no dependency
-# update at all. The lists come from reading the code the check runs. Lines with the same
+# update at all; `crate:*` counts every workspace package's dependencies. The lists come from reading the code the check runs. Lines with the same
 # workflow and output add up. A pattern with a leading `~` counts the files it matches only when
 # they change other than in their version numbers (1.2.3, v1.2.3): a release moves the image
 # tags, chart versions and download URLs, which a check of the manifests' content need not see.
-# Every output also counts the workflow's own file (.github/workflows/<workflow>.yml) and the
-# three files that decide relevance (this one, changed-files.sh and dependency-tree.py); another
-# workflow's file counts for none.
+# Every output also counts the workflow's own file (.github/workflows/<workflow>.yml); another
+# workflow's file counts for none. The files that decide relevance (this one, changed-files.sh,
+# dependency-tree.py and the self-test) count for CI's self-test of them only: a pull request
+# that changes them runs every workflow's `Changed files` job with the new rules, and the
+# self-test checks the rules against examples, so no other check has anything to verify.
 #
 # For the checks that give the same result on the same commit (the lockfile's dependencies,
 # pinned tools), a line `<workflow> schedule once-per-commit` makes a scheduled run check nothing
@@ -42,8 +44,9 @@ ci relevant README.md CONTRIBUTING.md examples/README.md docs/*.md docs/openapi.
 ci relevant !.github/** !specs/** !deploy/** !benches/** !dev/** !packaging/**
 ci relevant !rustls-pure/interop/** !rustls-pure/ct-asm.sh
 ci relevant !Dockerfile !default.nix !flake.nix !deny.toml !.gitignore !.dockerignore
-# The self-test of these rules: only the files every output counts
-ci selftest
+# The self-test of these rules
+ci selftest .github/relevance .github/changed-files.sh .github/changed-files-test.sh
+ci selftest .github/dependency-tree.py
 # The nightly run: everything, unless CI already ran on that commit (the jobs only the nightly
 # run has follow `relevant`, which a scheduled run sets for all of CI)
 ci schedule once-per-commit
@@ -91,11 +94,13 @@ rustls-pure-ct timing crate:rustls-pure rustls-pure/src/tests/constant_time.rs
 
 # Security Audit: cargo-deny reads the workspace's lockfile and manifests (the benchmark
 # harnesses are workspaces of their own) and deny.toml; dependency review every manifest and
-# lockfile; CodeQL the Rust sources it scans on a pull request
+# lockfile; CodeQL the workspace's Rust code it scans on a pull request (not the vendored backend
+# or the benchmark harnesses, which only the weekly run scans) and the dependencies of any of the
+# workspace's packages (`crate:*`), which it reads the signatures of
 security advisories Cargo.lock deny.toml
 security deny Cargo.lock **/Cargo.toml !benches/** deny.toml
 security dependency-review **/Cargo.toml **/Cargo.lock
-security codeql **.rs !furnace-burn/vendor/** !benches/compare/**
+security codeql crate:* **.rs !furnace-burn/vendor/** !benches/**
 
 # KServe end-to-end: the manifests it deploys, but not a release's new version in them (the
 # released image they then name does not exist until the release is published)

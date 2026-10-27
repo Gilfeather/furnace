@@ -101,24 +101,42 @@ jobs:
       contents: read
       security-events: write
 
+    # Most of an analysis is the Rust extractor loading every Cargo workspace it finds with every
+    # feature on, which builds the dependencies' build scripts and procedural macros in a scratch
+    # target directory each time. It builds them here instead, in a directory kept between runs:
+    # the weekly run on main saves it, and pull requests start from that.
+    env:
+      CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET_DIR: ${{ github.workspace }}/../codeql-target
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
 
-    # Pull requests skip the vendored Burn backend (about 40k lines, mostly upstream code), which
-    # takes the analysis from about 16 minutes to a few. The weekly run on main still scans
-    # everything, vendor included.
+    # Restored on every run, saved by the runs on main only: a pull request's would be visible to
+    # that pull request alone
+    - name: Restore the extractor's build
+      id: target
+      uses: actions/cache/restore@v5
+      with:
+        path: ${{ github.workspace }}/../codeql-target
+        key: codeql-target-${{ hashFiles('Cargo.lock', 'benches/*/Cargo.lock') }}
+        restore-keys: codeql-target-
+
+    # Pull requests: the security queries (clippy covers what the quality ones would add), and
+    # neither the benchmark harnesses (four Cargo workspaces of their own, each loaded with its
+    # dependencies) nor the vendored Burn backend (about 40k lines, mostly upstream code). The
+    # weekly run on main scans everything with the security and quality queries.
     - name: Initialize CodeQL (pull request)
       if: github.event_name == 'pull_request'
       uses: github/codeql-action/init@v4
       with:
         languages: 'rust'
         build-mode: none
-        queries: security-and-quality
+        queries: security-extended
         config: |
           paths-ignore:
             - furnace-burn/vendor
-            - benches/compare
+            - benches
 
     - name: Initialize CodeQL
       if: github.event_name != 'pull_request'
@@ -132,6 +150,13 @@ jobs:
       uses: github/codeql-action/analyze@v4
       with:
         category: "/language:rust"
+
+    - name: Save the extractor's build
+      if: github.event_name != 'pull_request' && steps.target.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: ${{ github.workspace }}/../codeql-target
+        key: codeql-target-${{ hashFiles('Cargo.lock', 'benches/*/Cargo.lock') }}
 
   # The check to require before merging: every job above passed, or was skipped as not needed
   required:
