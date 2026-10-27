@@ -101,6 +101,9 @@ jobs:
           --harness verification::keep_keeps_a_block_or_refuses_it_4_slots
           --harness verification::alloc_and_dealloc_stay_in_bounds_4_slots
           --harness verification::realloc_keeps_the_contents_4_slots
+          --harness verification::take_hands_out_a_block_once_64_slots
+          --harness verification::alloc_and_dealloc_stay_in_bounds_64_slots
+          --harness verification::realloc_keeps_the_contents_64_slots
 
   quick-server:
     name: Kani furnace-server, quick harnesses
@@ -178,10 +181,6 @@ jobs:
         # Parked: not run in CI until they are decomposed, since they never completed on GitHub
         # runners (DEVELOPMENT.md, "Kani proofs not run in CI"). Only these may be in no job.
         parked=(
-          take_hands_out_a_block_once_64_slots
-          keep_keeps_a_block_or_refuses_it_64_slots
-          alloc_and_dealloc_stay_in_bounds_64_slots
-          realloc_keeps_the_contents_64_slots
           concat_batch_never_panics
         )
         listed=$({ cat "${workflows[@]}" | grep -o "package: [a-z-]*, harness: '[^']*'" | cut -d"'" -f2

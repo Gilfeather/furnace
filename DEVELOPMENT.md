@@ -114,17 +114,12 @@ cargo deny check
 
 ### Kani proofs not run in CI
 
-Five Kani proofs are not run in CI until they are decomposed: they never completed on GitHub
-runners (cut at the six-hour limit or by a runner shutdown, with no counterexample). Their code
-stays, and `cargo kani -p <package> --harness <name> --exact -Z function-contracts -Z stubbing`
-runs them locally. Kani's `Every Kani harness runs` check lists them as parked, so no other proof
-can drop out of CI unnoticed.
+One Kani proof is not run in CI until it is decomposed: it never completed on GitHub runners
+(cut at the six-hour limit or by a runner shutdown, with no counterexample). Its code stays, and
+`cargo kani -p <package> --harness <name> --exact -Z function-contracts -Z stubbing` runs it
+locally. Kani's `Every Kani harness runs` check lists it as parked, so no other proof can drop out
+of CI unnoticed.
 
-- kamui, at the allocator's 64 slots (their 4-slot versions run on every pull request):
-  `verification::take_hands_out_a_block_once_64_slots`,
-  `verification::keep_keeps_a_block_or_refuses_it_64_slots`,
-  `verification::alloc_and_dealloc_stay_in_bounds_64_slots`,
-  `verification::realloc_keeps_the_contents_64_slots`.
 - furnace-server: `tensor::verification::concat_batch_never_panics` (`joined_batch`'s contract,
   which it builds on, runs on every pull request).
 
