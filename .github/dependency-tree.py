@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What a workspace package is built from, apart from its own sources, at a git revision.
 
-    python3 .github/dependency-tree.py <revision> <package>
+    python3 .github/dependency-tree.py <revision> <package> [<crate>,...]
 
 Prints, one item a line, every package the lockfile resolves for <package> (its dependencies,
 dev- and build-dependencies, on every target and with every feature, transitively), each with
@@ -11,6 +11,12 @@ patches and shared dependencies. The workspace packages' own version numbers and
 manifest's descriptive fields (description, licence, keywords, ...) are left out, so a release's
 version bump or an update of a dependency <package> does not reach prints the same at both
 revisions. changed-files.sh compares the output at a pull request's merge base and at its head.
+
+With a third argument, a comma-separated list of crates in <package>'s dependency tree
+(possibly empty), only what a check executes: those crates and their dependencies, transitively,
+<package>'s own manifest with only those in its dependency tables, and the workspace's parts. A
+check that calls none of <package>'s dependencies (a proof of the package's own code) gives an
+empty list, and an update of any dependency prints the same.
 """
 
 import json
@@ -70,7 +76,7 @@ def workspace(root):
     return shared
 
 
-def main(revision, package):
+def main(revision, package, reaches=None):
     root = tomllib.loads(show(revision, "Cargo.toml"))
     lock = tomllib.loads(show(revision, "Cargo.lock"))
 
@@ -107,6 +113,31 @@ def main(revision, package):
     lines = {"workspace " + json.dumps(workspace(root), sort_keys=True)}
     seen = {label(start[0])}
     queue = deque(start)
+    if reaches is not None:
+        # Only the listed crates, wherever they are in the package's tree, and the package's
+        # manifest with no other dependencies
+        tree, found, pending = [], {label(start[0])}, deque(start)
+        while pending:
+            entry = pending.popleft()
+            tree.append(entry)
+            for dependency in map(resolve, entry.get("dependencies", [])):
+                if label(dependency) not in found:
+                    found.add(label(dependency))
+                    pending.append(dependency)
+        named = [e for e in tree if e["name"] in reaches]
+        missing = reaches - {e["name"] for e in named}
+        if missing:
+            sys.exit(f"{package} does not depend on {', '.join(sorted(missing))}")
+        manifest = normalized(manifests[package])
+        for tables in [manifest] + list(manifest.get("target", {}).values()):
+            for table in DEPENDENCY_TABLES:
+                if table in tables:
+                    tables[table] = {k: v for k, v in tables[table].items()
+                                     if (v.get("package", k) if isinstance(v, dict) else k)
+                                     in reaches}
+        lines.add(f"manifest {package} " + json.dumps(manifest, sort_keys=True))
+        queue = deque(e for e in named if e["name"] in reaches)
+        seen |= {label(e) for e in queue}
     while queue:
         entry = queue.popleft()
         dependencies = [resolve(d) for d in entry.get("dependencies", [])]
@@ -123,6 +154,7 @@ def main(revision, package):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4):
         sys.exit(__doc__)
-    main(sys.argv[1], sys.argv[2])
+    main(sys.argv[1], sys.argv[2],
+         None if len(sys.argv) == 3 else {c for c in sys.argv[3].split(",") if c})
