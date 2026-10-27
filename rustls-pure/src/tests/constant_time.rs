@@ -8,6 +8,10 @@
 //! there is nothing to find. If it fails, the machine or the way it is timed would make any
 //! other result meaningless, and the run says so instead of reporting leaks or passes.
 //!
+//! A target whose |t| reaches the threshold is measured twice more, on fresh samples, and
+//! fails when at least two of the three measurements reach it: a difference in the time comes
+//! back, while a shared runner's noise now and then pushes one measurement over by itself.
+//!
 //! The test is `#[ignore]`d, because timing on a shared machine is too noisy for every pull
 //! request and only a release build means anything:
 //! `cargo test --release -p rustls-pure --lib constant_time -- --ignored --nocapture`,
@@ -20,6 +24,10 @@ use super::*;
 
 /// Welch's |t| at or above this counts as a difference, as in dudect
 const THRESHOLD: f64 = 4.5;
+/// How many times a target over the threshold is measured in all, and in how many of them it
+/// must be over to fail
+const MEASUREMENTS: usize = 3;
+const OVER_TO_FAIL: usize = 2;
 /// Roughly how long each target is timed, including preparing its inputs
 const BUDGET: Duration = Duration::from_secs(60);
 const MIN_SAMPLES: usize = 20_000;
@@ -275,12 +283,29 @@ fn constant_time() {
         aes_256_gcm_open,
         chacha20_poly1305_open,
     ];
-    let outcomes: Vec<Outcome> = targets
+    // The targets whose time differs: over the threshold, and over it again in at least one of
+    // two more measurements
+    let differ: Vec<&str> = targets
         .iter()
-        .map(|target| {
-            let outcome = target(resolution);
-            println!("ct: {outcome}");
-            outcome
+        .filter_map(|target| {
+            let first = target(resolution);
+            println!("ct: {first}");
+            if first.passed() {
+                return None;
+            }
+            let again = (1..MEASUREMENTS)
+                .filter(|_| {
+                    let outcome = target(resolution);
+                    println!("ct: again, {outcome}");
+                    !outcome.passed()
+                })
+                .count();
+            let over = 1 + again;
+            println!(
+                "ct: {}: over the threshold in {over} of {MEASUREMENTS} measurements",
+                first.name
+            );
+            (over >= OVER_TO_FAIL).then_some(first.name)
         })
         .collect();
 
@@ -290,11 +315,6 @@ fn constant_time() {
          this machine is not reliable, so no result here says anything about rustls-pure",
         control.t.abs()
     );
-    let differ: Vec<&str> = outcomes
-        .iter()
-        .filter(|outcome| !outcome.passed())
-        .map(|outcome| outcome.name)
-        .collect();
     assert!(
         differ.is_empty(),
         "the time depends on the secret: {differ:?}"

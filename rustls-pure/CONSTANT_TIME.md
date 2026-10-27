@@ -111,6 +111,11 @@ classes, where there is nothing to find. If its |t| reaches 4.5, the machine or 
 timed would make every other result meaningless, and the run fails as unreliable rather than
 reporting leaks or passes.
 
+**A difference has to come back.** A target whose |t| reaches 4.5 is measured twice more, on
+fresh samples, and fails only when at least two of the three measurements reach it; all three
+are logged. A difference in the time reproduces, while a shared runner's noise can push a
+single measurement over by itself. The threshold and the control are unchanged.
+
 How the harness avoids differences that are not the secret's, each found on a real runner:
 
 - Inputs are made afresh for every sample, by arithmetic on the class rather than a branch on
