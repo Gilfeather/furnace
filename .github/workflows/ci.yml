@@ -3,8 +3,8 @@ name: CI
 # Pull requests run the few jobs that catch almost everything: tests and lints on Linux, and
 # every feature combination type-checked in one job. The rest (other platforms, toolchains,
 # the GPU and Metal backends, the vendored kernels, the bench harnesses, furnace-candle,
-# coverage) runs nightly on main, with the pull request jobs too, unless CI already passed on
-# that commit. A push to main runs nothing: what is merged has passed as a pull request. The README's badge shows the last nightly run on
+# coverage) runs nightly on main, with the pull request jobs too, unless CI already ran on that
+# commit, passed or failed. A push to main runs nothing: what is merged has passed as a pull request. The README's badge shows the last nightly run on
 # main (`?branch=main&event=schedule`), so it is always a finished run, never a cancelled one.
 #
 # Every pull request runs `CI required`, the job to require before merging. Its jobs are skipped
@@ -42,7 +42,7 @@ jobs:
   changes:
     name: Changed files
     runs-on: ubuntu-latest
-    # actions: read, to find whether CI already passed on the commit a nightly run is for
+    # actions: read, to find whether CI already ran on the commit a nightly run is for
     permissions:
       contents: read
       actions: read
@@ -475,7 +475,7 @@ jobs:
 
   # The check to require before merging: every job above passed, or was skipped as not needed
   # (a pull request that changes none of the files a job reads, a nightly job, or a nightly run
-  # on a commit CI already passed on)
+  # on a commit CI already ran on)
   required:
     name: CI required
     if: always()

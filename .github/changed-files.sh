@@ -6,11 +6,13 @@
 #   bash .github/changed-files.sh <workflow>
 #
 # A pull request's changes are those since its merge base with the base branch (BASE_SHA and
-# HEAD_SHA, from the event). A scheduled run of a workflow with `schedule since-last-success`
-# takes those since the commit of its last successful scheduled run on main; one with `schedule
-# unless-passed` checks nothing when the workflow already passed on this commit, and everything
-# otherwise (both with gh, GH_TOKEN and `actions: read`). Every other run checks everything. The
-# checkout needs the history of both commits (`fetch-depth: 0`).
+# HEAD_SHA, from the event). A scheduled run of a workflow with `schedule once-per-commit` or
+# `schedule since-last-success` checks nothing when the workflow already ran to the end on this
+# commit of main, passed or failed: its checks are deterministic, and the earlier run shows the
+# result. Otherwise the first checks everything and the second the changes since the commit of
+# the workflow's last successful scheduled run (both with gh, GH_TOKEN and `actions: read`).
+# Every other run checks everything. The checkout needs the history of both commits
+# (`fetch-depth: 0`).
 set -euo pipefail
 
 workflow=$1
@@ -59,15 +61,20 @@ case $event in
     ;;
   schedule)
     head=${HEAD_SHA:-$(git rev-parse HEAD)}
-    case $schedule in
-      everything)
-        everything "A scheduled run of $workflow: everything is checked" ;;
-      unless-passed)
-        passed=$(gh run list --workflow "$workflow.yml" --branch main --commit "$head" \
-          --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
-        [ -z "$passed" ] || nothing "$workflow already passed on $head (run $passed): nothing to check"
-        everything "$workflow has not passed on $head yet: everything is checked" ;;
-    esac
+    if [ "$schedule" = everything ]; then
+      everything "A scheduled run of $workflow: everything is checked"
+    fi
+    # A run of this workflow that ended on this commit, whatever its conclusion, but a cancelled
+    # one, which did not finish its checks
+    ran=$(gh run list --workflow "$workflow.yml" --branch main --commit "$head" \
+      --status completed --limit 20 --json databaseId,conclusion \
+      --jq '[.[] | select(.conclusion != "cancelled")][0].databaseId // empty')
+    if [ -n "$ran" ]; then
+      nothing "$workflow already ran on $head (run $ran): nothing to check"
+    fi
+    if [ "$schedule" = once-per-commit ]; then
+      everything "$workflow has not run on $head yet: everything is checked"
+    fi
     base=$(gh run list --workflow "$workflow.yml" --branch main --event schedule \
       --status success --limit 1 --json headSha --jq '.[0].headSha // empty')
     [ -n "$base" ] || everything "No successful scheduled run yet: everything is checked"

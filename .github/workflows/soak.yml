@@ -2,7 +2,7 @@ name: Soak
 
 # The server and the nervous system under a steady load for hours (tests/soak.rs): they keep
 # answering, without errors, and their resident memory levels off. By hand, or weekly unless it
-# already passed on that commit; never on pull requests. The per-interval numbers are kept as an
+# already ran on that commit; never on pull requests. The per-interval numbers are kept as an
 # artifact, for the record only.
 on:
   workflow_dispatch:
@@ -28,7 +28,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # A weekly run is skipped when the soak test already passed on that commit (.github/relevance)
+  # A weekly run is skipped when the soak test already ran on that commit (.github/relevance)
   changes:
     name: Changed files
     runs-on: ubuntu-latest

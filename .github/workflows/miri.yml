@@ -40,7 +40,7 @@ jobs:
   changes:
     name: Changed files
     runs-on: ubuntu-latest
-    # actions: read, to find the last successful scheduled run
+    # actions: read, to find the earlier scheduled runs
     permissions:
       contents: read
       actions: read

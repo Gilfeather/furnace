@@ -98,12 +98,13 @@ cargo deny check
   release workflows run on tags.
 - **Nightly on main** CI runs everything pull requests leave out (Windows and macOS, beta and
   the MSRV, Metal, the vendored kernels, the bench harnesses, furnace-candle, the Kubernetes
-  manifests, coverage), unless CI already passed on that commit. TLA+, Loom and
-  `kani-nightly.yml` (the Kani harnesses too long for a pull request) run nightly, Miri weekly,
-  each on what changed since its last successful scheduled run: their tools are pinned, so an
-  unchanged main gives the same result. Kani's pull request harnesses have no schedule: they
-  were proved on the pull request that merged them. The soak test runs weekly unless it already
-  passed on that commit. Weekly and in full, since what they check changes outside the
+  manifests, coverage). TLA+, Loom and `kani-nightly.yml` (the Kani harnesses too long for a
+  pull request) run nightly, Miri weekly, each on what changed since its last successful
+  scheduled run. None of these, nor the weekly soak test, runs twice on one commit of main:
+  when the workflow already ran to the end on it, passed or failed, a scheduled run checks
+  nothing, since the lockfile and pinned tools would give the same result and the earlier run
+  shows it. Kani's pull request harnesses have no schedule: they were proved on the pull
+  request that merged them. Weekly and in full, since what they check changes outside the
   repository: rustls-pure (the newest rustls, its MSRV, interoperability against the system's
   TLS tools), Security Audit (new advisories), KServe end-to-end (downloads the release and
   KServe), the constant-time tests (with the machine-code check; the compiler's code may change).
@@ -201,7 +202,7 @@ cargo test --release
 cargo test --release --test integration_tests
 
 # Soak run: the server and the nervous system under a steady load (here for 10 minutes);
-# .github/workflows/soak.yml runs it for hours, by hand and weekly (unless it passed on that commit)
+# .github/workflows/soak.yml runs it for hours, by hand and weekly (once per commit)
 FURNACE_SOAK_SECS=600 cargo test --profile ci --test soak -- --ignored --nocapture
 
 # Benchmarks (furnace-burn's criterion bench; `onnx` builds in furnace-burn/models/*.onnx)
