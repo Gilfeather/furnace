@@ -212,9 +212,8 @@ unsafe impl GlobalAlloc for BlockCache {
 /// the allocator's unsafe paths on real memory, checked for out-of-bounds access, use after free
 /// and double free.
 ///
-/// Each proof is written once for a cache of any number of slots and run for the allocator's 64
-/// (`*_64_slots`), on every pull request but `keep`'s, which runs nightly, and for 4 as a quick
-/// check.
+/// Each proof is written once for a cache of any number of slots and run on every pull request
+/// for the allocator's 64 (`*_64_slots`) and for 4 as a quicker check.
 #[cfg(kani)]
 mod verification {
     use super::*;

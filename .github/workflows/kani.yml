@@ -102,6 +102,7 @@ jobs:
           --harness verification::alloc_and_dealloc_stay_in_bounds_4_slots
           --harness verification::realloc_keeps_the_contents_4_slots
           --harness verification::take_hands_out_a_block_once_64_slots
+          --harness verification::keep_keeps_a_block_or_refuses_it_64_slots
           --harness verification::alloc_and_dealloc_stay_in_bounds_64_slots
           --harness verification::realloc_keeps_the_contents_64_slots
 
