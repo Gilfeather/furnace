@@ -116,7 +116,8 @@ commit_changes() {
         sed -i 's/inherits = "release"/inherits = "release"\nlto = false/' Cargo.toml ;;
       *)
         mkdir -p "$(dirname "$change")"
-        echo "$RANDOM" >> "$change" ;;
+        # A comment line: the relevance files changed here are run, so a change must not break them
+        echo "# $RANDOM" >> "$change" ;;
     esac
   done
   git add -A
