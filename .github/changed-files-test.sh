@@ -1,15 +1,29 @@
 #!/usr/bin/env bash
 # The rules in .github/relevance against examples: a pull request that changes the files on the
-# left must make exactly the outputs on the right true (every other one false). The pull
-# requests are made in a scratch repository holding a small workspace with the same package
-# names (furnace-server, amate, kamui, rustls-pure), so the dependency comparison runs too.
+# left must make exactly the outputs on the right true (every other one false), and so must a
+# scheduled or manual run, given the workflow's earlier runs. The pull requests are made in a
+# scratch repository holding a small workspace with the same package names (furnace-server,
+# amate, kamui, rustls-pure), so the dependency comparison runs too; a stand-in for gh answers
+# what the earlier runs were.
 #
 #   bash .github/changed-files-test.sh
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(mktemp -d)
-trap 'rm -rf "$repo"' EXIT
+fake=$(mktemp -d)
+trap 'rm -rf "$repo" "$fake"' EXIT
+
+# The stand-in for gh: the workflow's run that ended on the commit (FAKE_RAN, a run id, or
+# empty for none) and the commit of its last successful scheduled run (FAKE_LAST_SUCCESS)
+cat > "$fake/gh" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" --commit "*) echo "${FAKE_RAN:-}" ;;
+  *) echo "${FAKE_LAST_SUCCESS:-}" ;;
+esac
+EOF
+chmod +x "$fake/gh"
 
 # Every workflow and output the rules name
 mapfile -t all < <(grep -v -E '^\s*(#|$)' "$here/relevance" | awk '$2 != "schedule" {print $1 "." $2}' | sort -u)
@@ -49,23 +63,19 @@ lock_package() {
 } > Cargo.lock
 # Deploy manifests naming the release, as deploy/ does
 mkdir -p deploy/kserve deploy/helm/furnace
-printf 'spec:
-  containers:
-  - image: ghcr.io/gilfeather/furnace:0.1.0
-' > deploy/kserve/servingruntime.yaml
-printf 'storageUri: https://github.com/Gilfeather/furnace/releases/download/v0.1.0/resnet18.tar.gz
-' > deploy/kserve/inferenceservice.yaml
-printf 'version: 0.1.0
-appVersion: "0.1.0"
-' > deploy/helm/furnace/Chart.yaml
+printf 'spec:\n  containers:\n  - image: ghcr.io/gilfeather/furnace:0.1.0\n' > deploy/kserve/servingruntime.yaml
+printf 'storageUri: https://github.com/Gilfeather/furnace/releases/download/v0.1.0/resnet18.tar.gz\n' \
+  > deploy/kserve/inferenceservice.yaml
+printf 'version: 0.1.0\nappVersion: "0.1.0"\n' > deploy/helm/furnace/Chart.yaml
 git add -A
 git commit -q -m base
 base=$(git rev-parse HEAD)
 
 failed=0
-# check '<changed files or @edits>' '<workflow.output that must be true>...'
-check() {
-  local changes=$1 expected=" $2 " got=" "
+# commit_changes '<changed files or @edits>': a commit on top of the base with those changes, in
+# $head
+commit_changes() {
+  local changes=$1
   git checkout -q --detach "$base"
   for change in $changes; do
     case $change in
@@ -98,8 +108,33 @@ check() {
   done
   git add -A
   git commit -q -m change
-  local head result
   head=$(git rev-parse HEAD)
+}
+
+# compare '<what>' '<outputs that must be true>' '<outputs that are true>' [<workflow>]: every
+# output (of that workflow) true exactly when it must be
+compare() {
+  local what=$1 expected=" $2 " got=" $3 " only=${4:-} name want have
+  for name in "${all[@]}"; do
+    [ -z "$only" ] || [[ $name == "$only".* ]] || continue
+    want=false
+    have=false
+    [[ $expected == *" $name "* ]] && want=true
+    [[ $got == *" $name "* ]] && have=true
+    if [ "$want" != "$have" ]; then
+      echo "FAIL: $what: $name is $have, expected $want"
+      failed=1
+    fi
+  done
+  for name in $2; do
+    printf '%s\n' "${all[@]}" | grep -qx -- "$name" || { echo "FAIL: no output $name"; failed=1; }
+  done
+}
+
+# check '<changed files or @edits>' '<workflow.output that must be true>...': a pull request
+check() {
+  local changes=$1 got="" result
+  commit_changes "$changes"
   for workflow in $(printf '%s\n' "${all[@]}" | cut -d. -f1 | sort -u); do
     result=$(mktemp)
     GITHUB_EVENT_NAME=pull_request BASE_SHA=$base HEAD_SHA=$head GITHUB_OUTPUT=$result \
@@ -109,18 +144,24 @@ check() {
     done < "$result"
     rm -f "$result"
   done
-  for name in "${all[@]}"; do
-    local want=false have=false
-    [[ $expected == *" $name "* ]] && want=true
-    [[ $got == *" $name "* ]] && have=true
-    if [ "$want" != "$have" ]; then
-      echo "FAIL: $changes: $name is $have, expected $want"
-      failed=1
-    fi
-  done
-  for name in $expected; do
-    printf '%s\n' "${all[@]}" | grep -qx -- "$name" || { echo "FAIL: no output $name"; failed=1; }
-  done
+  compare "$changes" "$2" "$got"
+}
+
+# check_run <event> <workflow> <the workflow's run that ended on the commit, or -> <its last
+# successful scheduled run: base, or -> '<changes since the base>' '<outputs that must be true>'
+check_run() {
+  local event=$1 workflow=$2 ran=$3 last=$4 got="" result
+  commit_changes "$5"
+  [ "$ran" != - ] || ran=""
+  if [ "$last" = base ]; then last=$base; else last=""; fi
+  result=$(mktemp)
+  GITHUB_EVENT_NAME=$event HEAD_SHA=$head GITHUB_OUTPUT=$result FAKE_RAN=$ran \
+    FAKE_LAST_SUCCESS=$last PATH="$fake:$PATH" bash .github/changed-files.sh "$workflow" > /dev/null
+  while IFS='=' read -r out value; do
+    [ "$value" = true ] && got+="$workflow.$out "
+  done < "$result"
+  rm -f "$result"
+  compare "$event $workflow ($5; ran $3; last success $4)" "$6" "$got" "$workflow"
 }
 
 # Docs, licences and changelogs alone run nothing, but CI's doc-tests
@@ -167,6 +208,24 @@ check '.github/workflows/release.yml .github/workflows/bench.yml' ''
 check '.github/workflows/soak.yml' 'soak.run'
 check '.github/workflows/ci.yml' 'ci.relevant ci.selftest'
 check '.github/relevance' "${all[*]}"
+
+# Scheduled runs: the deterministic checks never run twice on one commit, whether the earlier run
+# passed or failed; the others always run. A manual run checks everything.
+#         event             workflow     ran  last success  changes             must be true
+check_run schedule          kani-nightly 1234 base          'kamui/src/lib.rs'  ''
+check_run schedule          kani-nightly -    base          'kamui/src/lib.rs'  'kani-nightly.kamui'
+check_run schedule          kani-nightly -    base          'README.md'         ''
+check_run schedule          kani-nightly -    -             'README.md'         'kani-nightly.kamui kani-nightly.server'
+check_run schedule          miri         1234 -             'kamui/src/lib.rs'  ''
+check_run schedule          loom         -    base          'amate/src/lib.rs'  'loom.amate'
+check_run schedule          tla          1234 base          'specs/Motor.tla'   ''
+check_run schedule          ci           1234 -             'src/api.rs'        ''
+check_run schedule          ci           -    -             'README.md'         'ci.relevant ci.selftest'
+check_run schedule          soak         1234 -             'src/api.rs'        ''
+check_run schedule          soak         -    -             'src/api.rs'        'soak.run'
+check_run schedule          security     1234 -             'README.md'         'security.advisories security.deny security.dependency-review security.codeql'
+check_run schedule          rustls-pure  1234 -             'README.md'         'rustls-pure.machine-code rustls-pure.interop rustls-pure.targets'
+check_run workflow_dispatch kani-nightly 1234 base          'README.md'         'kani-nightly.kamui kani-nightly.server'
 
 if [ "$failed" = 0 ]; then echo "every example as expected"; fi
 exit $failed

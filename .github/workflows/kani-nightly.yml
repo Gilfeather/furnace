@@ -4,7 +4,9 @@ name: Kani nightly
 # the same bounds: element counts of four dimensions. One harness per job, each with up to six
 # hours. The proofs that never completed on a GitHub runner are parked (DEVELOPMENT.md, "Kani
 # proofs not run in CI"). A package's harnesses run when it changed since the last successful
-# nightly run (.github/relevance), so an unchanged main is not proved again. Also by hand (workflow_dispatch), on any branch, all of them.
+# nightly run (.github/relevance), and never twice on one commit, whether the first run passed
+# or failed: an unchanged main is not proved again. Also by hand (workflow_dispatch), on any
+# branch, all of them.
 on:
   schedule:
     # Every night, 02:53 UTC
@@ -22,7 +24,7 @@ jobs:
   changes:
     name: Changed files
     runs-on: ubuntu-latest
-    # actions: read, to find the last successful scheduled run
+    # actions: read, to find the earlier scheduled runs
     permissions:
       contents: read
       actions: read
