@@ -4,11 +4,17 @@ name: rustls-pure constant time
 # secret: key exchanges, ML-KEM decapsulation of valid against tampered ciphertexts, signing and
 # refusing records with a wrong tag (rustls-pure/src/tests/constant_time.rs; what they show and
 # what they do not, rustls-pure/CONSTANT_TIME.md). A control runs first, and a runner whose
-# control fails reports no result. Timing on a shared runner is too noisy for pull requests, so
-# this runs weekly and by hand, on a release build, about a minute per target. The check of
-# rustls-pure's own machine code, which needs no timing, runs on pull requests in rustls-pure.yml
-# and here too, on the same runners.
+# control fails reports no result. On a release build, about a minute per target: weekly, by
+# hand, and on the pull requests that change rustls-pure's dependencies (a security update of a
+# crypto crate is timed before it is merged; .github/relevance). Not on a pull request that
+# changes code only: timing on a shared runner is too noisy and slow for every one, and the
+# machine-code check and the proofs cover rustls-pure's own code. No `required` check: a noisy
+# runner can fail the control, so the result shows on the pull request without blocking it. The
+# check of rustls-pure's own machine code, which needs no timing, runs on pull requests in
+# rustls-pure.yml and here too, on the same runners.
 on:
+  pull_request:
+    branches: [ main ]
   schedule:
     # Tuesdays, 05:13 UTC
     - cron: '13 5 * * 2'
@@ -20,9 +26,37 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# On a pull request a newer push makes an older run redundant; every other run (scheduled, by
+# hand) is a group of its own and runs to the end
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # Which jobs this run needs (.github/relevance)
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    outputs:
+      timing: ${{ steps.changes.outputs.timing }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        filter: blob:none
+
+    - name: Files this workflow checks
+      id: changes
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: bash .github/changed-files.sh rustls-pure-ct
+
   constant-time:
     name: Constant time (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.timing == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:

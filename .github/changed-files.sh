@@ -108,14 +108,15 @@ beyond_versions() {
   [ "$(versionless "$base" "$1")" != "$(versionless "$head" "$1")" ]
 }
 
-# Whether a package's dependencies and build manifests differ between the two commits, once
-# per package
+# Whether a package's dependencies (all, or `<package>=<crate>,...`: those listed) and build
+# manifests differ between the two commits, once per rule
 declare -A crate_changed=()
 crate_differs() {
   if [ -z "${crate_changed[$1]+set}" ]; then
-    local before after
-    before=$(python3 "$here/dependency-tree.py" "$base" "$1") || exit 1
-    after=$(python3 "$here/dependency-tree.py" "$head" "$1") || exit 1
+    local before after which=()
+    [[ $1 != *=* ]] || which=("${1#*=}")
+    before=$(python3 "$here/dependency-tree.py" "$base" "${1%%=*}" "${which[@]}") || exit 1
+    after=$(python3 "$here/dependency-tree.py" "$head" "${1%%=*}" "${which[@]}") || exit 1
     if [ "$before" = "$after" ]; then
       crate_changed[$1]=false
     else

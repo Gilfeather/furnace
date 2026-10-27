@@ -7,7 +7,11 @@
 # one directory, a leading `!` leaves the files it matches out again), or `crate:<package>`: a
 # change to a Cargo.toml or Cargo.lock counts when <package>'s dependencies or the manifests that
 # decide how it is built differ (.github/dependency-tree.py), not when a release bumps the
-# workspace's versions or a dependency <package> does not reach is updated. Lines with the same
+# workspace's versions or a dependency <package> does not reach is updated. A check that runs
+# only some of <package>'s dependencies' code names them, `crate:<package>=<crate>,...`, and
+# counts only changes to those crates, theirs, and the build manifests; `crate:<package>=`, a
+# check of the package's own code alone (a proof that calls only std), counts no dependency
+# update at all. The lists come from reading the code the check runs. Lines with the same
 # workflow and output add up. A pattern with a leading `~` counts the files it matches only when
 # they change other than in their version numbers (1.2.3, v1.2.3): a release moves the image
 # tags, chart versions and download URLs, which a check of the manifests' content need not see.
@@ -44,35 +48,46 @@ ci selftest
 # run has follow `relevant`, which a scheduled run sets for all of CI)
 ci schedule once-per-commit
 
-# Kani: the proofs sit next to the code they check, in these files
-kani rustls-pure crate:rustls-pure rustls-pure/src/**
-kani kamui crate:kamui kamui/src/**
-kani server crate:furnace-server build.rs src/tensor.rs src/model.rs src/api/infer.rs
+# Kani: the proofs sit next to the code they check, in these files. kamui's and furnace-server's
+# proofs call their own code and std only (serde's and thiserror's derives are not called);
+# rustls-pure's call its own checks, rustls's SharedSecret and zeroize's wiping
+kani rustls-pure crate:rustls-pure=rustls,zeroize rustls-pure/src/**
+kani kamui crate:kamui= kamui/src/**
+kani server crate:furnace-server= build.rs src/tensor.rs src/model.rs src/api/infer.rs
 kani server src/json_fast.rs src/nerve/wire.rs
-kani-nightly kamui crate:kamui kamui/src/**
-kani-nightly server crate:furnace-server build.rs src/tensor.rs src/model.rs src/api/infer.rs
+kani-nightly kamui crate:kamui= kamui/src/**
+kani-nightly server crate:furnace-server= build.rs src/tensor.rs src/model.rs src/api/infer.rs
 kani-nightly server src/json_fast.rs src/nerve/wire.rs
 kani-nightly schedule since-last-success
 
-# Miri: kamui's unit tests and its integration tests
+# Miri: kamui's unit tests and its integration tests, which run proptest and its random number
+# generator, so all of kamui's dependencies
 miri relevant crate:kamui kamui/src/** kamui/tests/**
 miri schedule since-last-success
 
-# Loom: amate's queue, and the nerve's lanes, effectors and motor neurons
-loom amate crate:amate amate/src/**
-loom server crate:furnace-server build.rs src/nerve/**
+# Loom: amate's queue (its models run loom and amate alone), and the nerve's lanes, effectors
+# and motor neurons (theirs build tokio's channels, bytes and tracing's events too)
+loom amate crate:amate=loom amate/src/**
+loom server crate:furnace-server=loom,tokio,bytes,tracing build.rs src/nerve/**
 loom schedule since-last-success
 
 # TLA+: TLC reads the specs and their models only
 tla relevant specs/** !**.md
 tla schedule since-last-success
 
-# rustls-pure: the check of its own machine code; interoperability (the examples are the
-# client and server the script drives); the builds for other targets
-rustls-pure machine-code crate:rustls-pure rustls-pure/src/** rustls-pure/ct-asm.sh
+# rustls-pure: the check of its own machine code (two functions that call nothing); the
+# interoperability tests (the examples are the client and server the script drives), which run
+# every crypto dependency; the builds for other targets
+rustls-pure machine-code crate:rustls-pure= rustls-pure/src/** rustls-pure/ct-asm.sh
 rustls-pure interop crate:rustls-pure rustls-pure/src/** rustls-pure/examples/**
 rustls-pure interop rustls-pure/interop/**
 rustls-pure targets crate:rustls-pure rustls-pure/src/**
+
+# rustls-pure's constant-time tests: timing every crypto dependency's code that handles a
+# secret. On a pull request only when rustls-pure's dependencies change (a code change is
+# checked by the machine-code check and the proofs; the timing is too slow and noisy for every
+# one); weekly in full.
+rustls-pure-ct timing crate:rustls-pure
 
 # Security Audit: cargo-deny reads the workspace's lockfile and manifests (the benchmark
 # harnesses are workspaces of their own) and deny.toml; dependency review every manifest and

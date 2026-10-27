@@ -28,8 +28,9 @@ chmod +x "$fake/gh"
 # Every workflow and output the rules name
 mapfile -t all < <(grep -v -E '^\s*(#|$)' "$here/relevance" | awk '$2 != "schedule" {print $1 "." $2}' | sort -u)
 
-# The scratch workspace: furnace-server depends on amate and tokio, rustls-pure on aes, kamui
-# on nothing
+# The scratch workspace, its dependencies shaped like the real ones: furnace-server depends on
+# amate, rustls-pure, tokio, bytes, tracing and loom; amate on loom; rustls-pure on
+# crypto-bigint and rustls, which depends on zeroize; kamui on nothing
 cd "$repo"
 git init -q
 git config user.email test@example.com
@@ -41,12 +42,17 @@ manifest() {
 }
 {
   manifest furnace-server 'amate = { path = "amate", version = "0.1.0" }
-tokio = "1"'
+rustls-pure = { path = "rustls-pure", version = "0.1.0" }
+tokio = "1"
+bytes = "1"
+tracing = "0.1"
+loom = "0.7"'
   printf '\n[workspace]\nmembers = [".", "amate", "kamui", "rustls-pure"]\n\n[profile.ci]\ninherits = "release"\n'
 } > Cargo.toml
-manifest amate '' > amate/Cargo.toml
+manifest amate 'loom = "0.7"' > amate/Cargo.toml
 manifest kamui '' > kamui/Cargo.toml
-manifest rustls-pure 'aes = "0.8"' > rustls-pure/Cargo.toml
+manifest rustls-pure 'crypto-bigint = "0.7"
+rustls = "0.23"' > rustls-pure/Cargo.toml
 lock_package() {
   printf '\n[[package]]\nname = "%s"\nversion = "%s"\n' "$1" "$2"
   [ -z "$3" ] || printf 'source = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "%s"\n' "$3"
@@ -54,12 +60,17 @@ lock_package() {
 }
 {
   printf 'version = 4\n'
-  lock_package aes 0.8.0 aaa0 ''
-  lock_package amate 0.1.0 '' ''
-  lock_package furnace-server 0.1.0 '' ' "amate",\n "tokio",\n'
+  lock_package amate 0.1.0 '' ' "loom",\n'
+  lock_package bytes 1.0.0 bbb0 ''
+  lock_package crypto-bigint 0.7.0 aaa0 ''
+  lock_package furnace-server 0.1.0 '' ' "amate",\n "bytes",\n "loom",\n "rustls-pure",\n "tokio",\n "tracing",\n'
   lock_package kamui 0.1.0 '' ''
-  lock_package rustls-pure 0.1.0 '' ' "aes",\n'
-  lock_package tokio 1.0.0 ccc0 ''
+  lock_package loom 0.7.2 ddd0 ''
+  lock_package rustls 0.23.0 eee0 ' "zeroize",\n'
+  lock_package rustls-pure 0.1.0 '' ' "crypto-bigint",\n "rustls",\n'
+  lock_package tokio 1.40.0 ccc0 ''
+  lock_package tracing 0.1.0 fff0 ''
+  lock_package zeroize 1.0.0 999a ''
 } > Cargo.lock
 # Deploy manifests naming the release, as deploy/ does
 mkdir -p deploy/kserve deploy/helm/furnace
@@ -94,9 +105,11 @@ commit_changes() {
         lock_package libm 0.2.0 bbb0 '' >> Cargo.lock
         sed -i '/^name = "kamui"/{n;s/$/\ndependencies = [\n "libm",\n]/}' Cargo.lock ;;
       @update-tokio)
-        sed -i 's/^version = "1\.0\.0"/version = "1.0.1"/; s/ccc0/ccc1/' Cargo.lock ;;
-      @update-aes)
-        sed -i 's/^version = "0\.8\.0"/version = "0.8.1"/; s/aaa0/aaa1/' Cargo.lock ;;
+        sed -i 's/^version = "1\.40\.0"/version = "1.40.1"/; s/ccc0/ccc1/' Cargo.lock ;;
+      @update-crypto-bigint)  # a crypto crate rustls-pure's proofs and machine code never call
+        sed -i 's/^version = "0\.7\.0"/version = "0.7.1"/; s/aaa0/aaa1/' Cargo.lock ;;
+      @update-zeroize)  # a crate rustls-pure's proofs call
+        sed -i 's/999a/999b/' Cargo.lock ;;
       @kamui-feature)
         printf '\n[features]\nstd = []\n' >> kamui/Cargo.toml ;;
       @profile)
@@ -177,11 +190,17 @@ check '@bump-versions' 'ci.relevant security.advisories security.deny security.d
 # A release: versions in the manifests, the lockfile, the deploy manifests and the README run
 # only the cheap checks; no proof, Miri, Loom, interoperability or KServe
 check '@release' 'ci.relevant security.advisories security.deny security.dependency-review'
-check '@kamui-dependency' 'ci.relevant kani.kamui kani-nightly.kamui miri.relevant security.advisories security.deny security.dependency-review'
-check '@update-tokio' 'ci.relevant kani.server kani-nightly.server loom.server security.advisories security.deny security.dependency-review'
-check '@update-aes' 'ci.relevant kani.rustls-pure rustls-pure.machine-code rustls-pure.interop rustls-pure.targets security.advisories security.deny security.dependency-review'
+# A dependency counts for the checks that run its code: a new one of kamui for Miri, which runs
+# kamui's tests, not for the proofs of kamui's own code
+check '@kamui-dependency' 'ci.relevant miri.relevant security.advisories security.deny security.dependency-review'
+# tokio for the nerve's Loom models, which build its channels; no proof calls it
+check '@update-tokio' 'ci.relevant loom.server security.advisories security.deny security.dependency-review'
+# crypto-bigint for the tests that run rustls-pure's crypto (interoperability, the target builds,
+# the timing tests); not for the proofs or the machine-code check, which never call it
+check '@update-crypto-bigint' 'ci.relevant rustls-pure.interop rustls-pure.targets rustls-pure-ct.timing security.advisories security.deny security.dependency-review'
+check '@update-zeroize' 'ci.relevant kani.rustls-pure rustls-pure.interop rustls-pure.targets rustls-pure-ct.timing security.advisories security.deny security.dependency-review'
 check '@kamui-feature' 'ci.relevant kani.kamui kani-nightly.kamui miri.relevant security.deny security.dependency-review'
-check '@profile' 'ci.relevant kani.rustls-pure kani.kamui kani.server kani-nightly.kamui kani-nightly.server miri.relevant loom.amate loom.server rustls-pure.machine-code rustls-pure.interop rustls-pure.targets security.deny security.dependency-review'
+check '@profile' 'ci.relevant kani.rustls-pure kani.kamui kani.server kani-nightly.kamui kani-nightly.server miri.relevant loom.amate loom.server rustls-pure.machine-code rustls-pure.interop rustls-pure.targets rustls-pure-ct.timing security.deny security.dependency-review'
 # Each check's own files
 check 'kamui/src/lib.rs' 'ci.relevant kani.kamui kani-nightly.kamui miri.relevant security.codeql'
 check 'kamui/tests/global.rs' 'ci.relevant miri.relevant security.codeql'
@@ -204,6 +223,7 @@ check 'furnace-burn/vendor/burn-flex/src/lib.rs' 'ci.relevant'
 # A workflow's own file runs all of it; the relevance files run everything
 check '.github/workflows/kani.yml' 'kani.rustls-pure kani.kamui kani.server'
 check '.github/workflows/kserve-e2e.yml' 'kserve-e2e.relevant'
+check '.github/workflows/rustls-pure-ct.yml' 'rustls-pure-ct.timing'
 check '.github/workflows/release.yml .github/workflows/bench.yml' ''
 check '.github/workflows/soak.yml' 'soak.run'
 check '.github/workflows/ci.yml' 'ci.relevant ci.selftest'

@@ -152,6 +152,30 @@ reads:
   and the workspace's profiles, lints and patches) at both commits, without the workspace's
   version numbers and the manifests' descriptive fields. A release's version bump, or an
   update of a dependency the package does not reach, leaves it unchanged.
+- **A dependency update counts for the checks that run its code.** A check that runs only some
+  of a package's dependencies names them, `crate:<package>=<crate>,...` (an empty list: only
+  the package's own code), read off the code it runs:
+
+  | Check | Dependencies it runs |
+  | --- | --- |
+  | Kani kamui, Kani furnace-server, rustls-pure's machine-code check | none: their proofs and checked functions call std only |
+  | Kani rustls-pure | `rustls` (SharedSecret) and `zeroize` (its wiping) |
+  | Loom amate | `loom` |
+  | Loom furnace-server | `loom`, `tokio` (the nerve's channels), `bytes`, `tracing` |
+  | Miri | all of kamui's: its tests run proptest and its random number generator |
+  | rustls-pure's interoperability tests and target builds, CI's tests (Wycheproof among them) | all of rustls-pure's, or the workspace's |
+  | rustls-pure's constant-time tests | all of rustls-pure's |
+
+  So a crypto-bigint update runs rustls-pure's interoperability, target builds and timing
+  tests and CI, and no proof; a tokio update runs the nerve's Loom models and CI. A Kani
+  version change is in the workflow file, which counts for all of its jobs. A crate the list
+  names that the package no longer reaches fails the run, so the lists cannot go stale
+  quietly; a proof that starts calling a new dependency needs it added.
+- **The constant-time tests run on a pull request only when rustls-pure's dependencies
+  change** (a crypto crate's security update is timed before it is merged), and weekly. Not on
+  code changes: timing on shared runners is slow and noisy, and the machine-code check and the
+  proofs cover rustls-pure's own code. They have no `required` check: a noisy runner can fail
+  the control, so the result shows on the pull request without blocking it.
 - **The deploy manifests count by more than their versions.** KServe end-to-end runs when
   `deploy/kserve` changes other than in its version numbers (`~` in the rules): a release's
   new image tag and download URL name what is published only after the merge.
