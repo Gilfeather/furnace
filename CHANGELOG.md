@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-10-27
+
+The `furnace` binary, the container image and the Homebrew build pick up crypto-bigint 0.7.6.
+
+### Security
+- RUSTSEC-2026-0387: crypto-bigint before 0.7.6 could branch on secrets in operations meant
+  to be constant time. It reaches the TLS feature through rustls-pure's P-256 and P-384. The
+  lockfile, which the binary, the container image and the Homebrew build use, has 0.7.6;
+  a library user's own lockfile needs `cargo update -p crypto-bigint`.
+
 ## [0.16.1] - 2026-10-24
 
 Every published crate carries its license text.
