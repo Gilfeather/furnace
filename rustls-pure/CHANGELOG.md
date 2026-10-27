@@ -8,6 +8,14 @@ version.
 
 ## [Unreleased]
 
+## [0.15.4] - 2026-10-27
+
+### Security
+- RUSTSEC-2026-0387: crypto-bigint before 0.7.6, under p256 and p384, could branch on secrets
+  in subtraction, zero counting, division and Montgomery multiplication. The repository's
+  lockfile has 0.7.6 (with ctutils 0.4.6); an application's own lockfile needs
+  `cargo update -p crypto-bigint`. rustls-pure's code is unchanged.
+
 ## [0.15.3] - 2026-10-24
 
 The license text in the package, builds checked for RISC-V, WASI and the browser, and the

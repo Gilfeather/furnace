@@ -2,7 +2,7 @@
 name = "rustls-pure"
 # A version of its own, not Furnace's: raised only when rustls-pure changes (DEVELOPMENT.md,
 # "Releasing rustls-pure"; CHANGELOG.md)
-version = "0.15.3"
+version = "0.15.4"
 edition = "2024"
 # Tested weekly (.github/workflows/rustls-pure.yml), as is the newest rustls in the range below
 rust-version = "1.89"
