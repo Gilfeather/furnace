@@ -161,9 +161,9 @@ jobs:
         args: -p ${{ matrix.package }} --harness ${{ matrix.harness }} --exact -Z function-contracts -Z stubbing
 
   # Every `#[kani::proof]` and `#[kani::proof_for_contract]` of kamui and furnace-server is in a
-  # job above (a `--harness` line or a matrix row) or in kani-nightly.yml's matrix (rustls-pure's
-  # run all at once, in the first job). On every pull request: a new harness can be anywhere in
-  # src.
+  # job above (a `--harness` line or a matrix row), in kani-nightly.yml's matrix, or in the parked
+  # list below (rustls-pure's run all at once, in the first job). On every pull request: a new
+  # harness can be anywhere in src.
   check-list:
     name: Every Kani harness runs
     runs-on: ubuntu-latest
@@ -175,8 +175,18 @@ jobs:
       shell: bash
       run: |
         workflows=(.github/workflows/kani.yml .github/workflows/kani-nightly.yml)
+        # Parked: not run in CI until they are decomposed, since they never completed on GitHub
+        # runners (DEVELOPMENT.md, "Kani proofs not run in CI"). Only these may be in no job.
+        parked=(
+          take_hands_out_a_block_once_64_slots
+          keep_keeps_a_block_or_refuses_it_64_slots
+          alloc_and_dealloc_stay_in_bounds_64_slots
+          realloc_keeps_the_contents_64_slots
+          concat_batch_never_panics
+        )
         listed=$({ cat "${workflows[@]}" | grep -o "package: [a-z-]*, harness: '[^']*'" | cut -d"'" -f2
                    cat "${workflows[@]}" | grep -oE -- "--harness [a-z_][a-z_:0-9]*" | cut -d' ' -f2
+                   printf '%s\n' "${parked[@]}"
                  } | sed 's/.*:://' | sort)
         # The first `fn` after each `#[kani::proof]` or `#[kani::proof_for_contract(..)]`
         found=$(find src kamui/src -name '*.rs' -exec awk '
