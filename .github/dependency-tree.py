@@ -2,6 +2,7 @@
 """What a workspace package is built from, apart from its own sources, at a git revision.
 
     python3 .github/dependency-tree.py <revision> <package> [<crate>,...]
+    python3 .github/dependency-tree.py <revision> '*'
 
 Prints, one item a line, every package the lockfile resolves for <package> (its dependencies,
 dev- and build-dependencies, on every target and with every feature, transitively), each with
@@ -11,6 +12,7 @@ patches and shared dependencies. The workspace packages' own version numbers and
 manifest's descriptive fields (description, licence, keywords, ...) are left out, so a release's
 version bump or an update of a dependency <package> does not reach prints the same at both
 revisions. changed-files.sh compares the output at a pull request's merge base and at its head.
+`*` lists every workspace package's, one after another.
 
 With a third argument, a comma-separated list of crates in <package>'s dependency tree
 (possibly empty), only what a check executes: those crates and their dependencies, transitively,
@@ -77,6 +79,15 @@ def workspace(root):
 
 
 def main(revision, package, reaches=None):
+    if package == "*":
+        # Every workspace package's, together
+        root = tomllib.loads(show(revision, "Cargo.toml"))
+        for member in root["workspace"]["members"]:
+            manifest = root if member == "." else tomllib.loads(show(revision, f"{member}/Cargo.toml"))
+            print(f"# {manifest['package']['name']}")
+            main(revision, manifest["package"]["name"], reaches)
+        return
+
     root = tomllib.loads(show(revision, "Cargo.toml"))
     lock = tomllib.loads(show(revision, "Cargo.lock"))
 

@@ -145,7 +145,8 @@ reads:
   interoperability tests `rustls-pure/src`, `rustls-pure/examples` and `rustls-pure/interop`.
   CI everything else in the workspace, but other workflows' files, `specs/`, `deploy/`,
   `benches/` (workspaces of their own, which the nightly run checks), `dev/` and packaging.
-  cargo-deny the lockfile, the workspace's manifests and `deny.toml`; CodeQL Rust code.
+  cargo-deny the lockfile, the workspace's manifests and `deny.toml`; CodeQL the workspace's Rust
+  code.
 - **Cargo.toml and Cargo.lock count by what a package is built from.** For `crate:<package>`,
   `.github/dependency-tree.py` lists the package's resolved dependencies from the lockfile and
   the manifests that decide its build (its own and those of the workspace packages it reaches,
@@ -179,8 +180,16 @@ reads:
 - **The deploy manifests count by more than their versions.** KServe end-to-end runs when
   `deploy/kserve` changes other than in its version numbers (`~` in the rules): a release's
   new image tag and download URL name what is published only after the merge.
-- A workflow's own file and the three relevance files count for all of its jobs; another
-  workflow's file counts for none.
+- A workflow's own file counts for all of its jobs; another workflow's file counts for none.
+  The relevance files (`.github/relevance`, `changed-files.sh`, `dependency-tree.py` and the
+  self-test) count for the self-test only: a pull request that changes them runs every
+  workflow's `Changed files` job with the new rules, and the self-test checks them.
+- **CodeQL on a pull request** scans the workspace's Rust code with the `security-extended`
+  queries (clippy covers what the quality queries add), when Rust code or any workspace
+  package's dependencies change; not the benchmark harnesses or the vendored Burn backend. The
+  weekly run on main scans everything with `security-and-quality`. The Rust extractor builds
+  the dependencies' build scripts and procedural macros for every feature; it keeps them in a
+  target directory the weekly run saves to the Actions cache and pull requests restore.
 
 `bash .github/changed-files-test.sh` checks the rules against example pull requests (which
 outputs each must turn on); CI runs it when they change. Change the rules and the examples

@@ -192,15 +192,15 @@ check '@bump-versions' 'ci.relevant security.advisories security.deny security.d
 check '@release' 'ci.relevant security.advisories security.deny security.dependency-review'
 # A dependency counts for the checks that run its code: a new one of kamui for Miri, which runs
 # kamui's tests, not for the proofs of kamui's own code
-check '@kamui-dependency' 'ci.relevant miri.relevant security.advisories security.deny security.dependency-review'
+check '@kamui-dependency' 'ci.relevant miri.relevant security.advisories security.deny security.dependency-review security.codeql'
 # tokio for the nerve's Loom models, which build its channels; no proof calls it
-check '@update-tokio' 'ci.relevant loom.server security.advisories security.deny security.dependency-review'
+check '@update-tokio' 'ci.relevant loom.server security.advisories security.deny security.dependency-review security.codeql'
 # crypto-bigint for the tests that run rustls-pure's crypto (interoperability, the target builds,
 # the timing tests); not for the proofs or the machine-code check, which never call it
-check '@update-crypto-bigint' 'ci.relevant rustls-pure.interop rustls-pure.targets rustls-pure-ct.timing security.advisories security.deny security.dependency-review'
-check '@update-zeroize' 'ci.relevant kani.rustls-pure rustls-pure.interop rustls-pure.targets rustls-pure-ct.timing security.advisories security.deny security.dependency-review'
-check '@kamui-feature' 'ci.relevant kani.kamui kani-nightly.kamui miri.relevant security.deny security.dependency-review'
-check '@profile' 'ci.relevant kani.rustls-pure kani.kamui kani.server kani-nightly.kamui kani-nightly.server miri.relevant loom.amate loom.server rustls-pure.machine-code rustls-pure.interop rustls-pure.targets rustls-pure-ct.timing security.deny security.dependency-review'
+check '@update-crypto-bigint' 'ci.relevant rustls-pure.interop rustls-pure.targets rustls-pure-ct.timing security.advisories security.deny security.dependency-review security.codeql'
+check '@update-zeroize' 'ci.relevant kani.rustls-pure rustls-pure.interop rustls-pure.targets rustls-pure-ct.timing security.advisories security.deny security.dependency-review security.codeql'
+check '@kamui-feature' 'ci.relevant kani.kamui kani-nightly.kamui miri.relevant security.deny security.dependency-review security.codeql'
+check '@profile' 'ci.relevant kani.rustls-pure kani.kamui kani.server kani-nightly.kamui kani-nightly.server miri.relevant loom.amate loom.server rustls-pure.machine-code rustls-pure.interop rustls-pure.targets rustls-pure-ct.timing security.deny security.dependency-review security.codeql'
 # Each check's own files
 check 'kamui/src/lib.rs' 'ci.relevant kani.kamui kani-nightly.kamui miri.relevant security.codeql'
 check 'kamui/tests/global.rs' 'ci.relevant miri.relevant security.codeql'
@@ -219,16 +219,21 @@ check 'deploy/kserve/servingruntime.yaml' 'kserve-e2e.relevant'
 check '@kserve-resources' 'kserve-e2e.relevant'
 check 'deploy/helm/furnace/values.yaml' ''
 check 'deny.toml' 'security.advisories security.deny'
-check 'benches/nerve/src/main.rs benches/nerve/Cargo.toml' 'security.codeql security.dependency-review'
+# The benchmark harnesses are workspaces of their own, which CodeQL scans weekly only
+check 'benches/nerve/src/main.rs benches/nerve/Cargo.toml' 'security.dependency-review'
 check 'furnace-burn/vendor/burn-flex/src/lib.rs' 'ci.relevant'
-# A workflow's own file runs all of it; the relevance files run everything
+# A workflow's own file runs all of it, and no other workflow
 check '.github/workflows/kani.yml' 'kani.rustls-pure kani.kamui kani.server'
 check '.github/workflows/kserve-e2e.yml' 'kserve-e2e.relevant'
 check '.github/workflows/rustls-pure-ct.yml' 'rustls-pure-ct.timing'
 check '.github/workflows/release.yml .github/workflows/bench.yml' ''
 check '.github/workflows/soak.yml' 'soak.run'
 check '.github/workflows/ci.yml' 'ci.relevant ci.selftest'
-check '.github/relevance' "${all[*]}"
+check '.github/workflows/security.yml' 'security.advisories security.deny security.dependency-review security.codeql'
+# The relevance files run their self-test only: every workflow's `Changed files` job runs them
+check '.github/relevance' 'ci.selftest'
+check '.github/changed-files.sh .github/dependency-tree.py' 'ci.selftest'
+check '.github/changed-files-test.sh' 'ci.selftest'
 
 # Scheduled runs: the deterministic checks never run twice on one commit, whether the earlier run
 # passed or failed; the others always run. A manual run checks everything.
