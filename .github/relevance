@@ -86,8 +86,8 @@ rustls-pure targets crate:rustls-pure rustls-pure/src/**
 # rustls-pure's constant-time tests: timing every crypto dependency's code that handles a
 # secret. On a pull request only when rustls-pure's dependencies change (a code change is
 # checked by the machine-code check and the proofs; the timing is too slow and noisy for every
-# one); weekly in full.
-rustls-pure-ct timing crate:rustls-pure
+# one) or the timing tests themselves; weekly in full.
+rustls-pure-ct timing crate:rustls-pure rustls-pure/src/tests/constant_time.rs
 
 # Security Audit: cargo-deny reads the workspace's lockfile and manifests (the benchmark
 # harnesses are workspaces of their own) and deny.toml; dependency review every manifest and
