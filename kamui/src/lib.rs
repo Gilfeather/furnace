@@ -212,14 +212,9 @@ unsafe impl GlobalAlloc for BlockCache {
 /// the allocator's unsafe paths on real memory, checked for out-of-bounds access, use after free
 /// and double free.
 ///
-/// Each proof is written once for a cache of any number of slots and run for 4 on every pull
-/// request and for the allocator's 64 on a schedule (`*_64_slots`; their loops take Kani well
-/// past a pull request's time). Four slots are enough to reach every behaviour: `Cache` and
-/// `Blocks` are the same generic code for any number, every slot goes through the same `find`
-/// with no branch on its index or on the number of slots, and from an arbitrary state four
-/// slots already hold every case: the block asked for in the first, a middle or the last slot,
-/// several blocks of one layout, every slot full, none full, and the byte limit reached with
-/// slots free. More slots only add more slots of these same kinds.
+/// Each proof is written once for a cache of any number of slots and run for the allocator's 64
+/// (`*_64_slots`), on every pull request but `keep`'s, which runs nightly, and for 4 as a quick
+/// check.
 #[cfg(kani)]
 mod verification {
     use super::*;
@@ -238,29 +233,6 @@ mod verification {
                 align: kani::any(),
             }
         }
-    }
-
-    /// What `take` and `keep` rely on and keep true: the bytes counted are the sizes of the
-    /// blocks kept, within [`MAX_CACHED`]
-    fn holds<const N: usize>(cache: &Cache<N>) -> bool {
-        let mut bytes = 0usize;
-        for block in cache.blocks.iter().flatten() {
-            let Some(sum) = bytes.checked_add(block.size) else {
-                return false;
-            };
-            bytes = sum;
-        }
-        bytes == cache.bytes && bytes <= MAX_CACHED
-    }
-
-    /// Any cache the invariant holds for
-    fn any_cache<const N: usize>() -> Cache<N> {
-        let cache = Cache {
-            blocks: kani::any(),
-            bytes: kani::any(),
-        };
-        kani::assume(holds(&cache));
-        cache
     }
 
     /// Any valid layout: any size and any power-of-two alignment `Layout` takes
@@ -287,6 +259,38 @@ mod verification {
         layout
     }
 
+    /// The bytes held in a slot
+    fn bytes_in(slot: &Option<Block>) -> u128 {
+        slot.map_or(0, |block| block.size as u128)
+    }
+
+    /// The bytes held in every slot of `blocks` but `at`, in 128 bits, where no sum of `N`
+    /// sizes overflows. With slot `at`'s added, it is the total in any order of slots, since
+    /// the addition is exact.
+    fn bytes_but<const N: usize>(blocks: &[Option<Block>; N], at: usize) -> u128 {
+        let mut bytes = 0;
+        for i in 0..N {
+            if i != at {
+                bytes += bytes_in(&blocks[i]);
+            }
+        }
+        bytes
+    }
+
+    /// The first slot `pick` takes, or `N` for none
+    fn first<const N: usize>(
+        blocks: &[Option<Block>; N],
+        pick: impl Fn(&Option<Block>) -> bool,
+    ) -> usize {
+        let mut first = N;
+        for i in (0..N).rev() {
+            if pick(&blocks[i]) {
+                first = i;
+            }
+        }
+        first
+    }
+
     fn same(a: &Option<Block>, b: &Option<Block>) -> bool {
         match (a, b) {
             (None, None) => true,
@@ -295,88 +299,108 @@ mod verification {
         }
     }
 
-    /// The one slot `before` and `after` differ in, if they differ in exactly one
-    fn changed_slot<const N: usize>(
-        before: &[Option<Block>; N],
-        after: &[Option<Block>; N],
-    ) -> Option<usize> {
-        let mut changed = None;
-        for i in 0..N {
-            if !same(&before[i], &after[i]) {
-                if changed.is_some() {
-                    return None;
-                }
-                changed = Some(i);
-            }
-        }
-        changed
-    }
+    // The two proofs below start from any cache whose byte count is the sum of its blocks'
+    // sizes, within MAX_CACHED. They sum the slots with the one the operation changes last,
+    // which is the same total, and check every other slot unchanged at any index: the sum
+    // after the operation is then that of the unchanged slots plus the changed one. So the
+    // count's invariant is checked without comparing two sums of every slot, which takes Kani
+    // hours at 64 slots.
 
-    /// `take` from any cache: a block of exactly the layout asked for, removed from its slot
-    /// with nothing else touched (so a block kept once is handed out once), or none when no
-    /// block has the layout, the cache unchanged
+    /// `take` from any cache: the first block of exactly the layout asked for, its slot emptied
+    /// with nothing else touched (so a block kept once is handed out once) and its size taken
+    /// off the count, which stays the sum of the blocks kept; or none when no block has the
+    /// layout, the cache unchanged
     fn take_hands_out_a_block_once<const N: usize>() {
-        let mut cache = any_cache::<N>();
+        let blocks: [Option<Block>; N] = kani::any();
         let layout = any_layout();
-        let (blocks, bytes) = (cache.blocks, cache.bytes);
+        let fits = |slot: &Option<Block>| {
+            slot.is_some_and(|b| b.size == layout.size() && b.align == layout.align())
+        };
+        let hit = first(&blocks, fits);
+        // The count is the sum of the sizes kept, slot `hit` (any slot, for none) added last
+        let at = hit.min(N - 1);
+        let rest = bytes_but(&blocks, at);
+        let bytes: usize = kani::any();
+        kani::assume(rest + bytes_in(&blocks[at]) == bytes as u128 && bytes <= MAX_CACHED);
+
+        let mut cache = Cache { blocks, bytes };
         let taken = cache.take(layout);
-        assert!(holds(&cache));
-        match taken {
-            Some(ptr) => {
-                let slot = changed_slot(&blocks, &cache.blocks).expect("one slot emptied");
-                assert!(cache.blocks[slot].is_none());
-                let block = blocks[slot].expect("the slot held the block");
-                assert_eq!(block.ptr, ptr);
-                assert_eq!((block.size, block.align), (layout.size(), layout.align()));
-                assert_eq!(cache.bytes, bytes - layout.size());
+        let j = kani::any_where(|&j: &usize| j < N);
+        if hit < N {
+            let block = blocks[hit].unwrap();
+            assert_eq!(taken, Some(block.ptr));
+            assert!(cache.blocks[hit].is_none());
+            if j != hit {
+                assert!(same(&blocks[j], &cache.blocks[j]));
             }
-            None => {
-                for i in 0..N {
-                    assert!(same(&blocks[i], &cache.blocks[i]));
-                    if let Some(block) = blocks[i] {
-                        assert!(block.size != layout.size() || block.align != layout.align());
-                    }
-                }
-                assert_eq!(cache.bytes, bytes);
-            }
+            // Every other slot unchanged and slot `hit` empty: the sum kept is `rest`
+            assert_eq!(cache.bytes as u128, rest);
+            assert!(cache.bytes <= MAX_CACHED);
+        } else {
+            assert!(taken.is_none());
+            assert!(!fits(&blocks[j]));
+            assert!(same(&blocks[j], &cache.blocks[j]));
+            assert_eq!(cache.bytes, bytes);
         }
     }
 
-    /// `keep` into any cache: the block with its layout in one empty slot, nothing else
-    /// touched, or refused with the cache unchanged, so the caller hands it back to `System`
+    /// `keep` into any cache: the block with its layout in the first empty slot, nothing else
+    /// touched, and its size added to the count, which stays the sum of the blocks kept within
+    /// MAX_CACHED; or refused with the cache unchanged, so the caller hands it back to `System`
     fn keep_keeps_a_block_or_refuses_it<const N: usize>() {
-        let mut cache = any_cache::<N>();
+        let blocks: [Option<Block>; N] = kani::any();
         let layout = any_layout();
         let ptr = any_ptr();
-        let (blocks, bytes) = (cache.blocks, cache.bytes);
+        let free = first(&blocks, |slot| slot.is_none());
+        // The count is the sum of the sizes kept, slot `free` (any slot, for none) added last
+        let at = free.min(N - 1);
+        let rest = bytes_but(&blocks, at);
+        let bytes: usize = kani::any();
+        kani::assume(rest + bytes_in(&blocks[at]) == bytes as u128 && bytes <= MAX_CACHED);
+
+        let mut cache = Cache { blocks, bytes };
         let kept = cache.keep(ptr, layout);
-        assert!(holds(&cache));
+        let j = kani::any_where(|&j: &usize| j < N);
         if kept {
-            let slot = changed_slot(&blocks, &cache.blocks).expect("one slot filled");
-            assert!(blocks[slot].is_none());
-            let block = cache.blocks[slot].expect("the slot holds the block");
+            assert!(free < N);
+            let block = cache.blocks[free].expect("the slot holds the block");
             assert_eq!(block.ptr, ptr);
             assert_eq!((block.size, block.align), (layout.size(), layout.align()));
-            assert_eq!(cache.bytes, bytes + layout.size());
-        } else {
-            for i in 0..N {
-                assert!(same(&blocks[i], &cache.blocks[i]));
+            if j != free {
+                assert!(same(&blocks[j], &cache.blocks[j]));
             }
+            // Every other slot unchanged and slot `free`, empty before, holding the block: the
+            // sum kept is `rest` plus its size
+            assert_eq!(cache.bytes as u128, rest + layout.size() as u128);
+            assert!(cache.bytes <= MAX_CACHED);
+        } else {
+            assert!(same(&blocks[j], &cache.blocks[j]));
             assert_eq!(cache.bytes, bytes);
         }
     }
 
     /// How many blocks the cache keeps
     fn kept<const N: usize>(blocks: &Blocks<N>) -> usize {
-        blocks.cache.lock().unwrap().blocks.iter().flatten().count()
+        // Index loops: over 64 slots they unwind into far fewer paths for Kani than iterator
+        // adapters
+        let cache = blocks.cache.lock().unwrap();
+        let mut count = 0;
+        for i in 0..N {
+            if cache.blocks[i].is_some() {
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Give every kept block back to `System`, with the layout it was allocated with
     fn release<const N: usize>(blocks: &Blocks<N>) {
         let mut cache = blocks.cache.lock().unwrap();
-        for block in cache.blocks.iter_mut().filter_map(Option::take) {
-            let layout = Layout::from_size_align(block.size, block.align).unwrap();
-            unsafe { System.dealloc(block.ptr.as_ptr(), layout) };
+        for i in 0..N {
+            if let Some(block) = cache.blocks[i].take() {
+                let layout = Layout::from_size_align(block.size, block.align).unwrap();
+                unsafe { System.dealloc(block.ptr.as_ptr(), layout) };
+            }
         }
         cache.bytes = 0;
     }
