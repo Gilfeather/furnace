@@ -92,12 +92,13 @@ rustls-pure targets crate:rustls-pure rustls-pure/src/**
 # one) or the timing tests themselves; weekly in full.
 rustls-pure-ct timing crate:rustls-pure rustls-pure/src/tests/constant_time.rs
 
-# Security Audit: cargo-deny reads the workspace's lockfile and manifests (the benchmark
-# harnesses are workspaces of their own) and deny.toml; dependency review every manifest and
-# lockfile; CodeQL the workspace's Rust code it scans on a pull request (not the vendored backend
-# or the benchmark harnesses, which only the weekly run scans) and the dependencies of any of the
-# workspace's packages (`crate:*`), which it reads the signatures of
-security advisories Cargo.lock deny.toml
+# Security Audit: the advisories read the lockfiles of the workspace and of the benchmark
+# harnesses (workspaces of their own), and deny.toml; the rest of cargo-deny the workspace's
+# lockfile and manifests and deny.toml; dependency review every manifest and lockfile; CodeQL the
+# workspace's Rust code it scans on a pull request (not the vendored backend or the benchmark
+# harnesses, which only the weekly run scans) and the dependencies of any of the workspace's
+# packages (`crate:*`), which it reads the signatures of
+security advisories Cargo.lock benches/*/Cargo.lock deny.toml
 security deny Cargo.lock **/Cargo.toml !benches/** deny.toml
 security dependency-review **/Cargo.toml **/Cargo.lock
 security codeql crate:* **.rs !furnace-burn/vendor/** !benches/**

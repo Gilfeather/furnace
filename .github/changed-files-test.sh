@@ -222,6 +222,8 @@ check 'deploy/helm/furnace/values.yaml' ''
 check 'deny.toml' 'security.advisories security.deny'
 # The benchmark harnesses are workspaces of their own, which CodeQL scans weekly only
 check 'benches/nerve/src/main.rs benches/nerve/Cargo.toml' 'security.dependency-review'
+# Their lockfiles for the advisories
+check 'benches/compare/Cargo.lock' 'security.advisories security.dependency-review'
 check 'furnace-burn/vendor/burn-flex/src/lib.rs' 'ci.relevant'
 # A workflow's own file runs all of it, and no other workflow
 check '.github/workflows/kani.yml' 'kani.rustls-pure kani.kamui kani.server'

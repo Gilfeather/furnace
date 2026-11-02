@@ -106,8 +106,9 @@ cargo deny check
   shows it. Kani's pull request harnesses have no schedule: they were proved on the pull
   request that merged them. Weekly and in full, since what they check changes outside the
   repository: rustls-pure (the newest rustls, its MSRV, interoperability against the system's
-  TLS tools), Security Audit (new advisories), KServe end-to-end (downloads the release and
-  KServe), the constant-time tests (with the machine-code check; the compiler's code may change).
+  TLS tools), Security Audit (new advisories; these alone also on the other days, for the
+  workspace and the bench harnesses), KServe end-to-end (downloads the release and KServe), the
+  constant-time tests (with the machine-code check; the compiler's code may change).
   Scheduled runs are never cancelled. The README's CI badge shows the last nightly CI run on
   main.
 - **By hand only:** the benchmarks (`bench.yml`); nothing measures on a schedule or a release.
@@ -140,8 +141,8 @@ reads:
   interoperability tests `rustls-pure/src`, `rustls-pure/examples` and `rustls-pure/interop`.
   CI everything else in the workspace, but other workflows' files, `specs/`, `deploy/`,
   `benches/` (workspaces of their own, which the nightly run checks), `dev/` and packaging.
-  cargo-deny the lockfile, the workspace's manifests and `deny.toml`; CodeQL the workspace's Rust
-  code.
+  cargo-deny the lockfile, the workspace's manifests and `deny.toml` (the advisories the bench
+  harnesses' lockfiles too); CodeQL the workspace's Rust code.
 - **Cargo.toml and Cargo.lock count by what a package is built from.** For `crate:<package>`,
   `.github/dependency-tree.py` lists the package's resolved dependencies from the lockfile and
   the manifests that decide its build (its own and those of the workspace packages it reaches,

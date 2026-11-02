@@ -1,13 +1,16 @@
 name: Security Audit
 
 # On pull requests that change what each job reads (.github/relevance): the advisories and
-# cargo-deny when the lockfile, the manifests or deny.toml change, CodeQL when Rust code does;
-# and weekly on main, for new advisories against unchanged dependencies. Every pull request runs
-# `Security Audit required`, the job to require before merging.
+# cargo-deny when the lockfiles, the manifests or deny.toml change, CodeQL when Rust code does;
+# and on main every day for the advisories, new ones against unchanged dependencies, and weekly
+# for everything. Every pull request runs `Security Audit required`, the job to require before
+# merging.
 on:
   schedule:
-    # Mondays, 00:00 UTC
+    # Mondays, 00:00 UTC: everything
     - cron: '0 0 * * 1'
+    # The other days, 00:00 UTC: the advisories only (the jobs below compare with this string)
+    - cron: '0 0 * * 0,2-6'
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -42,11 +45,16 @@ jobs:
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: bash .github/changed-files.sh security
 
+  # The workspace and each benchmark harness, a workspace with a lockfile of its own
   security_audit:
-    name: Security Audit
+    name: Security Audit (${{ matrix.workspace }})
     needs: changes
     if: needs.changes.outputs.advisories == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: [., benches/burn, benches/common, benches/compare, benches/llm, benches/nerve]
     steps:
     - name: Checkout code
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -54,16 +62,17 @@ jobs:
     # RustSec advisories for every crate that can be built into furnace, across all features
     # and targets (cargo-deny walks the resolved dependency graph). Unlike `cargo audit`, it does
     # not flag optional dependencies that Cargo.lock records but no feature can enable, such as
-    # Burn's LibTorch backend. No advisories are ignored.
+    # Burn's LibTorch backend. No advisories are ignored. The harnesses use deny.toml too.
     - name: Check advisories
       uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
       with:
+        manifest-path: ${{ matrix.workspace }}/Cargo.toml
         command: check advisories
 
   cargo_deny:
     name: cargo-deny (licenses, bans, sources)
     needs: changes
-    if: needs.changes.outputs.deny == 'true'
+    if: needs.changes.outputs.deny == 'true' && github.event.schedule != '0 0 * * 0,2-6'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -94,7 +103,7 @@ jobs:
   codeql:
     name: CodeQL Analysis
     needs: changes
-    if: needs.changes.outputs.codeql == 'true'
+    if: needs.changes.outputs.codeql == 'true' && github.event.schedule != '0 0 * * 0,2-6'
     runs-on: ubuntu-latest
     permissions:
       actions: read
