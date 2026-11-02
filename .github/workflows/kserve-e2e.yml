@@ -38,7 +38,7 @@ jobs:
       relevant: ${{ steps.changes.outputs.relevant }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         fetch-depth: 0
         filter: blob:none
@@ -57,10 +57,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Create kind cluster
-      uses: helm/kind-action@v1.15.1
+      uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
       with:
         version: ${{ env.KIND_VERSION }}
         cluster_name: kserve
@@ -71,7 +71,7 @@ jobs:
         kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
         kubectl -n cert-manager rollout status deployment --timeout=5m
 
-    - uses: azure/setup-helm@v5
+    - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
     # Only the InferenceService controller, deploying plain Deployments and Services instead of
     # Knative, and no Ingress: the test reaches the predictor through its Service
