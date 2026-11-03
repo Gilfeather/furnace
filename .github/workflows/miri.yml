@@ -48,7 +48,7 @@ jobs:
       relevant: ${{ steps.changes.outputs.relevant }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         fetch-depth: 0
         filter: blob:none
@@ -77,7 +77,7 @@ jobs:
             flags: -Zmiri-strict-provenance -Zmiri-tree-borrows
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     # Miri ships with nightly only; a pinned one, so a new nightly never breaks a pull request
     # that did not change anything. The date moves in a pull request of its own.
@@ -88,7 +88,7 @@ jobs:
         components: miri, rust-src
 
     - name: Cache cargo
-      uses: Swatinem/rust-cache@v2
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         key: miri
 

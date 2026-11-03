@@ -43,7 +43,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
@@ -51,7 +51,7 @@ jobs:
         toolchain: stable
 
     - name: Cache cargo
-      uses: Swatinem/rust-cache@v2
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         key: bench
         workspaces: |
@@ -63,7 +63,7 @@ jobs:
     # Python only for the FastAPI servers compared against, at the versions the published numbers
     # were measured with
     - name: Install Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
       with:
         python-version: '3.14'
 
@@ -88,7 +88,7 @@ jobs:
         echo "BURN_CLIENTS=$clients" >> "$GITHUB_ENV"
 
     - name: Cache ONNX models
-      uses: actions/cache@v5
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: furnace-burn/models
         key: onnx-models-resnet18-v1-7
@@ -148,7 +148,7 @@ jobs:
 
     - name: Upload results
       if: always()
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
       with:
         name: bench-${{ matrix.arch }}
         path: results
@@ -160,10 +160,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Download results
-      uses: actions/download-artifact@v5
+      uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
       with:
         pattern: bench-*
 
@@ -179,7 +179,7 @@ jobs:
         } | tee ratios.md >> "$GITHUB_STEP_SUMMARY"
 
     - name: Upload ratios
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
       with:
         name: ratios
         path: ratios.md
@@ -196,10 +196,10 @@ jobs:
       pull-requests: write
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Download results
-      uses: actions/download-artifact@v5
+      uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
       with:
         name: bench-x86_64
         path: results

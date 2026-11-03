@@ -1,13 +1,16 @@
 name: Security Audit
 
 # On pull requests that change what each job reads (.github/relevance): the advisories and
-# cargo-deny when the lockfile, the manifests or deny.toml change, CodeQL when Rust code does;
-# and weekly on main, for new advisories against unchanged dependencies. Every pull request runs
-# `Security Audit required`, the job to require before merging.
+# cargo-deny when the lockfiles, the manifests or deny.toml change, CodeQL when Rust code does;
+# and on main every day for the advisories, new ones against unchanged dependencies, and weekly
+# for everything. Every pull request runs `Security Audit required`, the job to require before
+# merging.
 on:
   schedule:
-    # Mondays, 00:00 UTC
+    # Mondays, 00:00 UTC: everything
     - cron: '0 0 * * 1'
+    # The other days, 00:00 UTC: the advisories only (the jobs below compare with this string)
+    - cron: '0 0 * * 0,2-6'
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -30,7 +33,7 @@ jobs:
       codeql: ${{ steps.changes.outputs.codeql }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         fetch-depth: 0
         filter: blob:none
@@ -42,35 +45,41 @@ jobs:
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: bash .github/changed-files.sh security
 
+  # The workspace and each benchmark harness, a workspace with a lockfile of its own
   security_audit:
-    name: Security Audit
+    name: Security Audit (${{ matrix.workspace }})
     needs: changes
     if: needs.changes.outputs.advisories == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: [., benches/burn, benches/common, benches/compare, benches/llm, benches/nerve]
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     # RustSec advisories for every crate that can be built into furnace, across all features
     # and targets (cargo-deny walks the resolved dependency graph). Unlike `cargo audit`, it does
     # not flag optional dependencies that Cargo.lock records but no feature can enable, such as
-    # Burn's LibTorch backend. No advisories are ignored.
+    # Burn's LibTorch backend. No advisories are ignored. The harnesses use deny.toml too.
     - name: Check advisories
-      uses: EmbarkStudios/cargo-deny-action@v2
+      uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
       with:
+        manifest-path: ${{ matrix.workspace }}/Cargo.toml
         command: check advisories
 
   cargo_deny:
     name: cargo-deny (licenses, bans, sources)
     needs: changes
-    if: needs.changes.outputs.deny == 'true'
+    if: needs.changes.outputs.deny == 'true' && github.event.schedule != '0 0 * * 0,2-6'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Run cargo-deny
-      uses: EmbarkStudios/cargo-deny-action@v2
+      uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
       with:
         command: check licenses bans sources
 
@@ -81,10 +90,10 @@ jobs:
     if: github.event_name == 'pull_request' && needs.changes.outputs['dependency-review'] == 'true'
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Dependency Review
-      uses: actions/dependency-review-action@v5
+      uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
       with:
         fail-on-severity: moderate
       # The repository's dependency graph is off, so the action cannot run at all; it can block
@@ -94,7 +103,7 @@ jobs:
   codeql:
     name: CodeQL Analysis
     needs: changes
-    if: needs.changes.outputs.codeql == 'true'
+    if: needs.changes.outputs.codeql == 'true' && github.event.schedule != '0 0 * * 0,2-6'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -110,13 +119,13 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     # Restored on every run, saved by the runs on main only: a pull request's would be visible to
     # that pull request alone
     - name: Restore the extractor's build
       id: target
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: ${{ github.workspace }}/../codeql-target
         key: codeql-target-${{ hashFiles('Cargo.lock', 'benches/*/Cargo.lock') }}
@@ -128,7 +137,7 @@ jobs:
     # weekly run on main scans everything with the security and quality queries.
     - name: Initialize CodeQL (pull request)
       if: github.event_name == 'pull_request'
-      uses: github/codeql-action/init@v4
+      uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
       with:
         languages: 'rust'
         build-mode: none
@@ -140,20 +149,20 @@ jobs:
 
     - name: Initialize CodeQL
       if: github.event_name != 'pull_request'
-      uses: github/codeql-action/init@v4
+      uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
       with:
         languages: 'rust'
         build-mode: none
         queries: security-and-quality
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v4
+      uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
       with:
         category: "/language:rust"
 
     - name: Save the extractor's build
       if: github.event_name != 'pull_request' && steps.target.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: ${{ github.workspace }}/../codeql-target
         key: codeql-target-${{ hashFiles('Cargo.lock', 'benches/*/Cargo.lock') }}

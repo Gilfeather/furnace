@@ -21,7 +21,7 @@ jobs:
       version: ${{ steps.get_version.outputs.version }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Get version from tag
       id: get_version
@@ -29,7 +29,7 @@ jobs:
 
     - name: Create Release
       id: create_release
-      uses: softprops/action-gh-release@v3
+      uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
       with:
         tag_name: ${{ github.ref }}
         name: Release ${{ github.ref }}
@@ -88,7 +88,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
@@ -103,7 +103,7 @@ jobs:
         sudo apt-get install -y musl-tools
 
     - name: Cache cargo
-      uses: Swatinem/rust-cache@v2
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         key: ${{ matrix.target }}
 
@@ -124,19 +124,19 @@ jobs:
 
     # Signed statement (Sigstore) of which workflow, commit and runner built this binary
     - name: Attest build provenance
-      uses: actions/attest-build-provenance@v4
+      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
       with:
         subject-path: release-assets/${{ matrix.asset_name }}
 
     - name: Upload Release Asset
-      uses: softprops/action-gh-release@v3
+      uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
       with:
         files: release-assets/${{ matrix.asset_name }}
 
     # Weights are platform-independent; publish them once
     - name: Upload ResNet-18 weights
       if: matrix.target == 'x86_64-unknown-linux-gnu'
-      uses: softprops/action-gh-release@v3
+      uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
       with:
         files: target/${{ matrix.target }}/release/build/furnace-burn-*/out/models/resnet18.bpk
 
@@ -149,10 +149,10 @@ jobs:
       contents: write
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: SBOM (SPDX)
-      uses: anchore/sbom-action@v0
+      uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
       with:
         path: .
         format: spdx-json
@@ -169,7 +169,7 @@ jobs:
         (cd assets && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
 
     - name: Upload checksums and SBOM
-      uses: softprops/action-gh-release@v3
+      uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
       with:
         files: |
           assets/SHA256SUMS
@@ -186,10 +186,10 @@ jobs:
       contents: read
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Check out the tap
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         repository: Gilfeather/homebrew-tap
         ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
@@ -224,7 +224,7 @@ jobs:
       id-token: write
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
@@ -248,7 +248,7 @@ jobs:
     - name: Authenticate with crates.io (amate)
       if: vars.PUBLISH_PART_CRATES == 'true'
       id: auth-amate
-      uses: rust-lang/crates-io-auth-action@v1
+      uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
     - name: Publish amate
       if: vars.PUBLISH_PART_CRATES == 'true'
@@ -259,7 +259,7 @@ jobs:
     - name: Authenticate with crates.io (kuebiko)
       if: vars.PUBLISH_PART_CRATES == 'true'
       id: auth-kuebiko
-      uses: rust-lang/crates-io-auth-action@v1
+      uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
     - name: Publish kuebiko
       if: vars.PUBLISH_PART_CRATES == 'true'
@@ -270,7 +270,7 @@ jobs:
     - name: Authenticate with crates.io (kamui)
       if: vars.PUBLISH_PART_CRATES == 'true'
       id: auth-kamui
-      uses: rust-lang/crates-io-auth-action@v1
+      uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
     - name: Publish kamui
       if: vars.PUBLISH_PART_CRATES == 'true'
@@ -281,7 +281,7 @@ jobs:
     - name: Authenticate with crates.io (rustls-pure)
       if: vars.PUBLISH_PART_CRATES == 'true'
       id: auth-rustls-pure
-      uses: rust-lang/crates-io-auth-action@v1
+      uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
     - name: Publish rustls-pure
       if: vars.PUBLISH_PART_CRATES == 'true'
@@ -291,7 +291,7 @@ jobs:
 
     - name: Authenticate with crates.io (furnace-server)
       id: auth-server
-      uses: rust-lang/crates-io-auth-action@v1
+      uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
     - name: Publish furnace-server
       env:
@@ -307,7 +307,7 @@ jobs:
     - name: Authenticate with crates.io (furnace-burn)
       if: vars.PUBLISH_BURN_CRATES == 'true'
       id: auth-burn
-      uses: rust-lang/crates-io-auth-action@v1
+      uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
     - name: Publish furnace-burn
       if: vars.PUBLISH_BURN_CRATES == 'true'
@@ -318,7 +318,7 @@ jobs:
     - name: Authenticate with crates.io (furnace-cli)
       if: vars.PUBLISH_BURN_CRATES == 'true'
       id: auth-cli
-      uses: rust-lang/crates-io-auth-action@v1
+      uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
     - name: Publish furnace-cli
       if: vars.PUBLISH_BURN_CRATES == 'true'
@@ -360,7 +360,7 @@ jobs:
             dockerfile: furnace-demo/Dockerfile
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Download ONNX models
       if: matrix.image == 'furnace'
@@ -370,10 +370,10 @@ jobs:
         curl -fsSL "https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx" -o furnace-burn/models/mnist.onnx
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
     - name: Log in to GitHub Container Registry
-      uses: docker/login-action@v4
+      uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
@@ -387,7 +387,7 @@ jobs:
 
     - name: Build and push
       id: push
-      uses: docker/build-push-action@v7
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
       with:
         context: .
         file: ${{ matrix.dockerfile }}
@@ -401,7 +401,7 @@ jobs:
           org.opencontainers.image.licenses=MIT
 
     - name: Attest build provenance
-      uses: actions/attest-build-provenance@v4
+      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
       with:
         subject-name: ${{ steps.image.outputs.name }}
         subject-digest: ${{ steps.push.outputs.digest }}
@@ -416,10 +416,10 @@ jobs:
       packages: write
     steps:
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
     - name: Log in to GitHub Container Registry
-      uses: docker/login-action@v4
+      uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
       with:
         registry: ghcr.io
         username: ${{ github.actor }}

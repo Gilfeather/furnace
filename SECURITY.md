@@ -21,8 +21,9 @@ older minor versions before 1.0.
 - **Pure Rust**, including TLS: no C or C++ in the server, so no memory-safety bugs from them.
   The TLS crypto is RustCrypto behind rustls; RSA is refused because the pure-Rust RSA crate has
   an unfixed timing side channel (RUSTSEC-2023-0071).
-- **Dependencies are audited whenever they change and weekly** with `cargo deny` against the RustSec
-  advisory database; no advisory is ignored.
+- **Dependencies are audited whenever they change and daily** with `cargo deny` against the RustSec
+  advisory database, the benchmark harnesses' lockfiles too; no advisory is ignored. Every
+  GitHub Action CI runs is pinned to a commit.
 - **Requests are bounded**: body size, batch size, concurrency (`503` beyond it), timeouts, and
   every input is checked against the model before it reaches it.
 - **Access control** when exposed: API keys (compared in constant time), per-client rate limits,
