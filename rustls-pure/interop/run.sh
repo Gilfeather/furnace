@@ -67,7 +67,9 @@ refused() { # refused <output> <text that must not be there, any case> <descript
   fi
 }
 
-port=$((20000 + RANDOM % 20000))
+# Below the ports the system hands to outgoing connections (Linux from 32768, macOS from 49152):
+# a client's source port there once held a server's port and failed its bind
+port=$((20000 + RANDOM % 12000))
 start() { # start <command...>: runs a server on $port in the background, once it listens
   "$@" >"$work/server-$port.log" 2>&1 &
   pids+=($!)
