@@ -126,6 +126,11 @@ How the harness avoids differences that are not the secret's, each found on a re
 - Where inputs come from a table, both classes' entries are read and a mask keeps one, so the
   class decides no memory access, not even before the timer starts. On Neoverse N2, reading
   only the sample's class's entry was enough to make the X25519 all-zero check differ (below).
+- Before the timer starts, the class decides nothing but the input's bytes: no other work is
+  done on the class's secret. The X25519 exchange keeps a public key that is the same for both
+  classes instead of one derived from its secret, which `complete` never reads (as the P-256
+  and P-384 exchanges keep none). Deriving it, a scalar multiplication outside the timing,
+  changed the time of the exchange after it on Neoverse N2 (below).
 - Signing signs a random message in both classes. With one message a fixed key gives the same
   signature every time, and encoding it (ECDSA's DER is 70 to 72 bytes for P-256, depending on
   the signature) took a different time from the random keys' signatures: |t| up to 19 for
@@ -194,6 +199,29 @@ harness read the public peer key from, outside the timing, did, by an amount and
 that changed with where the vectors happened to lie in memory. Reading both entries removed it
 in every layout. The classes' timings were also checked against a run order effect (each half
 of a run alone) and against the null (the labels shuffled: |t| at most 3.6).
+
+**Explained: X25519's key exchange on Neoverse N2.** Until 2026-11, the harness built each
+sample's exchange with a public key derived from the class's secret, outside the timing. On
+GitHub's aarch64 Linux runners the exchange's |t| then crept up to the threshold and over it
+(1.97, 3.81, 4.05, 5.58, then 5.69, 5.81 and 6.19 in one run), always with the means within
+3 ns of 44 µs and the largest |t| in the crop below p93.8; never on x86_64 or Apple silicon. It
+came from the harness, not from the secret. On Neoverse N2 (runs of 2026-11-10, |t|):
+
+| Variant | \|t\| |
+|---|---|
+| The public key derived from the class's secret (as before) | 19.39, 21.12, 10.93; 0.60 on another runner |
+| The public key derived, then thrown away; a constant one kept | 6.73, 4.67, 4.18 |
+| No public key derived; a constant one kept (as now) | 1.87, 1.65 |
+| x25519-dalek's Diffie-Hellman alone, fixed key vs random keys | 1.43 |
+| The same, two fixed keys / random keys in both classes (A/A) | 0.94 / 2.35 |
+
+The ladder itself, timed without the rest, shows no difference between a fixed key and random
+ones, and its machine code for aarch64 has no branch and no load whose address depends on the
+key (the swap is masks after `subtle`'s `black_box`; the only branches count the bits and the
+squarings). What differed was the work done on the class's secret just before the timer
+started: a fixed-base scalar multiplication, itself constant time, on the same key over and over
+in one class and on a fresh key in the other. Leaving it out of the harness removed the
+difference; `complete`, which is what is timed, never reads the public key.
 
 ## 5. What this does not show
 

@@ -335,6 +335,10 @@ fn control(resolution: Duration) -> Outcome {
 // ---------------------------------------------------------------------------------------------
 // Key exchange
 
+/// The exchange keeps a public key that is the same for both classes, as the P-256 and P-384
+/// exchanges below keep none: `complete` does not read it, and deriving it from the class's
+/// secret right before the timer starts, a scalar multiplication outside the timing, changed the
+/// time of the exchange after it on Neoverse N2 (CONSTANT_TIME.md)
 fn x25519(resolution: Duration) -> Outcome {
     let fixed = *random::<32>().unwrap();
     let peer = x25519_key(2).public;
@@ -344,8 +348,10 @@ fn x25519(resolution: Duration) -> Outcome {
         resolution,
         |class, rng| {
             let secret = x25519_dalek::StaticSecret::from(rng.fixed_or_random(class, &fixed));
-            let public = x25519_dalek::PublicKey::from(&secret);
-            Box::new(X25519Exchange { secret, public })
+            Box::new(X25519Exchange {
+                secret,
+                public: peer,
+            })
         },
         |exchange| exchange.complete(peer.as_bytes()),
     )
