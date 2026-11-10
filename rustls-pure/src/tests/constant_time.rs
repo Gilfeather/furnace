@@ -523,6 +523,12 @@ fn mlkem_encapsulation(resolution: Duration) -> Outcome {
 // message the fixed key would give the same signature every time, and the time to encode that
 // signature, which is public (ECDSA's DER encoding is 70 to 72 bytes long for P-256, depending
 // on the signature), would differ between the classes for reasons that are not secret.
+//
+// The input is the secret's bytes, and the key is made from them inside the timing, as
+// rustls-pure makes it when it loads a key: making a key derives its public key, a fixed-base
+// scalar multiplication on the secret, and done right before the timer it is work on the
+// class's secret outside the timing, which changed the time of what followed it (the X25519
+// exchange on Neoverse N2, Ed25519 signing on Apple M1; CONSTANT_TIME.md).
 
 fn ecdsa_p256_signing(resolution: Duration) -> Outcome {
     let fixed = *random::<32>().unwrap();
@@ -531,11 +537,16 @@ fn ecdsa_p256_signing(resolution: Duration) -> Outcome {
         ["fixed key", "random keys"],
         resolution,
         |class, rng| {
-            let key = p256::ecdsa::SigningKey::from_slice(&rng.fixed_or_random(class, &fixed));
-            let signer = EcdsaSigner(EcdsaKey::P256(Arc::new(key.unwrap())));
-            (signer, rng.bytes::<MESSAGE_LEN>())
+            (
+                rng.fixed_or_random(class, &fixed),
+                rng.bytes::<MESSAGE_LEN>(),
+            )
         },
-        |(signer, message)| (signer.sign(&message), signer),
+        |(secret, message)| {
+            let key = p256::ecdsa::SigningKey::from_slice(&secret).unwrap();
+            let signer = EcdsaSigner(EcdsaKey::P256(Arc::new(key)));
+            (signer.sign(&message), signer)
+        },
     )
 }
 
@@ -546,11 +557,16 @@ fn ecdsa_p384_signing(resolution: Duration) -> Outcome {
         ["fixed key", "random keys"],
         resolution,
         |class, rng| {
-            let key = p384::ecdsa::SigningKey::from_slice(&rng.fixed_or_random(class, &fixed));
-            let signer = EcdsaSigner(EcdsaKey::P384(Arc::new(key.unwrap())));
-            (signer, rng.bytes::<MESSAGE_LEN>())
+            (
+                rng.fixed_or_random(class, &fixed),
+                rng.bytes::<MESSAGE_LEN>(),
+            )
         },
-        |(signer, message)| (signer.sign(&message), signer),
+        |(secret, message)| {
+            let key = p384::ecdsa::SigningKey::from_slice(&secret).unwrap();
+            let signer = EcdsaSigner(EcdsaKey::P384(Arc::new(key)));
+            (signer.sign(&message), signer)
+        },
     )
 }
 
@@ -561,10 +577,15 @@ fn ed25519_signing(resolution: Duration) -> Outcome {
         ["fixed key", "random keys"],
         resolution,
         |class, rng| {
-            let key = ed25519_dalek::SigningKey::from_bytes(&rng.fixed_or_random(class, &fixed));
-            (Ed25519Key(Arc::new(key)), rng.bytes::<MESSAGE_LEN>())
+            (
+                rng.fixed_or_random(class, &fixed),
+                rng.bytes::<MESSAGE_LEN>(),
+            )
         },
-        |(signer, message)| (signer.sign(&message), signer),
+        |(secret, message)| {
+            let signer = Ed25519Key(Arc::new(ed25519_dalek::SigningKey::from_bytes(&secret)));
+            (signer.sign(&message), signer)
+        },
     )
 }
 
