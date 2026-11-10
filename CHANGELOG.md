@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `https://` webhooks and SSE receptors (feature `tls`). The nervous system's HTTP client speaks
+  TLS 1.3 through rustls and rustls-pure, as the server does, and trusts Mozilla's certificate
+  authorities (webpki-roots); `Webhook::trust(ca_file)` adds a private CA. The server's
+  certificate chain must be signed with ECDSA or Ed25519: RSA is refused. A certificate that
+  does not pass fails the command for good (`ActError::Fatal`), without retries.
+- `BuildError::Certificate`: the CA file given to `Webhook::trust` cannot be used.
+
 ## [0.16.2] - 2026-10-27
 
 The `furnace` binary, the container image and the Homebrew build pick up crypto-bigint 0.7.6.

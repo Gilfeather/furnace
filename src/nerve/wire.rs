@@ -1,18 +1,29 @@
 //! A small HTTP/1.1 client over Tokio sockets, for the outbound side of the nervous system
-//! (webhooks, upstream event feeds): plain `http://` with keep-alive, `Content-Length` and
-//! chunked bodies, nothing else. It keeps the crate free of an HTTP client dependency, and
-//! the hop to a webhook as short as a socket write.
+//! (webhooks, upstream event feeds): `http://`, and with the `tls` feature `https://`, with
+//! keep-alive, `Content-Length` and chunked bodies, nothing else. It keeps the crate free of an
+//! HTTP client dependency, and the hop to a webhook as short as a socket write.
+//!
+//! `https://` is rustls with rustls-pure, as the server's TLS is: TLS 1.3 only, and a server
+//! whose certificate chain is signed with ECDSA or Ed25519 (no RSA). It trusts Mozilla's
+//! certificate authorities ([`webpki_roots`]) and those a client is given
+//! ([`Client::trust`]).
 //!
 //! Crate-internal: the effectors and receptors that call out use it. The nerve bench reaches
 //! it through `furnace::nerve::bench_wire`, which is not part of the API.
 
 use std::collections::HashMap;
 use std::io;
+use std::pin::Pin;
 use std::sync::Mutex;
+#[cfg(feature = "tls")]
+use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+#[cfg(feature = "tls")]
+use rustls::pki_types::{CertificateDer, ServerName};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 
 /// Largest response head (status line and headers) accepted
@@ -26,7 +37,7 @@ const MAX_TRAILERS: usize = MAX_HEAD;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// The URL is not `http://host[:port]/path` (an `https://` URL among them)
+    /// The URL is not `http://host[:port]/path`, or `https://` without the `tls` feature
     Url {
         /// The URL as given
         url: String,
@@ -37,6 +48,10 @@ pub enum Error {
     Timeout(&'static str),
     /// Connecting, writing or reading failed: refused, reset, closed early
     Io(io::Error),
+    /// The TLS handshake of an `https://` call failed: the server's certificate is not from a
+    /// trusted authority or not for this host, or the server offers nothing the client takes
+    /// (TLS 1.3, ECDSA or Ed25519). Calling again does not help.
+    Tls(String),
     /// The server's answer is not HTTP/1.1 the client reads
     Protocol(String),
     /// The response body is larger than the client collects
@@ -49,6 +64,7 @@ impl std::fmt::Display for Error {
             Self::Url { url, reason } => write!(f, "{url}: {reason}"),
             Self::Timeout(what) => write!(f, "{what} timed out"),
             Self::Io(e) => std::fmt::Display::fmt(e, f),
+            Self::Tls(m) => write!(f, "TLS: {m}"),
             Self::Protocol(m) => f.write_str(m),
             Self::TooLarge => f.write_str("response body too large"),
         }
@@ -74,27 +90,42 @@ impl From<io::Error> for Error {
 /// What the client's calls return
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// A parsed `http://host[:port]/path?query` URL
+/// A parsed `http://host[:port]/path?query` or `https://` URL
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Url {
     /// Host name or address, IPv6 without its brackets
     pub host: String,
-    /// 80 unless the URL gives one
+    /// 80, or 443 for `https://`, unless the URL gives one
     pub port: u16,
     /// Path and query, starting with `/`
     pub path: String,
+    /// `https://`: the call goes over TLS (the `tls` feature)
+    pub tls: bool,
 }
 
 impl Url {
-    /// The error names the URL and what is wrong with it (an `https://` URL among them)
+    /// The error names the URL and what is wrong with it (an `https://` URL without the `tls`
+    /// feature among them)
     pub fn parse(url: &str) -> Result<Self> {
         let invalid = |reason: String| Error::Url {
             url: url.to_string(),
             reason,
         };
-        let rest = url.strip_prefix("http://").ok_or_else(|| {
-            invalid("only http:// URLs are supported by the nerve client".to_string())
-        })?;
+        let (rest, tls) = if let Some(rest) = url.strip_prefix("http://") {
+            (rest, false)
+        } else if let Some(rest) = url.strip_prefix("https://") {
+            if !cfg!(feature = "tls") {
+                return Err(invalid(
+                    "https:// URLs need furnace's `tls` feature".to_string(),
+                ));
+            }
+            (rest, true)
+        } else {
+            return Err(invalid(
+                "only http:// and https:// URLs are supported by the nerve client".to_string(),
+            ));
+        };
+        let default_port = if tls { 443 } else { 80 };
         let (authority, path) = match rest.find('/') {
             Some(i) => (&rest[..i], &rest[i..]),
             None => (rest, "/"),
@@ -105,7 +136,7 @@ impl Url {
                 port.parse::<u16>()
                     .map_err(|_| invalid(format!("bad port '{port}'")))?,
             ),
-            _ => (authority, 80),
+            _ => (authority, default_port),
         };
         if host.is_empty() {
             return Err(invalid("no host".to_string()));
@@ -114,19 +145,131 @@ impl Url {
             host: host.trim_matches(['[', ']']).to_string(),
             port,
             path: path.to_string(),
+            tls,
         })
     }
 
+    fn scheme(&self) -> &'static str {
+        if self.tls { "https" } else { "http" }
+    }
+
     fn key(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+        format!("{}://{}:{}", self.scheme(), self.host, self.port)
     }
 
     fn host_header(&self) -> String {
-        if self.port == 80 {
+        if self.port == if self.tls { 443 } else { 80 } {
             self.host.clone()
         } else {
             format!("{}:{}", self.host, self.port)
         }
+    }
+}
+
+impl std::fmt::Display for Url {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}://{}:{}{}",
+            self.scheme(),
+            self.host,
+            self.port,
+            self.path
+        )
+    }
+}
+
+/// A connection to a server: plain TCP, or TLS over it for an `https://` URL
+pub enum Conn {
+    /// `http://`
+    Plain(TcpStream),
+    /// `https://`
+    #[cfg(feature = "tls")]
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+}
+
+impl AsyncRead for Conn {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for Conn {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
+
+/// The TLS settings of `https://` calls: TLS 1.3 with rustls-pure, Mozilla's certificate
+/// authorities and `extra` ones, offering HTTP/1.1
+#[cfg(feature = "tls")]
+fn tls_config(
+    extra: &[CertificateDer<'static>],
+) -> std::result::Result<Arc<rustls::ClientConfig>, rustls::Error> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    for cert in extra {
+        roots.add(cert.clone())?;
+    }
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls_pure::provider()))
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(Arc::new(config))
+}
+
+/// [`tls_config`] with Mozilla's authorities only, built once and shared by every client
+#[cfg(feature = "tls")]
+fn default_tls_config() -> Arc<rustls::ClientConfig> {
+    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| tls_config(&[]).expect("rustls-pure offers TLS 1.3"))
+        .clone()
+}
+
+/// A failed handshake: the TLS library's refusal is [`Error::Tls`], anything else (a reset, an
+/// early close) stays [`Error::Io`]
+#[cfg(feature = "tls")]
+fn handshake_error(e: io::Error) -> Error {
+    match e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+    {
+        Some(refusal) => Error::Tls(refusal.to_string()),
+        None => Error::Io(e),
     }
 }
 
@@ -161,7 +304,7 @@ enum Framing {
 
 /// A response whose body is still being read, chunk by chunk (an event stream), from a
 /// connection (or, in the tests, any byte source)
-pub struct Streaming<S = TcpStream> {
+pub struct Streaming<S = Conn> {
     /// The HTTP status code
     pub status: u16,
     /// Name and value, in the order received
@@ -330,8 +473,13 @@ impl<S: AsyncRead + Unpin> Streaming<S> {
 /// Connections kept alive per host, and a timeout per request: the whole exchange for
 /// [`request`](Self::request), up to the response head for [`send`](Self::send)
 pub struct Client {
-    pool: Mutex<HashMap<String, Vec<TcpStream>>>,
+    pool: Mutex<HashMap<String, Vec<Conn>>>,
     timeout: Duration,
+    /// The authorities given with [`trust`](Self::trust), and the settings built with them
+    #[cfg(feature = "tls")]
+    extra_roots: Vec<CertificateDer<'static>>,
+    #[cfg(feature = "tls")]
+    tls: Arc<rustls::ClientConfig>,
 }
 
 impl Default for Client {
@@ -341,12 +489,31 @@ impl Default for Client {
 }
 
 impl Client {
-    /// An empty pool, with `timeout` per request
+    /// An empty pool, with `timeout` per request; `https://` calls trust Mozilla's
+    /// certificate authorities
     pub fn new(timeout: Duration) -> Self {
         Self {
             pool: Mutex::new(HashMap::new()),
             timeout,
+            #[cfg(feature = "tls")]
+            extra_roots: Vec::new(),
+            #[cfg(feature = "tls")]
+            tls: default_tls_config(),
         }
+    }
+
+    /// Trust these certificate authorities too, for `https://` calls: a private CA's
+    /// certificate, say. An error for a certificate that cannot be an authority.
+    #[cfg(feature = "tls")]
+    pub fn trust(
+        &mut self,
+        authorities: impl IntoIterator<Item = CertificateDer<'static>>,
+    ) -> std::result::Result<(), rustls::Error> {
+        let mut extra = self.extra_roots.clone();
+        extra.extend(authorities);
+        self.tls = tls_config(&extra)?;
+        self.extra_roots = extra;
+        Ok(())
     }
 
     /// Open a connection to `url`'s host and keep it for the next request
@@ -356,18 +523,40 @@ impl Client {
         Ok(())
     }
 
-    async fn connect(&self, url: &Url) -> Result<TcpStream> {
-        let stream = tokio::time::timeout(
-            self.timeout,
-            TcpStream::connect((url.host.as_str(), url.port)),
-        )
-        .await
-        .map_err(|_| Error::Timeout("connect"))??;
-        stream.set_nodelay(true)?;
-        Ok(stream)
+    /// A new connection to `url`'s host, its TLS handshake done for `https://`, within the
+    /// timeout
+    async fn connect(&self, url: &Url) -> Result<Conn> {
+        tokio::time::timeout(self.timeout, self.connect_inner(url))
+            .await
+            .map_err(|_| Error::Timeout("connect"))?
     }
 
-    fn take(&self, url: &Url) -> Option<TcpStream> {
+    async fn connect_inner(&self, url: &Url) -> Result<Conn> {
+        let stream = TcpStream::connect((url.host.as_str(), url.port)).await?;
+        stream.set_nodelay(true)?;
+        if !url.tls {
+            return Ok(Conn::Plain(stream));
+        }
+        #[cfg(feature = "tls")]
+        {
+            let name = ServerName::try_from(url.host.clone()).map_err(|_| Error::Url {
+                url: url.to_string(),
+                reason: "not a host name or address TLS can check".to_string(),
+            })?;
+            let stream = tokio_rustls::TlsConnector::from(self.tls.clone())
+                .connect(name, stream)
+                .await
+                .map_err(handshake_error)?;
+            Ok(Conn::Tls(Box::new(stream)))
+        }
+        #[cfg(not(feature = "tls"))]
+        Err(Error::Url {
+            url: url.to_string(),
+            reason: "https:// URLs need furnace's `tls` feature".to_string(),
+        })
+    }
+
+    fn take(&self, url: &Url) -> Option<Conn> {
         self.pool
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -375,7 +564,7 @@ impl Client {
             .pop()
     }
 
-    fn put_back(&self, url: &Url, stream: TcpStream) {
+    fn put_back(&self, url: &Url, stream: Conn) {
         let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
         let idle = pool.entry(url.key()).or_default();
         if idle.len() < 8 {
@@ -470,8 +659,10 @@ impl Client {
     }
 }
 
-async fn write_and_read_head(mut stream: TcpStream, request: &[u8]) -> Result<Streaming> {
+async fn write_and_read_head(mut stream: Conn, request: &[u8]) -> Result<Streaming> {
     stream.write_all(request).await?;
+    // TLS holds written bytes until a flush; TCP sends them as they are written
+    stream.flush().await?;
     read_head(stream).await
 }
 
@@ -755,13 +946,27 @@ mod tests {
             Url {
                 host: "localhost".into(),
                 port: 9000,
-                path: "/hook?x=1".into()
+                path: "/hook?x=1".into(),
+                tls: false,
             }
         );
         assert_eq!(Url::parse("http://example.com").unwrap().path, "/");
         assert_eq!(Url::parse("http://example.com").unwrap().port, 80);
-        assert!(Url::parse("https://example.com").is_err());
+        assert!(Url::parse("ftp://example.com").is_err());
         assert!(Url::parse("http://:80/").is_err());
+        let https = Url::parse("https://example.com/hook");
+        if cfg!(feature = "tls") {
+            let https = https.unwrap();
+            assert_eq!((https.port, https.tls), (443, true));
+            assert_eq!(https.host_header(), "example.com");
+            assert_eq!(https.to_string(), "https://example.com:443/hook");
+            assert_ne!(
+                https.key(),
+                Url::parse("http://example.com:443/").unwrap().key()
+            );
+        } else {
+            assert!(https.is_err());
+        }
     }
 
     async fn serve(app: Router) -> Url {
@@ -795,6 +1000,65 @@ mod tests {
             assert_eq!(response.body, Bytes::from(body));
         }
         assert_eq!(client.pool.lock().unwrap()[&url.key()].len(), 1);
+    }
+
+    /// An HTTPS server, with the server's own TLS and the test CA's P-256 certificate for
+    /// localhost
+    #[cfg(feature = "tls")]
+    async fn serve_tls(app: Router) -> Url {
+        use crate::tls::{TlsConfigs, TlsListener, tests::settings};
+        let configs = TlsConfigs::load(settings("server-p256", false)).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let listener = TlsListener::new(listener, configs).unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Url::parse(&format!("https://localhost:{port}/echo")).unwrap()
+    }
+
+    /// The certificate of a test certificate authority: `ca` signed the servers' certificates,
+    /// `other-ca` did not
+    #[cfg(feature = "tls")]
+    fn authority(name: &str) -> CertificateDer<'static> {
+        use rustls::pki_types::pem::PemObject;
+        CertificateDer::from_pem_file(format!(
+            "{}/tests/fixtures/tls/{name}.crt",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    }
+
+    #[cfg(feature = "tls")]
+    #[tokio::test]
+    async fn https_posts_and_reuses_the_connection() {
+        let url =
+            serve_tls(Router::new().route("/echo", post(|body: Bytes| async move { body }))).await;
+        let mut client = Client::default();
+        client.trust([authority("ca")]).unwrap();
+        for i in 0..3 {
+            let body = format!("hello {i}");
+            let response = client
+                .request("POST", &url, &[], body.as_bytes())
+                .await
+                .unwrap();
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body, Bytes::from(body));
+        }
+        assert_eq!(client.pool.lock().unwrap()[&url.key()].len(), 1);
+    }
+
+    /// A certificate from an authority the client does not trust ends the call with
+    /// `Error::Tls`, whether it trusts Mozilla's authorities only or another one too
+    #[cfg(feature = "tls")]
+    #[tokio::test]
+    async fn https_needs_a_certificate_from_a_trusted_authority() {
+        let url =
+            serve_tls(Router::new().route("/echo", post(|body: Bytes| async move { body }))).await;
+        let mut other = Client::default();
+        other.trust([authority("other-ca")]).unwrap();
+        for client in [Client::default(), other] {
+            let result = client.request("POST", &url, &[], b"x").await;
+            assert!(matches!(result, Err(Error::Tls(_))), "{result:?}");
+        }
     }
 
     #[tokio::test]
