@@ -103,7 +103,7 @@ two million samples; a sample times as many operations as make it last 200 ticks
 | ML-KEM-768 decapsulation | valid ciphertexts | ciphertexts with one bit flipped |
 | X25519MLKEM768, the client's side (rustls-pure's) | valid ciphertexts | ciphertexts with one bit flipped |
 | ML-KEM-768 encapsulation | fixed `m` | random `m` |
-| ECDSA P-256, P-384 and Ed25519 signing (rustls-pure's signers), random messages | fixed key | random keys |
+| ECDSA P-256, P-384 and Ed25519 signing (rustls-pure's signers, the key made from its secret in the timing), random messages | fixed key | random keys |
 | AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305 opening a 16 KiB record | tag wrong in its first byte | tag wrong in its last byte |
 
 **The control comes first.** It times the same operation on the same kind of input in both
@@ -131,6 +131,10 @@ How the harness avoids differences that are not the secret's, each found on a re
   the signature) took a different time from the random keys' signatures: |t| up to 19 for
   P-256, from the length of a public signature. Without the DER encoding, or with random
   messages, it was gone on every runner.
+- Signing is timed from the secret's bytes: the key, and with it the public key, a fixed-base
+  scalar multiplication on the secret, is made inside the timing, as rustls-pure makes it when
+  it loads a key. Made before the timer, it was work on the class's secret outside the timing,
+  and Ed25519 signing on Apple M1 differed in some runs (below).
 - An AEAD is tested with two wrong tags, not a right one and a wrong one: a record is decrypted
   only once its tag is right, so the two take different times by design, and whether a record
   was accepted is not secret, since a refused one ends the connection.
@@ -170,6 +174,22 @@ Each target took 56,000 to 2,000,000 samples; the clocks' steps were 20 ns (x86_
 (Neoverse N2, a 1 GHz counter) and 41 ns (Apple silicon). Earlier runs with the same
 harness but for the change below, on AMD EPYC 9V45 and 9V74, found no difference in any target
 on x86_64 or Apple silicon either.
+
+**Ed25519 signing on Apple M1.** Until 2026-11, the signing targets made each sample's key
+before the timer started. On GitHub's macOS runners (Apple M1, virtual) Ed25519 signing's first
+|t| was 13.17, 10.32, 4.22 and, in one run, 35.13, then 6.90 and 1.63 on fresh fixed keys, with
+the classes' means at most 66 ns apart, around 16 µs, and the largest |t| in the body of the
+distribution (below p50 to p93.8); between 1.1 and 2.4 in the other runs, and never as much as
+4 on x86_64 or Neoverse N2.
+No other target did this on the same runners, including those as short and as many samples
+(ML-KEM-768 encapsulation, ChaCha20-Poly1305). It is not the runner's noise: the class is drawn
+at random for every sample, so noise the class does not cause, a slower stretch of the run
+included (the third measurement above ran 13% slower), cannot move one class's mean away from
+the other's. Something tied to the class did, and Ed25519 signing was the one fast target whose
+preparation did work on the class's secret right before the timer: deriving the public key, the
+same kind of work that made the X25519 exchange differ on Neoverse N2. The key is now made in
+the timing. If the difference outlives that, what remains is in the signing itself on this CPU,
+whose data memory-dependent prefetcher looks at the values that constant-time code loads.
 
 **Explained: X25519's all-zero check on Neoverse N2.** Before the harness read both classes'
 entries, this target's |t| on GitHub's aarch64 Linux runners was between 0.8 and 58 over ten
