@@ -3457,6 +3457,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]

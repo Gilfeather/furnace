@@ -19,8 +19,10 @@ pub struct SseIn {
 }
 
 impl SseIn {
-    /// Follow `url`, a plain `http://host[:port]/path` (no HTTPS); a URL of another form is
-    /// logged when the receptor starts, and nothing is read
+    /// Follow `url`, `http://host[:port]/path`, or `https://` with the `tls` feature (a server
+    /// with a certificate from one of Mozilla's authorities, as for a
+    /// [`Webhook`](crate::nerve::effector::Webhook)); a URL of another form is logged when the
+    /// receptor starts, and nothing is read
     pub fn new(name: &str, url: &str) -> Self {
         Self {
             source: Source::new(name),

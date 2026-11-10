@@ -180,8 +180,8 @@ scaling to zero practical: [docs/SERVERLESS.md](docs/SERVERLESS.md).
   preprocessing (`--features image`).
 - **Production basics**: request size limits, input validation, backpressure (`503`),
   timeouts (`504`), Prometheus metrics, readiness after a warm-up, graceful shutdown.
-- **Security**: HTTPS and mutual TLS with certificate reload, in pure Rust (`--features tls`);
-  API keys; per-client rate limits.
+- **Security**: HTTPS and mutual TLS with certificate reload, in pure Rust (`--features tls`),
+  and `https://` webhooks with the same feature; API keys; per-client rate limits.
 
 ## Your own Burn models
 
@@ -363,7 +363,11 @@ fabric, and the measurements.
   junction on another machine, connect fabrics with a `Webhook` effector on one side and an
   `Http` receptor on the other (or SSE out and in); the network hop is then an effector, not a
   pathway, so its latency does not take part in choosing between reflex and brain.
-- **Outbound webhooks speak plain `http://`**; HTTPS webhooks are not supported yet.
+- **HTTPS webhooks need ECDSA or Ed25519 certificates.** With `--features tls` a `Webhook`
+  (and an `SseIn` receptor) calls `https://`, over TLS 1.3 only, through the same pure-Rust
+  provider as the server, which does not verify RSA signatures: a server whose certificate
+  chain is signed with RSA is refused. Let's Encrypt, cert-manager and most cloud CAs issue
+  ECDSA certificates; for others, keep a local proxy in front.
 
 [docs/FAQ.md](docs/FAQ.md) answers how Furnace differs from a cache, Ray Serve, Triton,
 BentoML, actors and message queues, whether it needs an LLM, and why pure Rust.

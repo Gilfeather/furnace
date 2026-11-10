@@ -261,7 +261,8 @@ fn build(
     Ok((Arc::new(http), Arc::new(grpc)))
 }
 
-fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, Error> {
+/// Every certificate in the PEM file `path`, at least one
+pub(crate) fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, Error> {
     let certs = CertificateDer::pem_file_iter(path)
         .and_then(|certs| certs.collect::<Result<Vec<_>, _>>())
         .map_err(|e| Error::Certificate {

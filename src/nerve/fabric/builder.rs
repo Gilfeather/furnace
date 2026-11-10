@@ -33,12 +33,20 @@ pub enum BuildError {
         /// The pathway's target
         to: NeuronId,
     },
-    /// A URL the nervous system's HTTP client cannot call: not `http://host[:port]/path`
-    /// (HTTPS among them)
+    /// A URL the nervous system's HTTP client cannot call: not `http://host[:port]/path`, or
+    /// `https://` without the `tls` feature
     Url {
         /// The effector or receptor
         name: String,
         /// What is wrong with the URL
+        reason: String,
+    },
+    /// Certificate authorities given to an effector for `https://` cannot be used: the file
+    /// cannot be read, holds no PEM certificate, or holds one that cannot be an authority
+    Certificate {
+        /// The effector
+        name: String,
+        /// What is wrong with the certificates
         reason: String,
     },
     /// A runtime of the fabric could not be started
@@ -59,7 +67,9 @@ impl std::fmt::Display for BuildError {
                     "pathway {from} -> {to} names a neuron that was not added"
                 )
             }
-            Self::Url { name, reason } => write!(f, "{name}: {reason}"),
+            Self::Url { name, reason } | Self::Certificate { name, reason } => {
+                write!(f, "{name}: {reason}")
+            }
             Self::Runtime(which, e) => write!(f, "the {which} runtime: {e}"),
         }
     }
