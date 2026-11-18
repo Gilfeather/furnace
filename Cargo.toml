@@ -70,7 +70,7 @@ grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost", "dep:tonic-prost-build", "d
 tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pure", "dep:webpki-roots"]
 # Serve LLMs: OpenAI-compatible chat and completions with streaming, behind the `LlmEngine` and
 # `StepModel` traits (src/llm). Engines come from other crates, such as furnace-candle.
-llm = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:chrono"]
+llm = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:jiff"]
 # `model::DummyModel` and `model::DummyTensorsModel`: constant models for testing and
 # benchmarking the server itself, not for serving
 test-models = []
@@ -118,8 +118,10 @@ webpki-roots = { version = "1.0.10", optional = true }
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"], optional = true }
 minijinja = { version = "2.24", default-features = false, features = ["builtins", "json", "serde", "macros", "loop_controls", "multi_template"], optional = true }
 minijinja-contrib = { version = "2.24", default-features = false, features = ["pycompat"], optional = true }
-# The chat templates' `strftime_now`: any strftime format, in the local time zone (feature `llm`)
-chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
+# The chat templates' `strftime_now`: any strftime format, in the local time zone (feature `llm`).
+# jiff in place of chrono, which is unmaintained (RUSTSEC-2026-0543); its defaults find the
+# system's time zone and bundle the zone database only where the system has none (Windows)
+jiff = { version = "1", optional = true }
 futures-util = { version = "0.3", default-features = false }
 
 [build-dependencies]

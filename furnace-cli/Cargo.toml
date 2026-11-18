@@ -62,7 +62,9 @@ kamui = { path = "../kamui", version = "0.16.2" }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
 # Log lines with RFC 3339 timestamps, in UTC (JSON) or the local time zone
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "chrono"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# The timestamps' clock and time zone (chrono is unmaintained, RUSTSEC-2026-0543)
+jiff = "1"
 # The process's session ID in the logs
 uuid = { version = "1.0", features = ["v4"] }
 # `--config furnace.toml`

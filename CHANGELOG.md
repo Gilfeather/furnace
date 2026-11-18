@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - rustls-pure moved to a repository of its own
   ([Gilfeather/rustls-pure](https://github.com/Gilfeather/rustls-pure)); furnace-server takes it from crates.io.
+- jiff in place of chrono, which is unmaintained (RUSTSEC-2026-0543): the chat templates'
+  `strftime_now` (feature `llm`) and the `furnace` binary's log timestamps. The output is the
+  same RFC 3339 and strftime text; an invalid format's error now says what is wrong with it.
 
 ## [0.16.2] - 2026-10-27
 
