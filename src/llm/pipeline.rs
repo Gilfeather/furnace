@@ -106,16 +106,12 @@ impl TextPipeline {
             Err(minijinja::Error::new(ErrorKind::InvalidOperation, message))
         });
         env.add_function("strftime_now", |format: String| {
-            use std::fmt::Write as _;
-            let mut out = String::new();
-            write!(out, "{}", chrono::Local::now().format(&format))
-                .map(|()| out)
-                .map_err(|_| {
-                    minijinja::Error::new(
-                        ErrorKind::InvalidOperation,
-                        format!("invalid strftime format {format:?}"),
-                    )
-                })
+            jiff::fmt::strtime::format(&format, &jiff::ZonedDateTime::now()).map_err(|e| {
+                minijinja::Error::new(
+                    ErrorKind::InvalidOperation,
+                    format!("invalid strftime format {format:?}: {e}"),
+                )
+            })
         });
         env.add_template_owned(CHAT_TEMPLATE, template.to_string())?;
         self.chat_template = Some(env);

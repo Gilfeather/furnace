@@ -616,7 +616,7 @@ fn setup_logging(log_level: &str) -> Result<()> {
             .with_file(false)
             .with_line_number(false)
             .with_env_filter(env_filter)
-            .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc_3339())
+            .with_timer(Rfc3339::Utc)
             .init();
     } else {
         tracing_subscriber::fmt()
@@ -625,12 +625,34 @@ fn setup_logging(log_level: &str) -> Result<()> {
             .with_file(true)
             .with_line_number(true)
             .with_env_filter(env_filter)
-            .with_timer(tracing_subscriber::fmt::time::ChronoLocal::rfc_3339())
+            .with_timer(Rfc3339::Local)
             .init();
     }
 
     info!(log_level = %level, is_production, "🔧 Logging initialized");
     Ok(())
+}
+
+/// A log line's timestamp in RFC 3339: in UTC (`2026-11-18T03:04:05.123456789Z`) or in the
+/// system's time zone with its offset (`2026-11-18T12:04:05.123456789+09:00`)
+enum Rfc3339 {
+    Utc,
+    Local,
+}
+
+impl tracing_subscriber::fmt::time::FormatTime for Rfc3339 {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        let now = jiff::Timestamp::now();
+        match self {
+            Self::Utc => write!(w, "{now}"),
+            Self::Local => write!(
+                w,
+                "{}",
+                now.to_zoned_datetime(jiff::tz::TimeZone::system())
+                    .strftime("%Y-%m-%dT%H:%M:%S%.f%:z")
+            ),
+        }
+    }
 }
 
 #[tokio::main]
