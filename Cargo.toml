@@ -37,7 +37,6 @@ exclude = [
     "/amate/",
     "/kuebiko/",
     "/kamui/",
-    "/rustls-pure/",
     "/furnace-demo/",
 ]
 
@@ -46,11 +45,11 @@ exclude = [
 features = ["grpc", "tls", "image", "llm"]
 
 [workspace]
-members = [".", "amate", "kuebiko", "kamui", "rustls-pure", "furnace-burn", "furnace-cli", "furnace-candle", "furnace-demo"]
+members = [".", "amate", "kuebiko", "kamui", "furnace-burn", "furnace-cli", "furnace-candle", "furnace-demo"]
 # `cargo build`, `cargo test` and `cargo clippy` at the root cover the server and its parts, the
 # Burn adapter and the `furnace` command; furnace-candle (candle from git) only with
 # `-p furnace-candle`; furnace-demo (the LLM feature on) only with `-p furnace-demo`
-default-members = [".", "amate", "kuebiko", "kamui", "rustls-pure", "furnace-burn", "furnace-cli"]
+default-members = [".", "amate", "kuebiko", "kamui", "furnace-burn", "furnace-cli"]
 # Benchmarks with their own workspaces, lockfiles and targets, and the helpers they share
 exclude = ["benches/burn", "benches/common", "benches/compare", "benches/llm", "benches/nerve"]
 
@@ -67,7 +66,7 @@ image = ["dep:image"]
 grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost", "dep:tonic-prost-build", "dep:protox", "dep:tokio-stream"]
 # TLS for HTTP and gRPC (`--tls-cert`, `--tls-key`, `--tls-client-ca`), and `https://` for the
 # nervous system's outbound calls (webhooks, SSE receptors): rustls with rustls-pure, the
-# pure-Rust crypto provider built on RustCrypto (rustls-pure/)
+# pure-Rust crypto provider built on RustCrypto (https://github.com/Gilfeather/rustls-pure)
 tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pure", "dep:webpki-roots"]
 # Serve LLMs: OpenAI-compatible chat and completions with streaming, behind the `LlmEngine` and
 # `StepModel` traits (src/llm). Engines come from other crates, such as furnace-candle.
@@ -110,8 +109,8 @@ tokio-stream = { version = "0.1", optional = true }
 # crypto provider of RustCrypto primitives
 rustls = { version = "0.23.46", default-features = false, features = ["std", "logging"], optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging"], optional = true }
-# Versioned on its own, apart from the workspace's other crates
-rustls-pure = { path = "rustls-pure", version = "0.15", optional = true }
+# Its own repository and releases (https://github.com/Gilfeather/rustls-pure)
+rustls-pure = { version = "0.15", optional = true }
 # The certificate authorities an `https://` webhook trusts by default: Mozilla's, as data
 webpki-roots = { version = "1.0.10", optional = true }
 # LLM serving (feature `llm`). tokenizers without its defaults: they build Oniguruma (C) and

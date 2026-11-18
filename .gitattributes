@@ -1,5 +1,3 @@
 # The Dockerfile uses backslash line continuations, which CRLF line endings break
 Dockerfile text eol=lf
 *.sh text eol=lf
-# Wycheproof test vectors: byte-for-byte as upstream publishes them
-rustls-pure/wycheproof/** -text

@@ -4,8 +4,7 @@ name: Miri
 # rules: out of bounds, use after free, double free, misaligned access, data races, leaks and
 # aliasing. That code is kamui's allocator (its unit tests, and its integration tests with
 # kamui as the process's global allocator). The rest of the workspace has no unsafe of its
-# own but furnace-burn's weight mapping, which Miri cannot run (it maps a file), and
-# rustls-pure forbids it. Both aliasing models Rust may adopt: Stacked Borrows, and Tree
+# own but furnace-burn's weight mapping, which Miri cannot run (it maps a file). Both aliasing models Rust may adopt: Stacked Borrows, and Tree
 # Borrows. Strict provenance under both: a pointer is never made up from an integer. On pull
 # requests that change kamui's code or what it is built from (.github/relevance), and weekly on
 # main when kamui changed since the last successful weekly run. Every pull request runs `Miri

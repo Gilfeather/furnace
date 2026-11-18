@@ -42,8 +42,6 @@ examples/*/output/
 resnet18_*.json
 *_test.json
 *_sample.json
-# except the Wycheproof vectors the TLS tests read
-!/rustls-pure/wycheproof/*_test.json
 
 # Temporary files
 *.tmp
@@ -109,8 +107,6 @@ secrets/
 # ...except the test-only certificates the TLS tests use (see tests/fixtures/tls/generate.sh)
 !tests/fixtures/tls/*.crt
 !tests/fixtures/tls/*.key
-!rustls-pure/testdata/*.crt
-!rustls-pure/testdata/*.key
 
 # Local development
 .local/

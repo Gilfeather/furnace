@@ -411,7 +411,7 @@ load (e.g. caught half-written), the error is logged and the previous certificat
 
 The TLS stack is pure Rust like the rest of Furnace: rustls for the protocol, and a small crypto
 provider of our own over [RustCrypto](https://github.com/RustCrypto) primitives,
-[rustls-pure](../rustls-pure/README.md), a crate of its own. It is deliberately narrow:
+[rustls-pure](https://github.com/Gilfeather/rustls-pure), a crate with a repository of its own. It is deliberately narrow:
 
 | | Supported |
 |---|---|
@@ -433,11 +433,11 @@ it. It is checked mechanically instead: its tests run Google's
 HMAC and HKDF), which must accept the valid inputs and refuse the crafted bad ones: forged
 signatures, points off the curve, altered tags, low-order keys. It is also checked in full
 handshakes, with random input, and against OpenSSL, GnuTLS and curl ([rustls-pure's
-tests](../rustls-pure/README.md#tests)). Further tests pin what the vectors cannot see: each
+tests](https://github.com/Gilfeather/rustls-pure#tests)). Further tests pin what the vectors cannot see: each
 record's nonce is unique, a record that is altered, replayed or reordered does not decrypt, the
 randomness comes from the operating system, and keys are wiped when dropped. The tag comparisons
 happen in the AEAD crates and rustls, in constant time. See
-[rustls-pure/src/tests.rs](../rustls-pure/src/tests.rs).
+[rustls-pure's src/tests.rs](https://github.com/Gilfeather/rustls-pure/blob/main/src/tests.rs).
 
 With `tritonclient.grpc`, connect with `ssl=True` and the CA (and, for mutual TLS, the client
 key and certificate): `InferenceServerClient(url="host:8001", ssl=True,

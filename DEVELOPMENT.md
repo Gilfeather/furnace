@@ -88,7 +88,7 @@ cargo deny check
 ## When CI Runs
 
 - **Pull requests to main** run every verification workflow: CI, Kani, TLA+, Loom, Miri,
-  rustls-pure, Security Audit and KServe end-to-end. Each starts with a `Changed files` job
+  Security Audit and KServe end-to-end. Each starts with a `Changed files` job
   (`bash .github/changed-files.sh <workflow>`) that decides which of its jobs the pull request
   needs, from the diff since the pull request's merge base and the rules in
   `.github/relevance`. Each ends in one gate job, `<Workflow> required`, which passes when
@@ -105,10 +105,8 @@ cargo deny check
   nothing, since the lockfile and pinned tools would give the same result and the earlier run
   shows it. Kani's pull request harnesses have no schedule: they were proved on the pull
   request that merged them. Weekly and in full, since what they check changes outside the
-  repository: rustls-pure (the newest rustls, its MSRV, interoperability against the system's
-  TLS tools), Security Audit (new advisories; these alone also on the other days, for the
-  workspace and the bench harnesses), KServe end-to-end (downloads the release and KServe), the
-  constant-time tests (with the machine-code check; the compiler's code may change).
+  repository: Security Audit (new advisories; these alone also on the other days, for the
+  workspace and the bench harnesses) and KServe end-to-end (downloads the release and KServe).
   Scheduled runs are never cancelled. The README's CI badge shows the last nightly CI run on
   main.
 - **By hand only:** the benchmarks (`bench.yml`); nothing measures on a schedule or a release.
@@ -133,13 +131,10 @@ reads:
 - **Docs, licences and changelogs run nothing**, except in CI: the Markdown files whose Rust
   examples compile as doc-tests (README.md, CONTRIBUTING.md, examples/README.md, docs/*.md)
   and docs/openapi.json, which the server's tests compare with its routes.
-- **Each check counts only the files it reads.** Kani a package's proofs: `rustls-pure/src`,
-  `kamui/src`, and furnace-server's files with proofs (`src/tensor.rs`, `src/model.rs`,
+- **Each check counts only the files it reads.** Kani a package's proofs: `kamui/src`, and furnace-server's files with proofs (`src/tensor.rs`, `src/model.rs`,
   `src/api/infer.rs`, `src/json_fast.rs`, `src/nerve/wire.rs`) and `build.rs`. Miri
   `kamui/src` and `kamui/tests`. Loom `amate/src` and `src/nerve`, each for its own models. TLA+
-  `specs/`. rustls-pure's machine-code check `rustls-pure/src` and `ct-asm.sh`; its
-  interoperability tests `rustls-pure/src`, `rustls-pure/examples` and `rustls-pure/interop`.
-  CI everything else in the workspace, but other workflows' files, `specs/`, `deploy/`,
+  `specs/`. CI everything else in the workspace, but other workflows' files, `specs/`, `deploy/`,
   `benches/` (workspaces of their own, which the nightly run checks), `dev/` and packaging.
   cargo-deny the lockfile, the workspace's manifests and `deny.toml` (the advisories the bench
   harnesses' lockfiles too); CodeQL the workspace's Rust code.
@@ -155,24 +150,16 @@ reads:
 
   | Check | Dependencies it runs |
   | --- | --- |
-  | Kani kamui, Kani furnace-server, rustls-pure's machine-code check | none: their proofs and checked functions call std only |
-  | Kani rustls-pure | `rustls` (SharedSecret) and `zeroize` (its wiping) |
+  | Kani kamui, Kani furnace-server | none: their proofs call std only |
   | Loom amate | `loom` |
   | Loom furnace-server | `loom`, `tokio` (the nerve's channels), `bytes`, `tracing` |
   | Miri | all of kamui's: its tests run proptest and its random number generator |
-  | rustls-pure's interoperability tests and target builds, CI's tests (Wycheproof among them) | all of rustls-pure's, or the workspace's |
-  | rustls-pure's constant-time tests | all of rustls-pure's |
+  | CI's tests | all of the workspace's |
 
-  So a crypto-bigint update runs rustls-pure's interoperability, target builds and timing
-  tests and CI, and no proof; a tokio update runs the nerve's Loom models and CI. A Kani
+  So a crypto-bigint update runs CI and no proof; a tokio update runs the nerve's Loom models and CI. A Kani
   version change is in the workflow file, which counts for all of its jobs. A crate the list
   names that the package no longer reaches fails the run, so the lists cannot go stale
   quietly; a proof that starts calling a new dependency needs it added.
-- **The constant-time tests run on a pull request only when rustls-pure's dependencies
-  change** (a crypto crate's security update is timed before it is merged), and weekly. Not on
-  code changes: timing on shared runners is slow and noisy, and the machine-code check and the
-  proofs cover rustls-pure's own code. They have no `required` check: a noisy runner can fail
-  the control, so the result shows on the pull request without blocking it.
 - **The deploy manifests count by more than their versions.** KServe end-to-end runs when
   `deploy/kserve` changes other than in its version numbers (`~` in the rules): a release's
   new image tag and download URL name what is published only after the merge.
@@ -195,7 +182,7 @@ together.
 
 `main` requires the gate jobs to pass before a pull request is merged (Settings → Branches →
 `main` → Require status checks to pass): `CI required`, `Kani required`, `TLA+ required`,
-`Loom required`, `Miri required`, `rustls-pure required`, `Security Audit required` and
+`Loom required`, `Miri required`, `Security Audit required` and
 `KServe end-to-end required`. The branch need not be up to date with main first.
 
 ## Local Development
@@ -241,42 +228,23 @@ cargo bench -p furnace-burn --features onnx
 ## Release Process
 
 1. Create release branch: `git checkout -b release/v1.0.0`
-2. Update the version in `Cargo.toml`, `amate/Cargo.toml`, `kuebiko/Cargo.toml`, `kamui/Cargo.toml`, `furnace-burn/Cargo.toml` and `furnace-cli/Cargo.toml` (and their dependencies on each other). Not rustls-pure's: it has its own (below)
+2. Update the version in `Cargo.toml`, `amate/Cargo.toml`, `kuebiko/Cargo.toml`, `kamui/Cargo.toml`, `furnace-burn/Cargo.toml` and `furnace-cli/Cargo.toml` (and their dependencies on each other)
 3. Update `CHANGELOG.md`
 4. Create PR to main
 5. After merge, create GitHub release
 6. GitHub Actions will build and publish binaries
 
-The release workflow (on a `v*` tag) publishes amate, kuebiko, kamui, rustls-pure,
+The release workflow (on a `v*` tag) publishes amate, kuebiko, kamui,
 furnace-server, furnace-burn and furnace-cli to crates.io in that order, through crates.io's
-Trusted Publishing (no token stored in the repository): amate, kuebiko, kamui and rustls-pure
-only when the repository variable `PUBLISH_PART_CRATES` is `true`, furnace-burn and furnace-cli
+Trusted Publishing (no token stored in the repository): amate, kuebiko and kamui only when the repository variable `PUBLISH_PART_CRATES` is `true`, furnace-burn and furnace-cli
 only when `PUBLISH_BURN_CRATES` is. A crate whose version is on crates.io already is skipped
 (`.github/publish-crate.sh`), so a version published by hand before the tag does not fail the
-release. furnace-server depends on amate, kuebiko and rustls-pure (with `tls`), furnace-cli on
-kamui: their versions must be on crates.io before the workflow reaches those crates, published
-by the workflow itself or by hand.
-
-### Releasing rustls-pure
-
-rustls-pure has a version of its own, apart from the other crates, and is released only when
-it changes (a fix, a new minimum Rust or rustls version, a README that crates.io should show):
-
-1. In a PR: raise `version` in `rustls-pure/Cargo.toml` (before 1.0, a patch for fixes and
-   docs, a minor for anything breaking, a higher MSRV or a new rustls minor version), and
-   move its entries in `rustls-pure/CHANGELOG.md` under that version with the date. If
-   Furnace needs the new version, raise furnace-server's `rustls-pure` dependency too.
-2. Merge, then tag that `main` commit and push the tag:
-   `git tag rustls-pure-v0.14.1 && git push origin rustls-pure-v0.14.1`.
-3. `.github/workflows/rustls-pure-release.yml` checks that the tag matches the version, runs
-   the tests and publishes it through Trusted Publishing (`.github/publish-crate.sh` skips a
-   version already on crates.io).
-
-The furnace release workflow also publishes rustls-pure, but only a version not on crates.io
-yet, so a Furnace release does not bump or republish it. Trusted Publishing for rustls-pure
-needs two entries on crates.io (below): workflow `release.yml` and workflow
-`rustls-pure-release.yml`. A vulnerability fix follows
-[rustls-pure/SECURITY.md](rustls-pure/SECURITY.md).
+release. furnace-server depends on amate and kuebiko, furnace-cli on kamui: their versions must
+be on crates.io before the workflow reaches those crates, published by the workflow itself or by
+hand. With `tls`, furnace-server also depends on rustls-pure, which has a repository and
+releases of its own ([Gilfeather/rustls-pure](https://github.com/Gilfeather/rustls-pure)); to
+use a new version of it, raise furnace-server's `rustls-pure` dependency once it is on
+crates.io.
 
 ### Publishing a new crate for the first time
 
@@ -286,13 +254,13 @@ Tokens, scope `publish-new`). Whether that comes before or after the tag depends
 new crate sits:
 
 - **A crate that furnace-server or furnace-cli depends on** (amate, kuebiko and kamui in
-  0.13.0, rustls-pure in 0.14.0): by hand *before* the tag, or the workflow fails at
-  furnace-server. A part that depends on nothing else of the workspace, such as rustls-pure,
-  can instead be published at its current version as soon as it is on `main` (steps 2 to 4).
+  0.13.0): by hand *before* the tag, or the workflow fails at furnace-server. A part that
+  depends on nothing else of the workspace can instead be published at its current version as
+  soon as it is on `main` (steps 2 to 4).
   1. Merge the release PR (versions bumped).
   2. `cargo login` with the token, then, from an up-to-date `main`:
      `cargo publish --locked -p amate`, `cargo publish --locked -p kuebiko`,
-     `cargo publish --locked -p kamui` (for rustls-pure: `cargo publish --locked -p rustls-pure`).
+     `cargo publish --locked -p kamui`.
   3. Trusted Publishing for each (below), then
      `gh variable set PUBLISH_PART_CRATES --body true` (already set since 0.13.0).
   4. Revoke the API token (`cargo logout`, and delete it on crates.io).
@@ -309,4 +277,4 @@ new crate sits:
 
 Trusted Publishing on crates.io, for each new crate: Settings → Trusted Publishing → Add →
 GitHub, with repository owner `Gilfeather`, repository name `furnace`, workflow filename
-`release.yml` and no environment (rustls-pure: a second entry with `rustls-pure-release.yml`).
+`release.yml` and no environment.

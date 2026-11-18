@@ -1,13 +1,12 @@
 name: Kani
 
-# Kani's bounded model checking of the code that takes untrusted input or is unsafe:
-# rustls-pure's checks of the peer's key shares, records and signatures before they reach the
-# RustCrypto crates; kamui's allocator (its unsafe paths on real memory, its cache's bookkeeping
-# from any state); the tensor shape and size arithmetic; the raw and JSON input decoders; and
-# the nerve HTTP client's response parsing. The proofs are the `#[cfg(kani)] mod verification`
+# Kani's bounded model checking of the code that takes untrusted input or is unsafe: kamui's
+# allocator (its unsafe paths on real memory, its cache's bookkeeping from any state); the
+# tensor shape and size arithmetic; the raw and JSON input decoders; and the nerve HTTP
+# client's response parsing. The proofs are the `#[cfg(kani)] mod verification`
 # next to the code; each is bounded with `#[kani::unwind]` so it stays within minutes. Kani runs
 # on Linux only. Locally: `cargo install --locked kani-verifier --version 0.68.0 && cargo kani
-# setup`, then `cargo kani -p rustls-pure`, `-p kamui` or `-p furnace-server` (with
+# setup`, then `cargo kani -p kamui` or `-p furnace-server` (with
 # `--harness <name> --exact` for one proof).
 #
 # Every pull request runs `Kani required`, the job to require before merging. A package's proofs
@@ -37,7 +36,6 @@ jobs:
     name: Changed files
     runs-on: ubuntu-latest
     outputs:
-      rustls-pure: ${{ steps.changes.outputs['rustls-pure'] }}
       kamui: ${{ steps.changes.outputs.kamui }}
       server: ${{ steps.changes.outputs.server }}
     steps:
@@ -53,26 +51,6 @@ jobs:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: bash .github/changed-files.sh kani
-
-  kani:
-    name: Kani (${{ matrix.package }})
-    needs: changes
-    if: needs.changes.outputs['rustls-pure'] == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        package: [rustls-pure]
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-
-    - name: Prove
-      uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
-      with:
-        kani-version: '0.68.0'
-        args: -p ${{ matrix.package }}
 
   # kamui's and furnace-server's harnesses that take a minute or two, one job per package that
   # compiles the package once and proves them one after another; the slow ones one per job, side
@@ -166,8 +144,7 @@ jobs:
 
   # Every `#[kani::proof]` and `#[kani::proof_for_contract]` of kamui and furnace-server is in a
   # job above (a `--harness` line or a matrix row), in kani-nightly.yml's matrix, or in the parked
-  # list below (rustls-pure's run all at once, in the first job). On every pull request: a new
-  # harness can be anywhere in src.
+  # list below. On every pull request: a new harness can be anywhere in src.
   check-list:
     name: Every Kani harness runs
     runs-on: ubuntu-latest
@@ -202,7 +179,7 @@ jobs:
   required:
     name: Kani required
     if: always()
-    needs: [changes, kani, quick-kamui, quick-server, harness-server, check-list]
+    needs: [changes, quick-kamui, quick-server, harness-server, check-list]
     runs-on: ubuntu-latest
     steps:
     - name: Every job passed or was skipped
