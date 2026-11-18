@@ -11,7 +11,13 @@ set -euo pipefail
 
 target_dir="${CARGO_TARGET_DIR:-target}/ct-asm"
 CARGO_TARGET_DIR="$target_dir" cargo rustc --quiet --release -p rustls-pure --lib -- --emit asm
-asm=$(ls -t "$target_dir"/release/deps/rustls_pure-*.s | head -1)
+# Cargo 1.100 moved the output to release/build/rustls-pure/<hash>/out/, older ones wrote it
+# to release/deps/: take the newest anywhere under the target directory
+asm=$(find "$target_dir/release" -name 'rustls_pure-*.s' -exec ls -t {} + | head -1)
+if [ -z "$asm" ]; then
+  echo "no rustls_pure-*.s under $target_dir/release" >&2
+  exit 1
+fi
 
 case "$(uname -m)" in
   x86_64)
