@@ -27,9 +27,8 @@
 # run shows the result; running it again would reproduce it), and everything otherwise.
 # `<workflow> schedule since-last-success` does the same, but checks only the changes since the
 # workflow's last successful scheduled run. Without either line a scheduled run checks
-# everything: the checks whose point is what changes outside the repository (new advisories,
-# the newest rustls, the tools the interoperability tests run against, the compiler's code for
-# the timing tests). Manual runs check everything.
+# everything: the checks whose point is what changes outside the repository (new advisories).
+# Manual runs check everything.
 #
 # The docs, licences and changelogs are left out everywhere, but for CI's doc-tests: the Markdown
 # files it compiles the Rust examples of (src/lib.rs, furnace-burn's and furnace-candle's
@@ -42,7 +41,6 @@
 ci relevant ** !**.md !**/LICENSE* !**/CHANGELOG* !docs/**
 ci relevant README.md CONTRIBUTING.md examples/README.md docs/*.md docs/openapi.json
 ci relevant !.github/** !specs/** !deploy/** !benches/** !dev/** !packaging/**
-ci relevant !rustls-pure/interop/** !rustls-pure/ct-asm.sh
 ci relevant !Dockerfile !default.nix !flake.nix !deny.toml !.gitignore !.dockerignore
 # The self-test of these rules
 ci selftest .github/relevance .github/changed-files.sh .github/changed-files-test.sh
@@ -52,9 +50,7 @@ ci selftest .github/dependency-tree.py
 ci schedule once-per-commit
 
 # Kani: the proofs sit next to the code they check, in these files. kamui's and furnace-server's
-# proofs call their own code and std only (serde's and thiserror's derives are not called);
-# rustls-pure's call its own checks, rustls's SharedSecret and zeroize's wiping
-kani rustls-pure crate:rustls-pure=rustls,zeroize rustls-pure/src/**
+# proofs call their own code and std only (serde's and thiserror's derives are not called)
 kani kamui crate:kamui= kamui/src/**
 kani server crate:furnace-server= build.rs src/tensor.rs src/model.rs src/api/infer.rs
 kani server src/json_fast.rs src/nerve/wire.rs
@@ -77,20 +73,6 @@ loom schedule since-last-success
 # TLA+: TLC reads the specs and their models only
 tla relevant specs/** !**.md
 tla schedule since-last-success
-
-# rustls-pure: the check of its own machine code (two functions that call nothing); the
-# interoperability tests (the examples are the client and server the script drives), which run
-# every crypto dependency; the builds for other targets
-rustls-pure machine-code crate:rustls-pure= rustls-pure/src/** rustls-pure/ct-asm.sh
-rustls-pure interop crate:rustls-pure rustls-pure/src/** rustls-pure/examples/**
-rustls-pure interop rustls-pure/interop/**
-rustls-pure targets crate:rustls-pure rustls-pure/src/**
-
-# rustls-pure's constant-time tests: timing every crypto dependency's code that handles a
-# secret. On a pull request only when rustls-pure's dependencies change (a code change is
-# checked by the machine-code check and the proofs; the timing is too slow and noisy for every
-# one) or the timing tests themselves; weekly in full.
-rustls-pure-ct timing crate:rustls-pure rustls-pure/src/tests/constant_time.rs
 
 # Security Audit: the advisories read the lockfiles of the workspace and of the benchmark
 # harnesses (workspaces of their own), and deny.toml; the rest of cargo-deny the workspace's

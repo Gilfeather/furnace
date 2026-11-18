@@ -8,8 +8,8 @@ public issue. Include what is affected, how to reproduce it, and the impact you 
 should get a first answer within a week. Once a fix is released, the advisory is published with
 credit to you, unless you prefer otherwise.
 
-rustls-pure, the TLS crypto provider (released apart from Furnace), has a policy of its own:
-[rustls-pure/SECURITY.md](rustls-pure/SECURITY.md).
+rustls-pure, the TLS crypto provider, has a repository and a policy of its own: report its
+vulnerabilities at [https://github.com/Gilfeather/rustls-pure/security](https://github.com/Gilfeather/rustls-pure/security).
 
 ## Supported versions
 

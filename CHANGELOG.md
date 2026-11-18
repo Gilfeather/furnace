@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not pass fails the command for good (`ActError::Fatal`), without retries.
 - `BuildError::Certificate`: the CA file given to `Webhook::trust` cannot be used.
 
+### Changed
+- rustls-pure moved to a repository of its own
+  ([Gilfeather/rustls-pure](https://github.com/Gilfeather/rustls-pure)); furnace-server takes it from crates.io.
+
 ## [0.16.2] - 2026-10-27
 
 The `furnace` binary, the container image and the Homebrew build pick up crypto-bigint 0.7.6.
@@ -129,7 +133,7 @@ back up and stop on request. Also less waste on every crate's hot path.
 - A brain's commands reach only the actions declared for it (`FabricBuilder::action` or
   `Spine::action`); the others are counted as unrouted.
 - `rustls-pure` has a version of its own and is released when it changes, apart from the
-  other crates; its history is in [rustls-pure/CHANGELOG.md](rustls-pure/CHANGELOG.md).
+  other crates; its history is in [its CHANGELOG.md](https://github.com/Gilfeather/rustls-pure/blob/main/CHANGELOG.md).
   furnace-server depends on `rustls-pure` 0.15.
 - TLS (`--features tls`) offers the post-quantum key exchange X25519MLKEM768 first, from
   rustls-pure 0.15; clients without it get X25519, P-256 or P-384 as before.

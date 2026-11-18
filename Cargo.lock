@@ -6757,6 +6757,8 @@ dependencies = [
 [[package]]
 name = "rustls-pure"
 version = "0.15.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cb411ce187caac7001e460c965ed5fdc761afa105408bc668767ee5c291cd28"
 dependencies = [
  "aes-gcm 0.11.1",
  "chacha20poly1305",
@@ -6766,9 +6768,7 @@ dependencies = [
  "ml-kem",
  "p256",
  "p384",
- "proptest",
  "rustls",
- "serde_json",
  "sha2 0.11.1",
  "x25519-dalek",
 ]

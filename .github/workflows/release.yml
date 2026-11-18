@@ -232,7 +232,8 @@ jobs:
         toolchain: stable
 
     # In the order they depend on each other: furnace-server needs amate and kuebiko of the
-    # same version, and rustls-pure of the version it names, on crates.io; furnace-burn needs
+    # same version on crates.io (rustls-pure, released from its own repository, is there
+    # already); furnace-burn needs
     # furnace-server, furnace-cli needs furnace-burn and kamui. `cargo publish` waits until
     # the crate it uploaded is in the index before it returns, so the next one finds it. Each
     # crate gets its own token: a Trusted Publishing token expires after 30 minutes, and
@@ -242,9 +243,7 @@ jobs:
     #
     # furnace's parts. Like furnace-burn below, their first version is published by hand;
     # PUBLISH_PART_CRATES=true then publishes them with every release. Until they are on
-    # crates.io, furnace-server cannot be. rustls-pure has a version of its own and is mostly
-    # released on its own (rustls-pure-release.yml); here it is published only when its version
-    # is not on crates.io yet, and skipped otherwise.
+    # crates.io, furnace-server cannot be.
     - name: Authenticate with crates.io (amate)
       if: vars.PUBLISH_PART_CRATES == 'true'
       id: auth-amate
@@ -277,17 +276,6 @@ jobs:
       env:
         CARGO_REGISTRY_TOKEN: ${{ steps.auth-kamui.outputs.token }}
       run: bash .github/publish-crate.sh kamui
-
-    - name: Authenticate with crates.io (rustls-pure)
-      if: vars.PUBLISH_PART_CRATES == 'true'
-      id: auth-rustls-pure
-      uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
-
-    - name: Publish rustls-pure
-      if: vars.PUBLISH_PART_CRATES == 'true'
-      env:
-        CARGO_REGISTRY_TOKEN: ${{ steps.auth-rustls-pure.outputs.token }}
-      run: bash .github/publish-crate.sh rustls-pure
 
     - name: Authenticate with crates.io (furnace-server)
       id: auth-server

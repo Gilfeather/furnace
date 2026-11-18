@@ -106,9 +106,9 @@ commit_changes() {
         sed -i '/^name = "kamui"/{n;s/$/\ndependencies = [\n "libm",\n]/}' Cargo.lock ;;
       @update-tokio)
         sed -i 's/^version = "1\.40\.0"/version = "1.40.1"/; s/ccc0/ccc1/' Cargo.lock ;;
-      @update-crypto-bigint)  # a crypto crate rustls-pure's proofs and machine code never call
+      @update-crypto-bigint)  # a crate only rustls-pure reaches
         sed -i 's/^version = "0\.7\.0"/version = "0.7.1"/; s/aaa0/aaa1/' Cargo.lock ;;
-      @update-zeroize)  # a crate rustls-pure's proofs call
+      @update-zeroize)  # a crate rustls reaches
         sed -i 's/999a/999b/' Cargo.lock ;;
       @kamui-feature)
         printf '\n[features]\nstd = []\n' >> kamui/Cargo.toml ;;
@@ -179,29 +179,29 @@ check_run() {
 }
 
 # Docs, licences and changelogs alone run nothing, but CI's doc-tests
-check 'LICENSE kamui/LICENSE rustls-pure/LICENSE CHANGELOG.md rustls-pure/CHANGELOG.md kamui/README.md rustls-pure/README.md specs/README.md deploy/README.md docs/images/a.png dev/AUDIT.md' ''
+check 'LICENSE kamui/LICENSE CHANGELOG.md kamui/README.md specs/README.md deploy/README.md docs/images/a.png dev/AUDIT.md' ''
 check 'README.md' 'ci.relevant'
 check 'docs/API.md' 'ci.relevant'
 check 'docs/openapi.json' 'ci.relevant'
-# A pull request like one that ships licence files, docs and a change to rustls-pure's code
-check 'kamui/LICENSE amate/LICENSE CHANGELOG.md rustls-pure/README.md rustls-pure/src/lib.rs .github/workflows/rustls-pure.yml' \
-  'ci.relevant kani.rustls-pure rustls-pure.machine-code rustls-pure.interop rustls-pure.targets security.codeql'
+# A pull request like one that ships licence files, docs and a change to kamui's code
+check 'kamui/LICENSE amate/LICENSE CHANGELOG.md kamui/README.md kamui/src/lib.rs .github/workflows/miri.yml' \
+  'ci.relevant kani.kamui kani-nightly.kamui miri.relevant security.codeql'
 # Manifests and the lockfile count by what the package is built from
 check '@bump-versions' 'ci.relevant security.advisories security.deny security.dependency-review'
 # A release: versions in the manifests, the lockfile, the deploy manifests and the README run
-# only the cheap checks; no proof, Miri, Loom, interoperability or KServe
+# only the cheap checks; no proof, Miri, Loom or KServe
 check '@release' 'ci.relevant security.advisories security.deny security.dependency-review'
 # A dependency counts for the checks that run its code: a new one of kamui for Miri, which runs
 # kamui's tests, not for the proofs of kamui's own code
 check '@kamui-dependency' 'ci.relevant miri.relevant security.advisories security.deny security.dependency-review security.codeql'
 # tokio for the nerve's Loom models, which build its channels; no proof calls it
 check '@update-tokio' 'ci.relevant loom.server security.advisories security.deny security.dependency-review security.codeql'
-# crypto-bigint for the tests that run rustls-pure's crypto (interoperability, the target builds,
-# the timing tests); not for the proofs or the machine-code check, which never call it
-check '@update-crypto-bigint' 'ci.relevant rustls-pure.interop rustls-pure.targets rustls-pure-ct.timing security.advisories security.deny security.dependency-review security.codeql'
-check '@update-zeroize' 'ci.relevant kani.rustls-pure rustls-pure.interop rustls-pure.targets rustls-pure-ct.timing security.advisories security.deny security.dependency-review security.codeql'
+# Crates that only rustls-pure and rustls reach: no proof, model or Miri test runs their
+# code
+check '@update-crypto-bigint' 'ci.relevant security.advisories security.deny security.dependency-review security.codeql'
+check '@update-zeroize' 'ci.relevant security.advisories security.deny security.dependency-review security.codeql'
 check '@kamui-feature' 'ci.relevant kani.kamui kani-nightly.kamui miri.relevant security.deny security.dependency-review security.codeql'
-check '@profile' 'ci.relevant kani.rustls-pure kani.kamui kani.server kani-nightly.kamui kani-nightly.server miri.relevant loom.amate loom.server rustls-pure.machine-code rustls-pure.interop rustls-pure.targets rustls-pure-ct.timing security.deny security.dependency-review security.codeql'
+check '@profile' 'ci.relevant kani.kamui kani.server kani-nightly.kamui kani-nightly.server miri.relevant loom.amate loom.server security.deny security.dependency-review security.codeql'
 # Each check's own files
 check 'kamui/src/lib.rs' 'ci.relevant kani.kamui kani-nightly.kamui miri.relevant security.codeql'
 check 'kamui/tests/global.rs' 'ci.relevant miri.relevant security.codeql'
@@ -211,11 +211,6 @@ check 'src/nerve/wire.rs' 'ci.relevant kani.server kani-nightly.server loom.serv
 check 'src/api.rs' 'ci.relevant security.codeql'
 check 'build.rs' 'ci.relevant kani.server kani-nightly.server loom.server security.codeql'
 check 'specs/Motor.tla' 'tla.relevant'
-check 'rustls-pure/ct-asm.sh' 'rustls-pure.machine-code'
-check 'rustls-pure/src/tests/constant_time.rs' 'ci.relevant kani.rustls-pure rustls-pure.machine-code rustls-pure.interop rustls-pure.targets rustls-pure-ct.timing security.codeql'
-check 'rustls-pure/interop/run.sh' 'rustls-pure.interop'
-check 'rustls-pure/examples/interop-client.rs' 'ci.relevant rustls-pure.interop security.codeql'
-check 'rustls-pure/wycheproof/x.json rustls-pure/tests/handshake.rs' 'ci.relevant security.codeql'
 check 'deploy/kserve/servingruntime.yaml' 'kserve-e2e.relevant'
 check '@kserve-resources' 'kserve-e2e.relevant'
 check 'deploy/helm/furnace/values.yaml' ''
@@ -226,9 +221,8 @@ check 'benches/nerve/src/main.rs benches/nerve/Cargo.toml' 'security.dependency-
 check 'benches/compare/Cargo.lock' 'security.advisories security.dependency-review'
 check 'furnace-burn/vendor/burn-flex/src/lib.rs' 'ci.relevant'
 # A workflow's own file runs all of it, and no other workflow
-check '.github/workflows/kani.yml' 'kani.rustls-pure kani.kamui kani.server'
+check '.github/workflows/kani.yml' 'kani.kamui kani.server'
 check '.github/workflows/kserve-e2e.yml' 'kserve-e2e.relevant'
-check '.github/workflows/rustls-pure-ct.yml' 'rustls-pure-ct.timing'
 check '.github/workflows/release.yml .github/workflows/bench.yml' ''
 check '.github/workflows/soak.yml' 'soak.run'
 check '.github/workflows/ci.yml' 'ci.relevant ci.selftest'
@@ -253,7 +247,6 @@ check_run schedule          ci           -    -             'README.md'         
 check_run schedule          soak         1234 -             'src/api.rs'        ''
 check_run schedule          soak         -    -             'src/api.rs'        'soak.run'
 check_run schedule          security     1234 -             'README.md'         'security.advisories security.deny security.dependency-review security.codeql'
-check_run schedule          rustls-pure  1234 -             'README.md'         'rustls-pure.machine-code rustls-pure.interop rustls-pure.targets'
 check_run workflow_dispatch kani-nightly 1234 base          'README.md'         'kani-nightly.kamui kani-nightly.server'
 
 if [ "$failed" = 0 ]; then echo "every example as expected"; fi

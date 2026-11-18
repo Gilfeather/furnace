@@ -14,7 +14,8 @@ promise of dates.
   migration path, and the API stays small.
 - The published crates (furnace-server, furnace-burn, furnace-cli and the parts amate, kuebiko
   and kamui) share one version and are released together. rustls-pure, the TLS crypto
-  provider, has a version of its own and is released when it changes.
+  provider, has a repository and a version of its own
+  ([Gilfeather/rustls-pure](https://github.com/Gilfeather/rustls-pure)) and is released when it changes.
 
 ## What 1.0 freezes
 
