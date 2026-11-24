@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- RUSTSEC-2026-0592: `url` 2.5.8 and earlier overflow the stack in `Url::origin()` on nested
+  `blob:` URLs. The lockfile has 2.5.9; a library user's own lockfile needs
+  `cargo update -p url`.
+
 ### Added
 - `https://` webhooks and SSE receptors (feature `tls`). The nervous system's HTTP client speaks
   TLS 1.3 through rustls and rustls-pure, as the server does, and trusts Mozilla's certificate
